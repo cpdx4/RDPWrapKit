@@ -7,6 +7,9 @@ RDPWrapKit bundles RDPWrap and TermWrap payloads and an Inno Setup script to pro
 - Components: Inno Setup script and payload folders containing the binaries/resources.
 
 **How to Install**
+- Head over to [Releases](https://github.com/cpdx4/RDPWrapKit/releases) and download the ".exe" file
+  - Your browser or Antivirus might need to be modified to allow it to download.
+  - It is virus free. If worried, you can check the source code or build it yourself (instructions at bottom)
 - Run the installer and follow prompts.
 
 ### This app allows the install of RDP Wrapper with TermWrap and creating accounts
@@ -20,6 +23,9 @@ RDPWrapKit bundles RDPWrap and TermWrap payloads and an Inno Setup script to pro
 
 ### A local RDP shortcut with embedded credentials is placed on the desktop for each user created
 <img width="571" height="346" alt="Installer_DesktopIcon" src="https://github.com/user-attachments/assets/15e7947b-9a11-42b3-b9c7-5f081ce2947f" />
+
+
+
 
 
 ## If you want to build this yourself (Advanced, not required for most people):
