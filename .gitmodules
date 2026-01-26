@@ -1,3 +1,0 @@
-[submodule "third_party/termwrap"]
-	path = third_party/termwrap
-	url = https://github.com/llccd/TermWrap
