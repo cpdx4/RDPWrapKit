@@ -6,10 +6,23 @@ RDPWrapKit bundles RDPWrap and TermWrap payloads and an Inno Setup script to pro
 - Purpose: Build an easy-to-run installer that deploys RDPWrap and TermWrap components on Windows.
 - Components: Inno Setup script and payload folders containing the binaries/resources.
 
-**Repository Structure**
-- RDPWrapKit.iss — Inno Setup script to build the installer. See [RDPWrapKit.iss](RDPWrapKit.iss)
-- payload/ — Files included by the installer (RDPWrap, TermWrap). See [payload/](payload/)
-- Output/ — Build artifacts produced by the Inno Setup compiler.
+**How to Install**
+- Run the installer and follow prompts.
+
+### This app allows the install of RDP Wrapper with TermWrap and creating accounts
+<img width="598" height="464" alt="Installer_SetupOptions" src="https://github.com/user-attachments/assets/5f2e9b9b-2633-44d4-bdaf-2fdd40b8d74d" />
+
+### 1 or more Accounts can be created, or existing accounts can be linked
+<img width="598" height="464" alt="Installer_CreateRDPUser" src="https://github.com/user-attachments/assets/d82f106e-7f08-4082-83e3-c344274a8d22" />
+
+### The install takes care of all the typical steps required to setup local RDP
+<img width="594" height="459" alt="Installer_Installing" src="https://github.com/user-attachments/assets/5e25e8d3-6ab2-4776-a47d-f42e9f079a2f" />
+
+### A local RDP shortcut with embedded credentials is placed on the desktop for each user created
+<img width="571" height="346" alt="Installer_DesktopIcon" src="https://github.com/user-attachments/assets/15e7947b-9a11-42b3-b9c7-5f081ce2947f" />
+
+
+## If you want to build this yourself (Advanced, not required for most people):
 
 **Requirements**
 - Windows (target platform for built installer)
@@ -21,23 +34,9 @@ RDPWrapKit bundles RDPWrap and TermWrap payloads and an Inno Setup script to pro
 3. Compile the script (press F9 or use the Compile button).
 4. The generated installer will appear in the `Output/` folder.
 
-**Install (end user)**
-- Run the generated installer as Administrator and follow prompts.
-
-**Updating payloads**
-- Replace or update files inside `payload/RDPWrap/` and `payload/TermWrap/` as needed.
-- Recompile `RDPWrapKit.iss` to produce a new installer containing the updated payload.
-
-**Development / Contributing**
-- Make changes, open issues for problems, or submit pull requests with improvements.
-- When changing payload contents, document the source and version of any upstream binaries.
-
-**License**
-- Check for a `LICENSE` file in the repository. If none exists, please contact the maintainer or open an issue to clarify licensing.
-
 **Support / Contact**
 - Open an issue on this repository for questions, bugs, or enhancement requests.
 
 ---
 
-Created for easy packaging of RDPWrap + TermWrap; customize `payload/` then recompile `RDPWrapKit.iss` to produce updated installers.
+Created for easy packaging of RDPWrap + TermWrap
