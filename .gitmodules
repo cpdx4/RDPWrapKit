@@ -1,0 +1,6 @@
+[submodule "third_party/rdpwrap"]
+	path = third_party/rdpwrap
+	url = https://github.com/stascorp/rdpwrap
+[submodule "third_party/termwrap"]
+	path = third_party/termwrap
+	url = https://github.com/llccd/TermWrap
