@@ -61,7 +61,7 @@
 
 # Credits
 - RDPWrapKit builds on the fantastic work of the RDP Wrapper and TermWrap. This project does not modify their code.
-- Bee Swarm Simulator communities (BSGH and BSS Grinders)
+- Bee Swarm Simulator communities ([BSGH](https://discord.gg/bsgh) and [BSS Grinders](https://discord.gg/K5U3RdGXh6))
 
 
 ---
