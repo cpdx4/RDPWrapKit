@@ -4,3 +4,5 @@ plugins:
 readme_index:
   enabled: true
   remove_originals: false
+
+theme: jekyll-theme-primer
