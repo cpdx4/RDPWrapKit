@@ -3065,7 +3065,7 @@ begin
     Log('DEBUG: mstsc.exe missing. Initiating installation.');
     SetStepDone(StepCheckMSTSC, TXT_CheckMSTSC);
     SetStepInProgress(StepInstallMSTSC, TXT_InstallMSTSC);
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs('Start-Process -FilePath ''' + URL_RDP_INSTALLER + ''' -Wait', False), '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode);
+    Exec(EXE_POWERSHELL, BuildPowerShellArgs('$out = Join-Path $env:TEMP ''mstsc_installer.exe''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing; Start-Process -FilePath $out -Wait', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if ResultCode = 0 then
     begin
       Log('DEBUG: Remote Desktop Connection installed successfully.');
