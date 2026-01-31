@@ -1492,6 +1492,7 @@ var
   UserName: string;
   Password: string;
   StartTick: Cardinal;
+  UserStartTick: Cardinal;
 begin
   // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
   if GroupAdministratorsName = 'Administrators' then
@@ -1505,6 +1506,7 @@ begin
   
   for i := 0 to UsersList.Count - 1 do
   begin
+    UserStartTick := GetTickCount;
     // Check overall timeout
     if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
     begin
@@ -1533,6 +1535,9 @@ begin
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password);
     WriteInstallerLog('Created shortcut for ' + UserName);
+
+    if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
+      WriteInstallerLog('WARNING: CreateRDPUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
   end;
   WriteInstallerLog('CreateRDPUsers completed');
 end;
@@ -1544,11 +1549,13 @@ var
   UserName: string;
   Password: string;
   StartTick: Cardinal;
+  UserStartTick: Cardinal;
 begin
   StartTick := GetTickCount;
   WriteInstallerLog('Starting CreateShortcutsForExistingUsers for ' + IntToStr(ShortcutsList.Count) + ' entries');
   for i := 0 to ShortcutsList.Count - 1 do
   begin
+    UserStartTick := GetTickCount;
     if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
     begin
       WriteInstallerLog('CreateShortcutsForExistingUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining shortcuts');
@@ -1562,6 +1569,9 @@ begin
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password);
     WriteInstallerLog('Created shortcut for ' + UserName);
+
+    if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
+      WriteInstallerLog('WARNING: CreateShortcutsForExistingUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
   end;
   WriteInstallerLog('CreateShortcutsForExistingUsers completed');
 end;
