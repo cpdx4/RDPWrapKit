@@ -43,8 +43,8 @@
 ; - CloseApplications: Automatically closes conflicting processes
 ; -------------------------------------------------------------------------
 AppName=RDPWrapKit
-AppVersion=0.45
-VersionInfoVersion=0.45.0.0
+AppVersion=0.46
+VersionInfoVersion=0.46.0.0
 AppPublisher=cpdx4
 AppPublisherURL=https://github.com/cpdx4/RDPWrapKit
 AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
@@ -198,6 +198,8 @@ procedure OpenTermWrap(Sender: TObject); forward;
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
 procedure OnInstallTypeChange(Sender: TObject); forward;
+procedure InitInstallerLog; forward;
+procedure WriteInstallerLog(const Msg: string); forward;
 var
   InstallTypePage: TWizardPage;
   WelcomePage: TWizardPage;
@@ -215,6 +217,7 @@ var
   UserPasswordEdits: array of TEdit;
   UserPasswordStatus: array of TLabel;
   ShortcutsList: TStringList;
+  InstallLogPath: string;
   AddMoreRadio: TRadioButton;
   DoneRadio: TRadioButton;
   SkipUsersCheckBox: TCheckBox;
@@ -270,6 +273,8 @@ var
   CreditsText: TRichEditViewer;
   // Rich text control on finished page to show long completion messages
   FinishedText: TRichEditViewer;
+  // Button to open install log on finish page
+  ViewLogButton: TButton;
 
 const
   // -------------------------------------------------------------------------
@@ -323,6 +328,15 @@ const
   SLEEP_MEDIUM = 250;
   SLEEP_LONG = 500;
   SLEEP_EXTRALONG = 2000;
+  // -------------------------------------------------------------------------
+  // TIMEOUTS
+  // -------------------------------------------------------------------------
+  // Best-effort timeouts used to avoid extremely long hangs during user
+  // creation/shortcut generation. Note: Exec() calls block the script, so
+  // timeouts are best-effort overall watchers rather than hard per-process
+  // kill timers.
+  PER_USER_TIMEOUT = 120000; // 2 minutes per user (best-effort)
+  USERS_OVERALL_TIMEOUT = 600000; // 10 minutes overall for user operations
   
   // -------------------------------------------------------------------------
   // FILES, URLS, AND NETWORK PORTS
@@ -354,6 +368,8 @@ const
   FILE_ICON_BMP = 'RDPWrapKitIcon.bmp';
   TEMP_LOCAL_USERS = '{tmp}\\local_users.txt';
   TEMP_ICON_BMP = '{tmp}\\' + FILE_ICON_BMP;
+  // Path to installer log file (auto-created in %TEMP%)
+  INSTALL_LOG_PATH = '{tmp}\\RDPWrapKit_install.log';
   
   // -------------------------------------------------------------------------
   // EXTERNAL PROJECT URLS
@@ -395,6 +411,22 @@ function CloseHandle(hObject: Cardinal): Boolean;
 
 function GetTickCount: Cardinal;
   external 'GetTickCount@kernel32.dll stdcall';
+
+// Windows SYSTEMTIME structure and GetSystemTime API for timestamps
+type
+  SYSTEMTIME = record
+    wYear: Word;
+    wMonth: Word;
+    wDayOfWeek: Word;
+    wDay: Word;
+    wHour: Word;
+    wMinute: Word;
+    wSecond: Word;
+    wMilliseconds: Word;
+  end;
+
+function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
+  external 'GetSystemTime@kernel32.dll stdcall';
 
 // =============================================================================
 // UTILITY AND HELPER FUNCTIONS
@@ -506,7 +538,10 @@ var
   PSArgs: string;
 begin
   PSArgs := BuildPowerShellArgs(Command, True);
+  // Log command and run
+  WriteInstallerLog('PowerShell Hidden: ' + PSArgs);
   Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WriteInstallerLog('PowerShell exitcode=' + IntToStr(ResultCode));
 end;
 
 procedure OpenRDPWrap(Sender: TObject);
@@ -558,13 +593,48 @@ begin
   Result := ExpandConstant('{app}\' + FileName);
 end;
 
+// Installer log helpers
+function GetTimestampString: string;
+var
+  ST: SYSTEMTIME;
+  h, m, s, ms: string;
+begin
+  GetSystemTime(ST);
+  // Pad numbers with zeros
+  if ST.wHour < 10 then h := '0' + IntToStr(ST.wHour) else h := IntToStr(ST.wHour);
+  if ST.wMinute < 10 then m := '0' + IntToStr(ST.wMinute) else m := IntToStr(ST.wMinute);
+  if ST.wSecond < 10 then s := '0' + IntToStr(ST.wSecond) else s := IntToStr(ST.wSecond);
+  if ST.wMilliseconds < 100 then ms := '0' + IntToStr(ST.wMilliseconds) else ms := IntToStr(ST.wMilliseconds);
+  if ST.wMilliseconds < 10 then ms := '00' + IntToStr(ST.wMilliseconds);
+  Result := '[' + h + ':' + m + ':' + s + '.' + ms + ']';
+end;
+
+procedure InitInstallerLog;
+begin
+  InstallLogPath := ExpandConstant(INSTALL_LOG_PATH);
+  try
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' RDPWrapKit install log started' + #13#10, False);
+  except
+  end;
+end;
+
+procedure WriteInstallerLog(const Msg: string);
+begin
+  try
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' ' + Msg + #13#10, True);
+  except
+  end;
+end;
+
 // Run any process hidden and return its exit code
 function RunHidden(const FileName, Params: string): Integer;
 var
   RC: Integer;
 begin
   RC := 0;
+  WriteInstallerLog('Exec: ' + FileName + ' ' + Params);
   Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
+  WriteInstallerLog('ExitCode: ' + IntToStr(RC) + ' for ' + FileName);
   Result := RC;
 end;
 
@@ -617,7 +687,9 @@ var
   RC: Integer;
 begin
   RC := -1;
+  WriteInstallerLog('RunPSHiddenCode: ' + Command);
   ExecPowerShellHidden(Command, RC);
+  WriteInstallerLog('RunPSHiddenCode exit=' + IntToStr(RC));
   Result := RC;
 end;
 
@@ -799,6 +871,7 @@ var
   ServiceRunning: Boolean;
 begin
   Log('[StopTermService] START');
+  WriteInstallerLog('StopTermService: Stopping Remote Desktop Services...');
   WizardForm.StatusLabel.Caption := 'Stopping Remote Desktop Services...';
   
   // Start with disable + stop attempts (no initial "normal" stop)
@@ -808,17 +881,21 @@ begin
   begin
     Inc(Attempt);
     Log('[StopTermService] Attempt ' + IntToStr(Attempt) + '/5: Disable and stop');
+    WriteInstallerLog('StopTermService: Attempt ' + IntToStr(Attempt) + '/5');
     WizardForm.Update;
     
     // Disable the service to prevent auto-restart
     ResultCode := RunPSHiddenCode('Set-Service -Name TermService -StartupType Disabled -ErrorAction Stop');
     Log('[StopTermService] Set-Service Disabled exit code: ' + IntToStr(ResultCode));
+    WriteInstallerLog('StopTermService: Set-Service Disabled exit code=' + IntToStr(ResultCode));
     SleepWithUI(SLEEP_MEDIUM);
     
     // Try stopping with PowerShell
     Log('[StopTermService] Stop-Service TermService');
+    WriteInstallerLog('StopTermService: Executing Stop-Service TermService');
     ResultCode := RunPSHiddenCode('Stop-Service -Name TermService -Force -ErrorAction Stop');
     Log('[StopTermService] Stop-Service exit code: ' + IntToStr(ResultCode));
+    WriteInstallerLog('StopTermService: Stop-Service exit code=' + IntToStr(ResultCode));
     
     // Wait longer for service to actually stop
     SleepWithUI(SLEEP_LONG + SLEEP_LONG);
@@ -827,14 +904,22 @@ begin
     ResultCode := RunPSHiddenCode('if ((Get-Service -Name TermService).Status -eq ''Stopped'') { exit 0 } else { exit 1 }');
     ServiceRunning := (ResultCode = 1);
     Log('[StopTermService] After attempt ' + IntToStr(Attempt) + ': Service running=' + BoolToStr(ServiceRunning) + ' (check exit code: ' + IntToStr(ResultCode) + ')');
+    WriteInstallerLog('StopTermService: Service running=' + BoolToStr(ServiceRunning) + ' after attempt ' + IntToStr(Attempt));
   end;
   
   if ServiceRunning then
-    Log('[StopTermService] WARNING: Service still running after 5 attempts, proceeding anyway')
+  begin
+    Log('[StopTermService] WARNING: Service still running after 5 attempts, proceeding anyway');
+    WriteInstallerLog('StopTermService: WARNING - Service still running after 5 attempts, proceeding anyway');
+  end
   else
+  begin
     Log('[StopTermService] SUCCESS: Service verified stopped');
+    WriteInstallerLog('StopTermService: SUCCESS - Service verified stopped');
+  end;
   
   Log('[StopTermService] END');
+  WriteInstallerLog('StopTermService: END');
 end;
 
 // Start TermService and set it to Automatic startup, return exit code
@@ -843,18 +928,24 @@ var
   RC: Integer;
 begin
   Log('[StartTermServiceEx] START');
+  WriteInstallerLog('StartTermServiceEx: Starting Remote Desktop Services...');
   WizardForm.StatusLabel.Caption := 'Restarting Remote Desktop Services...';
   
   Log('[StartTermServiceEx] Setting TermService to Automatic via PowerShell');
+  WriteInstallerLog('StartTermServiceEx: Setting TermService to Automatic');
   RC := RunPSHiddenCode('Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop');
   Log('[StartTermServiceEx] Set-Service Automatic exit code: ' + IntToStr(RC));
+  WriteInstallerLog('StartTermServiceEx: Set-Service Automatic exit code=' + IntToStr(RC));
   
   Sleep(SLEEP_MEDIUM);
   Log('[StartTermServiceEx] Starting TermService via PowerShell');
+  WriteInstallerLog('StartTermServiceEx: Executing Start-Service TermService');
   RC := RunPSHiddenCode('Start-Service -Name TermService -ErrorAction Stop');
   Log('[StartTermServiceEx] Start-Service exit code: ' + IntToStr(RC) + ' (0=success)');
+  WriteInstallerLog('StartTermServiceEx: Start-Service exit code=' + IntToStr(RC));
   Sleep(SLEEP_LONG);
   Log('[StartTermServiceEx] END');
+  WriteInstallerLog('StartTermServiceEx: END');
   Result := RC;
 end;
 
@@ -1019,6 +1110,15 @@ begin
       if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := chkManageUsers.Checked;
     end;
   end;
+end;
+
+procedure OnViewLogButtonClick(Sender: TObject);
+var
+  RC: Integer;
+begin
+  WriteInstallerLog('User clicked View Install Log button');
+  // Open the log file with the default text editor
+  ShellExec('open', InstallLogPath, '', '', SW_SHOWNORMAL, ewNoWait, RC);
 end;
 
 procedure OnPasswordResetLinkClick(Sender: TObject);
@@ -1332,22 +1432,42 @@ begin
   RDPPath := ExpandConstant('{userdesktop}\' + UserName + '.rdp');
   ScriptPath := TempFile('create_rdp_' + UserName + '.ps1');
 
+  WriteInstallerLog('CreateRDPShortcut: Creating RDP file at ' + RDPPath);
+
   // Remove any existing shortcut so we always overwrite with the new one
-  DeleteFile(RDPPath);
+  if FileExists(RDPPath) then
+  begin
+    WriteInstallerLog('CreateRDPShortcut: Deleting existing RDP file');
+    DeleteFile(RDPPath);
+  end;
 
   // Encrypt the password
+  WriteInstallerLog('CreateRDPShortcut: Encrypting password for user ' + UserName);
   EncPath := EncryptPasswordToFile(Password, UserName);
+  WriteInstallerLog('CreateRDPShortcut: Password encrypted to ' + EncPath);
 
   // Generate and execute PowerShell script
+  WriteInstallerLog('CreateRDPShortcut: Generating RDP PowerShell script');
   PowerShellScript := GenerateRDPPowerShellScript(UserName, RDPPath, EncPath);
   SaveStringToFile(ScriptPath, PowerShellScript, False);
+  WriteInstallerLog('CreateRDPShortcut: Script saved to ' + ScriptPath);
   
+  WriteInstallerLog('CreateRDPShortcut: Executing PowerShell script');
   Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '-EncPath "' + EncPath + '"', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WriteInstallerLog('CreateRDPShortcut: PowerShell script exit code=' + IntToStr(ResultCode));
   
   if ResultCode <> 0 then
+  begin
     Log('WARNING: RDP file creation failed with exit code = ' + IntToStr(ResultCode));
+    WriteInstallerLog('CreateRDPShortcut: WARNING - RDP file creation failed with exit code=' + IntToStr(ResultCode));
+  end
+  else
+  begin
+    WriteInstallerLog('CreateRDPShortcut: RDP file created successfully');
+  end;
 
   // Securely delete temporary files containing sensitive data
+  WriteInstallerLog('CreateRDPShortcut: Cleaning up temporary files');
   SecureCleanupTempFiles(UserName);
 end;
 
@@ -1371,6 +1491,7 @@ var
   UserInfo: string;
   UserName: string;
   Password: string;
+  StartTick: Cardinal;
 begin
   // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
   if GroupAdministratorsName = 'Administrators' then
@@ -1378,25 +1499,42 @@ begin
   if GroupRDPUsersName = 'Remote Desktop Users' then
     GroupRDPUsersName := GetLocalizedGroupName('S-1-5-32-555', 'Remote Desktop Users');
   
+  // Start overall watchdog timer
+  StartTick := GetTickCount;
+  WriteInstallerLog('Starting CreateRDPUsers for ' + IntToStr(UsersList.Count) + ' users');
+  
   for i := 0 to UsersList.Count - 1 do
   begin
+    // Check overall timeout
+    if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
+    begin
+      WriteInstallerLog('CreateRDPUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining users');
+      break;
+    end;
+
     UserInfo := UsersList[i];
     ParseUserEntry(UserInfo, UserName, Password);
 
     WizardForm.StatusLabel.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
+    WriteInstallerLog('Creating user: ' + UserName);
 
     // Create the Windows user account (quote username and password to handle spaces)
     Exec(EXE_CMD, '/c net user "' + UserName + '" "' + Password + '" /add /expires:never', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    WriteInstallerLog('net user exit=' + IntToStr(ResultCode) + ' for ' + UserName);
     Sleep(SLEEP_SHORT);
 
     // Add to both groups in sequence without extra delays
     Exec(EXE_CMD, '/c net localgroup "' + GroupAdministratorsName + '" "' + UserName + '" /add', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    WriteInstallerLog('add to Administrators exit=' + IntToStr(ResultCode) + ' for ' + UserName);
     Exec(EXE_CMD, '/c net localgroup "' + GroupRDPUsersName + '" "' + UserName + '" /add', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    WriteInstallerLog('add to Remote Desktop Users exit=' + IntToStr(ResultCode) + ' for ' + UserName);
     Sleep(SLEEP_SHORT);
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password);
+    WriteInstallerLog('Created shortcut for ' + UserName);
   end;
+  WriteInstallerLog('CreateRDPUsers completed');
 end;
 
 procedure CreateShortcutsForExistingUsers;
@@ -1405,9 +1543,17 @@ var
   Entry: string;
   UserName: string;
   Password: string;
+  StartTick: Cardinal;
 begin
+  StartTick := GetTickCount;
+  WriteInstallerLog('Starting CreateShortcutsForExistingUsers for ' + IntToStr(ShortcutsList.Count) + ' entries');
   for i := 0 to ShortcutsList.Count - 1 do
   begin
+    if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
+    begin
+      WriteInstallerLog('CreateShortcutsForExistingUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining shortcuts');
+      break;
+    end;
     Entry := ShortcutsList[i];
     ParseUserEntry(Entry, UserName, Password);
 
@@ -1415,7 +1561,9 @@ begin
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password);
+    WriteInstallerLog('Created shortcut for ' + UserName);
   end;
+  WriteInstallerLog('CreateShortcutsForExistingUsers completed');
 end;
 
 // Helper functions to display and update step-by-step progress on Installing page
@@ -1539,6 +1687,8 @@ var
   BlockTop: Integer;
   Delta: Integer;
 begin
+  // Initialize installer log file
+  InitInstallerLog;
   // DON'T stop TermService here - it delays the wizard from showing by 5 seconds
   // It will be stopped later in the ssInstall step instead
   
@@ -2039,14 +2189,26 @@ begin
   FinishedText.Parent := WizardForm.FinishedLabel.Parent;
   FinishedText.Left := WizardForm.FinishedLabel.Left;
   FinishedText.Top := WizardForm.FinishedLabel.Top;
-  FinishedText.Width := WizardForm.Width - FinishedText.Left - ScaleX(40);
-  FinishedText.Height := WizardForm.ClientHeight - FinishedText.Top - ScaleY(60);
+  FinishedText.Width := WizardForm.FinishedLabel.Width;
+  // Calculate height based on parent's available space, not the label's original small height
+  FinishedText.Height := WizardForm.FinishedLabel.Parent.ClientHeight - WizardForm.FinishedLabel.Top - ScaleY(35);
   FinishedText.ScrollBars := ssVertical;
   FinishedText.BorderStyle := bsNone;
   FinishedText.Color := WizardForm.FinishedLabel.Color;
   FinishedText.Font.Size := WizardForm.FinishedLabel.Font.Size;
   FinishedText.Visible := True;
   WizardForm.FinishedLabel.Visible := False;
+
+  // Create a button to view the install log on the Finished page (positioned directly below text)
+  ViewLogButton := TButton.Create(WizardForm.FinishedLabel.Parent);
+  ViewLogButton.Parent := WizardForm.FinishedLabel.Parent;
+  ViewLogButton.Left := WizardForm.FinishedLabel.Left;
+  ViewLogButton.Top := FinishedText.Top + FinishedText.Height + ScaleY(5);
+  ViewLogButton.Width := ScaleX(160);
+  ViewLogButton.Height := ScaleY(24);
+  ViewLogButton.Caption := 'View Install Log';
+  ViewLogButton.OnClick := @OnViewLogButtonClick;
+  ViewLogButton.Visible := True;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -2743,6 +2905,7 @@ begin
   // Display completion info on the final page
   if CurPageID = wpFinished then
   begin
+    WriteInstallerLog('CurPageChanged: Finish page shown');
     if InstallType = 3 then
     begin
       // Uninstall completion message
@@ -2750,6 +2913,7 @@ begin
       CompletionText := 'TermWrap and RDP Wrapper have been successfully removed.' + #13#10#13#10 +
                        'The Program Files\RDP Wrapper folder and all its contents have been deleted.' + #13#10#13#10 +
                        'Remote Desktop Services have been restored to their default Windows configuration.';
+      WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
     end
     else if InstallType = 2 then
     begin
@@ -2757,6 +2921,7 @@ begin
       WizardForm.FinishedHeadingLabel.Caption := 'Advanced Tools Complete';
       CompletionText := 'Advanced tools have been executed successfully.' + #13#10#13#10 +
                        'Your RDP installation is ready to use.';
+      WriteInstallerLog('CurPageChanged: Showing advanced tools completion message');
     end
     else
     begin
@@ -2772,19 +2937,23 @@ begin
         end;
         CompletionText := CompletionText + #13#10 +
                          'You can now open RDP connections using these shortcuts.';
+        WriteInstallerLog('CurPageChanged: Created ' + IntToStr(CreatedUsersList.Count) + ' users');
       end
       else
       begin
         CompletionText := 'No user accounts were created during this run.' + #13#10#13#10 +
                           'You can add users later by rerunning this installer and choosing "Create Users Only".';
+        WriteInstallerLog('CurPageChanged: No users created');
       end;
     end;
     
     WizardForm.FinishedLabel.Caption := CompletionText;
     WizardForm.Update;
+    WriteInstallerLog('CurPageChanged: Updating FinishedText control');
     // Populate the rich viewer if available
     if Assigned(FinishedText) then
     begin
+      WriteInstallerLog('CurPageChanged: FinishedText control is assigned');
       // Ensure finished text color contrasts with page surface
       if IsDarkColor(FinishedText.Color) then
         FinishedText.Font.Color := clWhite
@@ -2792,6 +2961,20 @@ begin
         FinishedText.Font.Color := clBlack;
       FinishedText.RTFText := PlainToRtfWithColor(CompletionText, FinishedText.Font.Color);
       FinishedText.Update;
+      WriteInstallerLog('CurPageChanged: FinishedText populated with completion message');
+    end
+    else
+    begin
+      WriteInstallerLog('CurPageChanged: ERROR - FinishedText control is NOT assigned!');
+    end;
+    
+    if Assigned(ViewLogButton) then
+    begin
+      WriteInstallerLog('CurPageChanged: ViewLogButton is assigned and visible');
+    end
+    else
+    begin
+      WriteInstallerLog('CurPageChanged: ERROR - ViewLogButton is NOT assigned!');
     end;
   end;
 end;
