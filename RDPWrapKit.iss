@@ -594,6 +594,62 @@ begin
 end;
 
 // Installer log helpers
+function SafeRegString(const Root: Integer; const Key, ValueName: string; const Fallback: string): string;
+var
+  S: string;
+begin
+  if RegQueryStringValue(Root, Key, ValueName, S) then
+    Result := S
+  else
+    Result := Fallback;
+end;
+
+function SafeRegDword(const Root: Integer; const Key, ValueName: string; const Fallback: Cardinal): Cardinal;
+var
+  D: Cardinal;
+begin
+  if RegQueryDWordValue(Root, Key, ValueName, D) then
+    Result := D
+  else
+    Result := Fallback;
+end;
+
+procedure LogSystemInfo;
+var
+  ProductName: string;
+  DisplayVersion: string;
+  BuildNumber: string;
+  EditionID: string;
+  UBR: Cardinal;
+  InstallLang: string;
+  Arch: string;
+begin
+  ProductName := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ProductName', 'Unknown');
+  DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
+  if DisplayVersion = '' then
+    DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
+  BuildNumber := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuildNumber', '');
+  EditionID := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'EditionID', '');
+  UBR := SafeRegDword(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'UBR', 0);
+  InstallLang := SafeRegString(HKLM, 'SYSTEM\CurrentControlSet\Control\Nls\Language', 'InstallLanguage', '');
+
+  if IsWin64 then
+    Arch := 'x64'
+  else
+    Arch := 'x86';
+
+  WriteInstallerLog('SystemInfo: OS=' + ProductName);
+  if DisplayVersion <> '' then
+    WriteInstallerLog('SystemInfo: Version=' + DisplayVersion);
+  if BuildNumber <> '' then
+    WriteInstallerLog('SystemInfo: Build=' + BuildNumber + ' (UBR ' + IntToStr(UBR) + ')');
+  if EditionID <> '' then
+    WriteInstallerLog('SystemInfo: Edition=' + EditionID);
+  if InstallLang <> '' then
+    WriteInstallerLog('SystemInfo: InstallLanguage=' + InstallLang);
+  WriteInstallerLog('SystemInfo: Arch=' + Arch);
+end;
+
 function GetTimestampString: string;
 var
   ST: SYSTEMTIME;
@@ -616,6 +672,7 @@ begin
     SaveStringToFile(InstallLogPath, GetTimestampString + ' RDPWrapKit install log started' + #13#10, False);
   except
   end;
+  LogSystemInfo;
 end;
 
 procedure WriteInstallerLog(const Msg: string);
