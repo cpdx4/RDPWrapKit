@@ -490,6 +490,24 @@ begin
   Result := ExpandConstant('{tmp}\' + FileName);
 end;
 
+// Create a filesystem-safe filename from an arbitrary string by replacing
+// non-alphanumeric characters with underscores.
+function SanitizeFileName(const S: string): string;
+var
+  i: Integer;
+  c: Char;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    c := S[i];
+    if ((c >= 'a') and (c <= 'z')) or ((c >= 'A') and (c <= 'Z')) or ((c >= '0') and (c <= '9')) then
+      Result := Result + c
+    else
+      Result := Result + '_';
+  end;
+end;
+
 // -----------------------------------------------------------------------------
 // POWERSHELL EXECUTION HELPERS
 // -----------------------------------------------------------------------------
@@ -1550,6 +1568,10 @@ var
   Password: string;
   StartTick: Cardinal;
   UserStartTick: Cardinal;
+  OutPath: string;
+  PSCmd: string;
+  SL: TStringList;
+  j: Integer;
 begin
   // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
   if GroupAdministratorsName = 'Administrators' then
@@ -1577,17 +1599,82 @@ begin
     WizardForm.StatusLabel.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
     WriteInstallerLog('Creating user: ' + UserName);
 
-    // Create the Windows user account (quote username and password to handle spaces)
-    Exec(EXE_CMD, '/c net user "' + UserName + '" "' + Password + '" /add /expires:never', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    WriteInstallerLog('net user exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    // Create the Windows user account using native PowerShell (New-LocalUser)
+    OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
+    PSCmd := '$pw = ConvertTo-SecureString -String ''' + Password + ''' -AsPlainText -Force; '
+          + 'try { New-LocalUser -Name ''' + UserName + ''' -Password $pw -FullName ''' + UserName + ''' -PasswordNeverExpires -ErrorAction Stop; Write-Output ''NEWLOCALUSER_OK'' } '
+          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
+    // Log sanitized action (do not log plaintext passwords)
+    WriteInstallerLog('DEBUG: Creating user via PowerShell: New-LocalUser -Name ' + UserName + ' -Password <hidden>');
+    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    // If any output produced, dump it to the installer log for diagnostics
+    if FileExists(OutPath) then
+    begin
+      SL := TStringList.Create;
+      try
+        try
+          SL.LoadFromFile(OutPath);
+          WriteInstallerLog('DEBUG: New-LocalUser output for ' + UserName + ':');
+          for j := 0 to SL.Count - 1 do
+            WriteInstallerLog('DEBUG: ' + SL[j]);
+        except
+          // ignore logging errors
+        end;
+      finally
+        SL.Free;
+        DeleteFile(OutPath);
+      end;
+    end;
     Sleep(SLEEP_SHORT);
 
-    // Add to both groups in sequence without extra delays
-    Exec(EXE_CMD, '/c net localgroup "' + GroupAdministratorsName + '" "' + UserName + '" /add', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Add to Administrators group using Add-LocalGroupMember
+    OutPath := TempFile('user_add_admin_' + SanitizeFileName(UserName) + '.log');
+    PSCmd := 'try { Add-LocalGroupMember -Group ''' + GroupAdministratorsName + ''' -Member ''' + UserName + ''' -ErrorAction Stop; Write-Output ''ADD_ADMIN_OK'' } '
+          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
+    WriteInstallerLog('DEBUG: Adding user to Administrators via PowerShell: Add-LocalGroupMember -Group ' + GroupAdministratorsName + ' -Member ' + UserName);
+    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     WriteInstallerLog('add to Administrators exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-    Exec(EXE_CMD, '/c net localgroup "' + GroupRDPUsersName + '" "' + UserName + '" /add', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if FileExists(OutPath) then
+    begin
+      SL := TStringList.Create;
+      try
+        try
+          SL.LoadFromFile(OutPath);
+          WriteInstallerLog('DEBUG: Add-LocalGroupMember (Administrators) output for ' + UserName + ':');
+          for j := 0 to SL.Count - 1 do
+            WriteInstallerLog('DEBUG: ' + SL[j]);
+        except
+        end;
+      finally
+        SL.Free;
+        DeleteFile(OutPath);
+      end;
+    end;
+
+    // Add to Remote Desktop Users group using Add-LocalGroupMember
+    OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
+    PSCmd := 'try { Add-LocalGroupMember -Group ''' + GroupRDPUsersName + ''' -Member ''' + UserName + ''' -ErrorAction Stop; Write-Output ''ADD_RDP_OK'' } '
+          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
+    WriteInstallerLog('DEBUG: Adding user to Remote Desktop Users via PowerShell: Add-LocalGroupMember -Group ' + GroupRDPUsersName + ' -Member ' + UserName);
+    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     WriteInstallerLog('add to Remote Desktop Users exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-    Sleep(SLEEP_SHORT);
+    if FileExists(OutPath) then
+    begin
+      SL := TStringList.Create;
+      try
+        try
+          SL.LoadFromFile(OutPath);
+          WriteInstallerLog('DEBUG: Add-LocalGroupMember (Remote Desktop Users) output for ' + UserName + ':');
+          for j := 0 to SL.Count - 1 do
+            WriteInstallerLog('DEBUG: ' + SL[j]);
+        except
+        end;
+      finally
+        SL.Free;
+        DeleteFile(OutPath);
+      end;
+    end;
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password);
@@ -2861,6 +2948,14 @@ begin
       if UsersList.Count > 0 then
       begin
         SetStepInProgress(StepCreateUsers, TXT_CreateUsers);
+        // Log contents of UsersList to aid debugging when no users are created
+        WriteInstallerLog('DEBUG: UsersList.Count=' + IntToStr(UsersList.Count));
+        try
+          for i := 0 to UsersList.Count - 1 do
+            WriteInstallerLog('DEBUG: UsersList[' + IntToStr(i) + ']=' + UsersList[i]);
+        except
+          // Defensive: avoid crashing installer when logging fails
+        end;
         CreateRDPUsers;
         SetStepDone(StepCreateUsers, TXT_CreateUsers);
       end;
