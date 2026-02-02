@@ -1,5 +1,6 @@
 plugins:
   - jekyll-readme-index
+  - jekyll-remote-theme
 
 readme_index:
   enabled: true
