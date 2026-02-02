@@ -7,3 +7,5 @@ readme_index:
   with_frontmatter: true
 
 theme: jekyll-theme-modernist
+
+markdown: kramdown
