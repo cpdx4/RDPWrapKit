@@ -1,7 +1,7 @@
 # RDPWrapKit - The all-in-one installer for local RDP setup
 
 ### Quick Start
-1. Download **RDPWrapKit-Setup.exe** from [Releases](https://github.com/cpdx4/RDPWrapKit/releases)
+1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
 2. Run it and choose **Typical Setup**
 3. Open the new RDP shortcut on your desktop
 
@@ -22,7 +22,7 @@
 
 ---
 ### How to install it:
-1. Head over to [Releases](https://github.com/cpdx4/RDPWrapKit/releases) and download the **RDPWrapKit-Setup.exe** file
+1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
    - Your browser or Antivirus might need to be modified to allow it to download
    - It is virus free. If worried, you can inspect the [source code](https://github.com/cpdx4/RDPWrapKit/blob/main/RDPWrapKit.iss) or build it yourself (instructions at bottom)
 
@@ -60,7 +60,7 @@
 # To build this from source code
 ### (Advanced. NOT required for most people):
 1. Install [Inno Setup](https://github.com/jrsoftware/issrc/releases)
-2. Download the Sources from: [Releases](https://github.com/cpdx4/RDPWrapKit/releases)
+2. Download the [Source Code](https://github.com/cpdx4/RDPWrapKit/archive/refs/heads/main.zip)
 3. Open `RDPWrapKit.iss` in the Inno Setup Compiler.
 4. Compile the script (press F9 or use the Compile button).
-5. The generated installer will appear in the `Output/` folder.
+5. The generated installer will appear in the `output/` folder.
