@@ -5,7 +5,7 @@ readme_index:
   enabled: true
   remove_originals: false
 
-theme: jekyll-theme-slate
+theme: jekyll-theme-midnight
 
 title: RDPWrapKit
 description: The all-in-one installer for local RDP setup
