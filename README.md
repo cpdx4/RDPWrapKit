@@ -47,18 +47,18 @@
 
 
 ---
-# Support / Contact
+### Support / Contact
 - There is no implied warranty and unexpected results might occur
 - Open an [issue](https://github.com/cpdx4/RDPWrapKit/issues) on this repository for questions, bugs, or enhancement requests
 
-# Credits
+### Credits
 - RDPWrapKit builds on the fantastic work of the RDP Wrapper and TermWrap. This project does not modify their code.
 - Bee Swarm Simulator communities ([BSGH](https://discord.gg/bsgh) and [BSS Grinders](https://discord.gg/K5U3RdGXh6))
 
 
 ---
-# To build this from source code
-### (Advanced. NOT required for most people):
+### To build this from source code
+#### (Advanced. NOT required for most people):
 1. Install [Inno Setup](https://github.com/jrsoftware/issrc/releases)
 2. Download the [Source Code](https://github.com/cpdx4/RDPWrapKit/archive/refs/heads/main.zip)
 3. Open `RDPWrapKit.iss` in the Inno Setup Compiler.
