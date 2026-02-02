@@ -43,8 +43,8 @@
 ; - CloseApplications: Automatically closes conflicting processes
 ; -------------------------------------------------------------------------
 AppName=RDPWrapKit
-AppVersion=0.46
-VersionInfoVersion=0.46.0.0
+AppVersion=0.47
+VersionInfoVersion=0.47.0.0
 AppPublisher=cpdx4
 AppPublisherURL=https://github.com/cpdx4/RDPWrapKit
 AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
@@ -466,6 +466,58 @@ begin
   Password := Copy(Entry, PipePos + 1, Length(Entry));
 end;
 
+// Return a version of a pipe-delimited user entry with the password obscured
+function MaskPasswordInEntry(const Entry: string): string;
+var
+  PipePos: Integer;
+begin
+  PipePos := Pos('|', Entry);
+  if PipePos > 0 then
+    Result := Copy(Entry, 1, PipePos) + '*****'
+  else
+    Result := Entry;
+end;
+
+// Mask common password flags in arbitrary command strings (e.g. -Password "..." or -Password ...)
+function MaskPasswordsInString(const S: string): string;
+var
+  U: string;
+  idx, p, startPos, endPos: Integer;
+begin
+  Result := S;
+  U := UpperCase(Result);
+  idx := Pos('-PASSWORD', U);
+  while idx > 0 do
+  begin
+    p := idx + Length('-PASSWORD');
+    while (p <= Length(Result)) and ((Result[p] = ' ') or (Result[p] = '=') ) do
+      Inc(p);
+    if p > Length(Result) then
+      Break;
+    if Result[p] = '"' then
+    begin
+      startPos := p;
+      endPos := startPos + 1;
+      while (endPos <= Length(Result)) and (Result[endPos] <> '"') do
+        Inc(endPos);
+      if endPos > Length(Result) then
+        endPos := Length(Result);
+      Delete(Result, startPos, endPos - startPos + 1);
+      Insert('"*****"', Result, startPos);
+    end
+    else
+    begin
+      endPos := p;
+      while (endPos <= Length(Result)) and (Result[endPos] <> ' ') do
+        Inc(endPos);
+      Delete(Result, p, endPos - p);
+      Insert('*****', Result, p);
+    end;
+    U := UpperCase(Result);
+    idx := Pos('-PASSWORD', U);
+  end;
+end;
+
 // -----------------------------------------------------------------------------
 // PATH CONSTRUCTION HELPERS
 // -----------------------------------------------------------------------------
@@ -556,8 +608,8 @@ var
   PSArgs: string;
 begin
   PSArgs := BuildPowerShellArgs(Command, True);
-  // Log command and run
-  WriteInstallerLog('PowerShell Hidden: ' + PSArgs);
+  // Log command and run (mask any embedded passwords)
+  WriteInstallerLog('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
   Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   WriteInstallerLog('PowerShell exitcode=' + IntToStr(ResultCode));
 end;
@@ -656,7 +708,7 @@ begin
   else
     Arch := 'x86';
 
-  WriteInstallerLog('SystemInfo: OS=' + ProductName);
+  WriteInstallerLog('SystemInfo: Build.UBR=' + BuildNumber + '.' + IntToStr(UBR));
   if DisplayVersion <> '' then
     WriteInstallerLog('SystemInfo: Version=' + DisplayVersion);
   if BuildNumber <> '' then
@@ -707,7 +759,7 @@ var
   RC: Integer;
 begin
   RC := 0;
-  WriteInstallerLog('Exec: ' + FileName + ' ' + Params);
+  WriteInstallerLog('Exec: ' + FileName + ' ' + MaskPasswordsInString(Params));
   Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
   WriteInstallerLog('ExitCode: ' + IntToStr(RC) + ' for ' + FileName);
   Result := RC;
@@ -762,7 +814,7 @@ var
   RC: Integer;
 begin
   RC := -1;
-  WriteInstallerLog('RunPSHiddenCode: ' + Command);
+  WriteInstallerLog('RunPSHiddenCode: ' + MaskPasswordsInString(Command));
   ExecPowerShellHidden(Command, RC);
   WriteInstallerLog('RunPSHiddenCode exit=' + IntToStr(RC));
   Result := RC;
@@ -1189,11 +1241,16 @@ end;
 
 procedure OnViewLogButtonClick(Sender: TObject);
 var
-  RC: Integer;
+  DestName: string;
+  Saved: Boolean;
 begin
-  WriteInstallerLog('User clicked View Install Log button');
-  // Open the log file with the default text editor
-  ShellExec('open', InstallLogPath, '', '', SW_SHOWNORMAL, ewNoWait, RC);
+  WriteInstallerLog('User clicked Save Install Log button');
+  DestName := ExpandConstant('{userdesktop}\RDPWrapKit_install.log');
+  Saved := CopyFile(InstallLogPath, DestName, False);
+  if Saved then
+    MsgBox('Install log saved to:' + #13#10 + DestName, mbInformation, MB_OK)
+  else
+    MsgBox('Failed to save install log to the Desktop location.', mbError, MB_OK);
 end;
 
 procedure OnPasswordResetLinkClick(Sender: TObject);
@@ -2360,7 +2417,7 @@ begin
   ViewLogButton.Top := FinishedText.Top + FinishedText.Height + ScaleY(5);
   ViewLogButton.Width := ScaleX(160);
   ViewLogButton.Height := ScaleY(24);
-  ViewLogButton.Caption := 'View Install Log';
+  ViewLogButton.Caption := 'Save Install Log';
   ViewLogButton.OnClick := @OnViewLogButtonClick;
   ViewLogButton.Visible := True;
 end;
@@ -2952,7 +3009,7 @@ begin
         WriteInstallerLog('DEBUG: UsersList.Count=' + IntToStr(UsersList.Count));
         try
           for i := 0 to UsersList.Count - 1 do
-            WriteInstallerLog('DEBUG: UsersList[' + IntToStr(i) + ']=' + UsersList[i]);
+            WriteInstallerLog('DEBUG: UsersList[' + IntToStr(i) + ']=' + MaskPasswordInEntry(UsersList[i]));
         except
           // Defensive: avoid crashing installer when logging fails
         end;
