@@ -4,5 +4,6 @@ plugins:
 readme_index:
   enabled: true
   remove_originals: false
+  with_frontmatter: true
 
-theme: jekyll-theme-primer
+theme: jekyll-theme-modernist
