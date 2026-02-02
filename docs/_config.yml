@@ -4,8 +4,9 @@ plugins:
 readme_index:
   enabled: true
   remove_originals: false
-  with_frontmatter: true
 
-theme: jekyll-theme-modernist
+theme: jekyll-theme-slate
 
-markdown: kramdown
+title: RDPWrapKit
+description: The all-in-one installer for local RDP setup
+
