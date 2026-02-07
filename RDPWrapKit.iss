@@ -1,14 +1,14 @@
 ; =========================================================================
-; RDPWrapKit - Advanced RDP Wrapper Management Suite
+; RDPWrapKit - Advanced Local RDP Management Suite
 ; =========================================================================
 ; 
 ; PURPOSE:
 ;   This Inno Setup installer provides a comprehensive solution for setting
-;   up RDP Wrapper and TermWrap on Windows systems, enabling multiple concurrent
+;   up TermWrap on Windows systems, enabling multiple concurrent
 ;   Remote Desktop sessions on non-Server editions of Windows.
 ;
 ; KEY FEATURES:
-;   - Automatic installation of RDP Wrapper (stascorp) and TermWrap (llccd)
+;   - Automatic installation of TermWrap (llccd)
 ;   - VC++ Redistributable dependency management
 ;   - User account creation with automatic RDP shortcuts
 ;   - Security hardening (Windows Defender exclusions, secure credential handling)
@@ -43,10 +43,10 @@
 ; - CloseApplications: Automatically closes conflicting processes
 ; -------------------------------------------------------------------------
 AppName=RDPWrapKit
-AppVersion=0.47
-VersionInfoVersion=0.47.0.0
+AppVersion=0.48
+VersionInfoVersion=0.48.0.0
 AppPublisher=cpdx4
-AppPublisherURL=https://github.com/cpdx4/RDPWrapKit
+AppPublisherURL=https://cpdx4.github.io/RDPWrapKit/
 AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
 AppUpdatesURL=https://github.com/cpdx4/RDPWrapKit/releases
 AppCopyright=Copyright (C) 2024-2026 RDPWrapKit Project
@@ -69,7 +69,7 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ; Defines which files are copied during installation and under what conditions.
 ; 
 ; CONDITIONAL DEPLOYMENT:
-;   - ShouldInstallFiles check ensures files are only copied when RDP Wrapper
+;   - ShouldInstallFiles check ensures files are only copied when TermWrap
 ;     installation is selected (not for user-only operations)
 ;   - Icon file always extracted to temp for welcome page display
 ;
@@ -78,8 +78,7 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ;   - Files are protected by Windows Defender exclusions added during install
 ; -------------------------------------------------------------------------
 ; Bundle your payload files (only for Full Install, not for Add Users Only)
-Source: "third_party\rdpwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
-Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
+Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion
 
 
@@ -193,7 +192,6 @@ Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dwor
 // Forward declarations
 procedure CheckAndInstallMSTSC; forward;
 procedure OnManageUsersClick(Sender: TObject); forward;
-procedure OpenRDPWrap(Sender: TObject); forward;
 procedure OpenTermWrap(Sender: TObject); forward;
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
@@ -225,13 +223,13 @@ var
   TypicalRadio: TRadioButton;
   AdvancedRadio: TRadioButton;
   UninstallRadio: TRadioButton;
-  chkInstallRDPWrapper: TCheckBox;
+  chkInstallTermWrap: TCheckBox;
   chkManageUsers: TCheckBox;
   rbCreateUsers: TRadioButton;
   rbUseExistingUsers: TRadioButton;
   ManageUsersGroup: TPanel;
   // Flags derived from welcome/options controls
-  DoInstallRDPWrapper: Boolean;
+  DoInstallTermWrap: Boolean;
   DoManageUsers: Boolean;
   NeedCreateUsers: Boolean;
   JumpToAdvancedTool1: Boolean;
@@ -245,7 +243,7 @@ var
   StepRemoveExcl: TLabel;
   StepStopSvc: TLabel;
   StepEnsureVC: TLabel;
-  StepInstallRDPWrapper: TLabel;
+  StepInstallTermWrap: TLabel;
   StepConfigureService: TLabel;
   StepCreateUsers: TLabel;
   StepCreateShortcuts: TLabel;
@@ -255,7 +253,7 @@ var
   StepCheckMSTSC: TLabel;
   StepInstallMSTSC: TLabel;
   StepRemoveFolder: TLabel;
-  StepUninstallRDPWrapper: TLabel;
+  StepUninstallTermWrap: TLabel;
   InstallType: Integer;  // 0 = Full Install, 1 = Add User Only, 2 = Advanced, 3 = Uninstall Everything
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
   UsersList: TStringList;
@@ -294,16 +292,16 @@ const
   TXT_StartSvc = 'Start Remote Desktop Services';
   TXT_RestartSvc = 'Restart Remote Desktop Services';
   TXT_EnsureVC = 'Install VC++ Redistributable (2015-2022)';
-  TXT_InstallRDPWrapper = 'Install RDP Wrapper';
+  TXT_InstallTermWrap = 'Install TermWrap';
   TXT_ConfigureService = 'Configure TermWrap service';
   TXT_CreateUsers = 'Create user accounts';
   TXT_CreateShortcuts = 'Create RDP shortcuts for selected users';
   TXT_PreTrust = 'Pre-trust RDP certificate for current user';
   TXT_CheckRDP = 'Verify RDP service is listening';
-  TXT_CheckMSTSC = 'Check for Remote Desktop Connection';
-  TXT_InstallMSTSC = 'Install Remote Desktop Connection';
-  TXT_RemoveFolder = 'Remove RDP Wrapper folder';
-  TXT_UninstallRDPWrapper = 'Uninstall RDP Wrapper';
+  TXT_CheckMSTSC = 'Check for Remote Desktop Connection (if missing)';
+  TXT_InstallMSTSC = 'Install Remote Desktop Connection (if missing)';
+  TXT_RemoveFolder = 'Remove TermWrap folder';
+  TXT_UninstallTermWrap = 'Uninstall TermWrap';
   
   // -------------------------------------------------------------------------
   // REGISTRY PATHS
@@ -342,7 +340,6 @@ const
   // FILES, URLS, AND NETWORK PORTS
   // -------------------------------------------------------------------------
   // Application components and external resources
-  FILE_RDPW_INST = 'RDPWInst.exe';
   FILE_TERMWRAP = 'TermWrap.dll';
   FILE_ZYDIS = 'Zydis.dll';
   URL_VCREDIST_X64 = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
@@ -376,11 +373,10 @@ const
   // -------------------------------------------------------------------------
   // Centralized URLs for attribution and user navigation
   // Update these if upstream projects change their repository locations
-  URL_RDPWRAP = 'https://github.com/stascorp/rdpwrap';
   URL_TERMWRAP = 'https://github.com/llccd/TermWrap';
   URL_BSGH_COMMUNITY = 'https://discord.gg/bsgh';
   URL_BSS_GRINDERS = 'https://discord.gg/K5U3RdGXh6';
-  URL_PROJECT_HOME = 'https://github.com/cpdx4/RDPWrapKit';
+  URL_PROJECT_HOME = 'https://cpdx4.github.io/RDPWrapKit/';
 
 // =============================================================================
 // EXTERNAL WINDOWS API FUNCTION DECLARATIONS
@@ -526,13 +522,6 @@ end;
 // if installation directory structure changes.
 // -----------------------------------------------------------------------------
 
-// Get the RDP Wrapper installation path
-// Returns: C:\Program Files\RDP Wrapper
-function GetRDPWrapperPath: string;
-begin
-  Result := ExpandConstant('{commonpf64}\RDP Wrapper');
-end;
-
 // Build an expanded path under {tmp} to avoid repeating ExpandConstant() calls
 // Parameter: FileName - The filename to place in temp directory
 // Returns: Fully expanded path like C:\Users\...\AppData\Local\Temp\filename
@@ -612,13 +601,6 @@ begin
   WriteInstallerLog('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
   Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   WriteInstallerLog('PowerShell exitcode=' + IntToStr(ResultCode));
-end;
-
-procedure OpenRDPWrap(Sender: TObject);
-var
-  rc: Integer;
-begin
-  ShellExec('', URL_RDPWRAP, '', '', SW_SHOWNORMAL, ewNoWait, rc);
 end;
 
 procedure OpenTermWrap(Sender: TObject);
@@ -952,12 +934,10 @@ end;
 procedure AddDefenderExclusionForApp;
 var
   ResultCode: Integer;
-  ExclPath: string;
 begin
   // Ensure Defender excludes the install folder before any executables run
-  ExclPath := GetRDPWrapperPath;
   ExecPowerShellHidden(
-    '$path = ''' + ExclPath + '''; ' +
+    '$path = ''' + ExpandConstant('{app}') + '''; ' +
     'try { $p = Get-MpPreference; if (-not ($p.ExclusionPath -contains $path)) { Add-MpPreference -ExclusionPath $path } } catch { }',
     ResultCode);
 end;
@@ -965,12 +945,10 @@ end;
 procedure RemoveDefenderExclusionForApp;
 var
   ResultCode: Integer;
-  ExclPath: string;
 begin
   // Remove Defender exclusion for the install folder during uninstall
-  ExclPath := GetRDPWrapperPath;
   ExecPowerShellHidden(
-    '$path = ''' + ExclPath + '''; ' +
+    '$path = ''' + ExpandConstant('{app}') + '''; ' +
     'try { Remove-MpPreference -ExclusionPath $path } catch { }',
     ResultCode);
 end;
@@ -979,7 +957,7 @@ end;
 // WINDOWS SERVICE MANAGEMENT
 // -----------------------------------------------------------------------------
 // Functions for controlling the Terminal Services (TermService) which must be
-// stopped before modifying RDP Wrapper DLLs and restarted afterward.
+// stopped before modifying TermWrap DLLs and restarted afterward.
 //
 // CRITICAL NOTES:
 // - Service must be fully stopped before DLL replacement or corruption occurs
@@ -988,7 +966,7 @@ end;
 // -----------------------------------------------------------------------------
 
 // Stop the Terminal Service (RDP) with retry logic
-// This is required before replacing RDP Wrapper DLLs
+// This is required before replacing TermWrap DLLs
 // Attempts: Up to 5 tries with progressive delays
 // Side effects: Disconnects all active RDP sessions
 procedure StopTermService;
@@ -1218,12 +1196,12 @@ end;
 
 procedure OnInstallTypeChange(Sender: TObject);
 begin
-  if Assigned(chkInstallRDPWrapper) then
+  if Assigned(chkInstallTermWrap) then
   begin
     // If Uninstall is selected, disable typical sub-options
     if Assigned(UninstallRadio) and UninstallRadio.Checked then
     begin
-      chkInstallRDPWrapper.Enabled := False;
+      chkInstallTermWrap.Enabled := False;
       chkManageUsers.Enabled := False;
       if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := False;
       if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := False;
@@ -1231,7 +1209,7 @@ begin
     else
     begin
       // Typical or other flows: enable based on defaults and ManageUsers checkbox
-      chkInstallRDPWrapper.Enabled := True;
+      chkInstallTermWrap.Enabled := True;
       chkManageUsers.Enabled := True;
       if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := chkManageUsers.Checked;
       if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := chkManageUsers.Checked;
@@ -1412,15 +1390,15 @@ end;
 
 function ShouldInstallFiles: Boolean;
 begin
-  // Only copy files when the user selected to install RDP Wrapper/TermWrap
-  Result := DoInstallRDPWrapper;
+  // Always include bundled files
+  Result := True;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   
-  // Always skip directory selection page - must install to Program Files\RDP Wrapper
+  // Always skip directory selection page
   if PageID = wpSelectDir then
     Result := True;
   
@@ -1833,14 +1811,14 @@ begin
   if Assigned(StepRemoveExcl) then StepRemoveExcl.Visible := False;
   if Assigned(StepStopSvc) then StepStopSvc.Visible := False;
   if Assigned(StepEnsureVC) then StepEnsureVC.Visible := False;
-  if Assigned(StepInstallRDPWrapper) then StepInstallRDPWrapper.Visible := False;
+  if Assigned(StepInstallTermWrap) then StepInstallTermWrap.Visible := False;
   if Assigned(StepConfigureService) then StepConfigureService.Visible := False;
   if Assigned(StepCreateUsers) then StepCreateUsers.Visible := False;
   if Assigned(StepCreateShortcuts) then StepCreateShortcuts.Visible := False;
   if Assigned(StepPreTrust) then StepPreTrust.Visible := False;
   if Assigned(StepStartSvc) then StepStartSvc.Visible := False;
   if Assigned(StepCheckRDP) then StepCheckRDP.Visible := False;
-  if Assigned(StepUninstallRDPWrapper) then StepUninstallRDPWrapper.Visible := False;
+  if Assigned(StepUninstallTermWrap) then StepUninstallTermWrap.Visible := False;
   if Assigned(StepRemoveFolder) then StepRemoveFolder.Visible := False;
 end;
 
@@ -1920,7 +1898,7 @@ begin
   WelcomeExpLabel.AutoSize := False;
   WelcomeExpLabel.Width := WelcomePage.SurfaceWidth - ScaleX(30);
   WelcomeExpLabel.Caption := 'RDPWrapKit sets up local RDP access, allowing you to run multiple users on your computer via Remote Desktop Protocol (RDP).' + #13#10#13#10 +
-                           'You can choose to install RDP Wrapper and TermWrap, create/manage user accounts, and create RDP shortcuts on your desktop for easy access.';
+                           'You can choose to install TermWrap, create/manage user accounts, and create RDP shortcuts on your desktop for easy access.';
   WelcomeExpLabel.WordWrap := True;
   WelcomeExpLabel.Alignment := taLeftJustify;
   WelcomeExpLabel.Font.Size := WelcomeExpLabel.Font.Size + 2;
@@ -1968,13 +1946,13 @@ begin
   TypicalRadio.OnClick := @OnInstallTypeChange;
 
   // Under Typical, add checkboxes and nested radios
-  chkInstallRDPWrapper := TCheckBox.Create(InstallTypePage);
-  chkInstallRDPWrapper.Parent := InstallTypePage.Surface;
-  chkInstallRDPWrapper.Left := ScaleX(30);
-  chkInstallRDPWrapper.Top := ScaleY(36);
-  chkInstallRDPWrapper.Width := ScaleX(380);
-  chkInstallRDPWrapper.Caption := 'Install RDP Wrapper and TermWrap';
-  chkInstallRDPWrapper.Checked := True;
+  chkInstallTermWrap := TCheckBox.Create(InstallTypePage);
+  chkInstallTermWrap.Parent := InstallTypePage.Surface;
+  chkInstallTermWrap.Left := ScaleX(30);
+  chkInstallTermWrap.Top := ScaleY(36);
+  chkInstallTermWrap.Width := ScaleX(380);
+  chkInstallTermWrap.Caption := 'Install TermWrap';
+  chkInstallTermWrap.Checked := True;
 
   chkManageUsers := TCheckBox.Create(InstallTypePage);
   chkManageUsers.Parent := InstallTypePage.Surface;
@@ -2040,7 +2018,7 @@ begin
   UninstallRadio.Left := ScaleX(10);
   UninstallRadio.Top := ScaleY(176) + extraGap;
   UninstallRadio.Width := ScaleX(420);
-  UninstallRadio.Caption := 'Uninstall RDP Wrapper and TermWrap';
+  UninstallRadio.Caption := 'Uninstall TermWrap';
   UninstallRadio.Checked := False;
   UninstallRadio.OnClick := @OnInstallTypeChange;
 
@@ -2077,38 +2055,7 @@ begin
   // Start placing bullet lines under the header
   topPos := lblCreditsHeader.Top + ScaleY(18);
 
-  // Line 1: Stas'M's RDP Wrapper (clickable)
-  lblBullet1 := TLabel.Create(WelcomePage);
-  lblBullet1.Parent := WelcomePage.Surface;
-  lblBullet1.Left := CreditsText.Left;
-  lblBullet1.Top := topPos;
-  lblBullet1.Caption := '• ';
-  lblBullet1.Font.Color := CreditsText.Font.Color;
-  lblBullet1.Transparent := True;
-  lblBullet1.AutoSize := True;
 
-  lblStasName := TLabel.Create(WelcomePage);
-  lblStasName.Parent := WelcomePage.Surface;
-  lblStasName.Left := lblBullet1.Left + lblBullet1.Width;
-  lblStasName.Top := topPos;
-  lblStasName.Caption := 'Stas''M''s RDP Wrapper';
-  lblStasName.Font.Color := LinkColor;
-  lblStasName.Font.Style := [fsUnderline];
-  lblStasName.Cursor := crHand;
-  lblStasName.OnClick := @OpenRDPWrap;
-  lblStasName.Transparent := True;
-  lblStasName.AutoSize := True;
-
-  lblStasSuffix := TLabel.Create(WelcomePage);
-  lblStasSuffix.Parent := WelcomePage.Surface;
-  lblStasSuffix.Left := lblStasName.Left + lblStasName.Width + ScaleX(4);
-  lblStasSuffix.Top := topPos;
-  lblStasSuffix.Caption := ' - (Apache 2.0 license)';
-  lblStasSuffix.Font.Color := CreditsText.Font.Color;
-  lblStasSuffix.Transparent := True;
-  lblStasSuffix.AutoSize := True;
-
-  topPos := topPos + ScaleY(18);
 
   lblBullet2 := TLabel.Create(WelcomePage);
   lblBullet2.Parent := WelcomePage.Surface;
@@ -2203,7 +2150,7 @@ begin
   lblProjectHome.Parent := WelcomePage.Surface;
   lblProjectHome.Left := lblBullet4.Left + lblBullet4.Width + ScaleX(4);
   lblProjectHome.Top := topPos;
-  lblProjectHome.Caption := 'github.com/cpdx4/RDPWrapKit';
+  lblProjectHome.Caption := 'cpdx4.github.io/RDPWrapKit';
   lblProjectHome.Font.Color := LinkColor;
   lblProjectHome.Font.Style := [fsUnderline];
   lblProjectHome.Cursor := crHand;
@@ -2217,24 +2164,24 @@ begin
   BlockTop := DesiredBottom - (topPos - CreditsText.Top);
   if BlockTop < CreditsText.Top then
     BlockTop := CreditsText.Top;
-  // Shift all created labels by the delta to align the block
+  // Shift all created labels by the delta to align the block (guard against missing labels)
   Delta := BlockTop - CreditsText.Top;
-  lblCreditsHeader.Top := lblCreditsHeader.Top + Delta;
-  lblBullet1.Top := lblBullet1.Top + Delta;
-  lblStasName.Top := lblStasName.Top + Delta;
-  lblStasSuffix.Top := lblStasSuffix.Top + Delta;
-  lblBullet2.Top := lblBullet2.Top + Delta;
-  lblTermName.Top := lblTermName.Top + Delta;
-  lblTermSuffix.Top := lblTermSuffix.Top + Delta;
-  lblBullet5.Top := lblBullet5.Top + Delta;
-  lblBSGHName.Top := lblBSGHName.Top + Delta;
-  lblAnd.Top := lblAnd.Top + Delta;
-  lblBSSName.Top := lblBSSName.Top + Delta;
-  lblBullet4.Top := lblBullet4.Top + Delta;
-  lblProjectHome.Top := lblProjectHome.Top + Delta;
+  if Assigned(lblCreditsHeader) then lblCreditsHeader.Top := lblCreditsHeader.Top + Delta;
+  if Assigned(lblBullet1) then lblBullet1.Top := lblBullet1.Top + Delta;
+  if Assigned(lblStasName) then lblStasName.Top := lblStasName.Top + Delta;
+  if Assigned(lblStasSuffix) then lblStasSuffix.Top := lblStasSuffix.Top + Delta;
+  if Assigned(lblBullet2) then lblBullet2.Top := lblBullet2.Top + Delta;
+  if Assigned(lblTermName) then lblTermName.Top := lblTermName.Top + Delta;
+  if Assigned(lblTermSuffix) then lblTermSuffix.Top := lblTermSuffix.Top + Delta;
+  if Assigned(lblBullet5) then lblBullet5.Top := lblBullet5.Top + Delta;
+  if Assigned(lblBSGHName) then lblBSGHName.Top := lblBSGHName.Top + Delta;
+  if Assigned(lblAnd) then lblAnd.Top := lblAnd.Top + Delta;
+  if Assigned(lblBSSName) then lblBSSName.Top := lblBSSName.Top + Delta;
+  if Assigned(lblBullet4) then lblBullet4.Top := lblBullet4.Top + Delta;
+  if Assigned(lblProjectHome) then lblProjectHome.Top := lblProjectHome.Top + Delta;
 
   // Initialize derived flags to reflect defaults so page skipping works immediately
-  DoInstallRDPWrapper := chkInstallRDPWrapper.Checked;
+  DoInstallTermWrap := chkInstallTermWrap.Checked;
   DoManageUsers := chkManageUsers.Checked;
   NeedCreateUsers := DoManageUsers and rbCreateUsers.Checked;
   
@@ -2383,7 +2330,7 @@ begin
   StepAddExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   StepRemoveExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
   StepEnsureVC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);         topPos := topPos + ScaleY(16);
-  StepInstallRDPWrapper := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);topPos := topPos + ScaleY(16);
+  StepInstallTermWrap := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);topPos := topPos + ScaleY(16);
   StepConfigureService := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepCreateUsers := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);      topPos := topPos + ScaleY(16);
   StepCreateShortcuts := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);  topPos := topPos + ScaleY(16);
@@ -2392,7 +2339,7 @@ begin
   StepCheckRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);         topPos := topPos + ScaleY(16);
   StepCheckMSTSC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
   StepInstallMSTSC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
-  StepUninstallRDPWrapper := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
+  StepUninstallTermWrap := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepRemoveFolder := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);
 
   // Create a scrollable rich text viewer on the Finished page and hide the default label
@@ -2436,7 +2383,7 @@ begin
   begin
     // Derive install type and flags from new welcome/options controls
     // Default flags
-    DoInstallRDPWrapper := False;
+    DoInstallTermWrap := False;
     DoManageUsers := False;
     NeedCreateUsers := False;
 
@@ -2450,7 +2397,7 @@ begin
     end
     else // Typical selected
     begin
-      DoInstallRDPWrapper := chkInstallRDPWrapper.Checked;
+      DoInstallTermWrap := chkInstallTermWrap.Checked;
       DoManageUsers := chkManageUsers.Checked;
 
       if DoManageUsers and rbCreateUsers.Checked then
@@ -2459,7 +2406,7 @@ begin
         NeedCreateUsers := False;
 
       // Require at least one action under Typical
-      if (not DoInstallRDPWrapper) and (not DoManageUsers) then
+      if (not DoInstallTermWrap) and (not DoManageUsers) then
       begin
         MsgBox('Please select at least one option under Typical Setup', mbError, MB_OK);
         Result := False;
@@ -2467,7 +2414,7 @@ begin
       end;
 
       // Map to existing InstallType semantics for downstream logic
-      if DoInstallRDPWrapper then
+      if DoInstallTermWrap then
       begin
         // If we're installing wrapper, treat as Full Install (0)
         InstallType := 0;
@@ -2480,7 +2427,7 @@ begin
       else if DoManageUsers and rbUseExistingUsers.Checked then
       begin
         // If only Manage Users (use existing) requested without install, treat as Advanced
-        if not DoInstallRDPWrapper then
+        if not DoInstallTermWrap then
           InstallType := 2
         else
           InstallType := 0; // will install then create shortcuts
@@ -2769,7 +2716,6 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   VCRedistPath: string;
-  RDPWInstPath: string;
   i: Integer;
   UserInfo: string;
   UserName: string;
@@ -2787,7 +2733,6 @@ begin
       StepsHeaderLabel.Caption := 'Uninstall Steps:';
       AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
       AddStepPendingLabel(StepRemoveExcl, TXT_RemoveExcl);
-      AddStepPendingLabel(StepUninstallRDPWrapper, TXT_UninstallRDPWrapper);
       AddStepPendingLabel(StepRemoveFolder, TXT_RemoveFolder);
       AddStepPendingLabel(StepStartSvc, TXT_RestartSvc);
     end
@@ -2805,7 +2750,7 @@ begin
       AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
       AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
       AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
-      AddStepPendingLabel(StepInstallRDPWrapper, TXT_InstallRDPWrapper);
+      AddStepPendingLabel(StepInstallTermWrap, TXT_InstallTermWrap);
       AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
       if UsersList.Count > 0 then
         AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
@@ -2845,42 +2790,13 @@ begin
       DeleteFile(AppBin(FILE_ZYDIS));
       Sleep(SLEEP_SHORT);
       
-      // Uninstall Everything - Restore to default Windows termsrv.dll
-      SetStepInProgress(StepUninstallRDPWrapper, TXT_UninstallRDPWrapper);
-      WizardForm.StatusLabel.Caption := 'Uninstalling RDP Wrapper...';
-      
-      // Temporarily set ServiceDll to RDP Wrapper value for RDPWInst.exe to work
-      RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', GetRDPWrapperPath + '\rdpwrap.dll');
-      Sleep(SLEEP_MEDIUM);
-      
-      // Extract RDPWInst.exe from payload to temp directory for robustness
-      // First try to use it from {app}, fall back to extracting from payload
-      RDPWInstPath := AppBin(FILE_RDPW_INST);
-      
-      // If RDPWInst.exe is missing from app folder, extract from payload
-      if not FileExists(RDPWInstPath) then
-      begin
-        WizardForm.StatusLabel.Caption := 'Extracting RDP Wrapper uninstaller...';
-        RDPWInstPath := TempFile(FILE_RDPW_INST);
-        // Extract from payload
-        CopyFile(ExpandConstant('{src}\third_party\rdpwrap_release\RDPWrap\RDPWInst.exe'), RDPWInstPath, False);
-      end;
-      
-      // Run RDPWInst.exe to uninstall RDP Wrapper
-      Exec(RDPWInstPath, '-u', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Log('DEBUG: RDPWInst.exe -u exit code = ' + IntToStr(ResultCode));
-      Sleep(SLEEP_MEDIUM);
-      SetStepDone(StepUninstallRDPWrapper, TXT_UninstallRDPWrapper);
-      
-      // Restore TermService to default Windows termsrv.dll
+      // No TermWrap uninstall step configured: restore defaults and remove payload
       SetStepInProgress(StepRemoveFolder, TXT_RemoveFolder);
       RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ExpandConstant('{sys}\termsrv.dll'));
-      
-      // Restore UmRdpService to default umrdp.dll
       RegWriteStringValue(HKLM, REG_UMRDPSERVICE_PARAMS, 'ServiceDll', ExpandConstant('{sys}\umrdp.dll'));
-      
-      // Remove the entire RDP Wrapper installation folder
-      DelTree(GetRDPWrapperPath, True, True, True);
+      // If an old TermWrap folder exists, remove it
+      if DirExists(AppRoot) then
+        DelTree(AppRoot, True, True, True);
       Sleep(SLEEP_SHORT);
       SetStepDone(StepRemoveFolder, TXT_RemoveFolder);
       
@@ -2919,7 +2835,7 @@ begin
     // Handle uninstall completion
     if InstallType = 3 then
     begin
-      WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap and RDP Wrapper have been removed.';
+      WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap has been removed.';
     end
     // Advanced mode: tools and utilities
     else if InstallType = 2 then
@@ -2976,13 +2892,12 @@ begin
       // VC++ ensured (installed or skipped)
       SetStepDone(StepEnsureVC, TXT_EnsureVC);
       
-      // Install RDP Wrapper
-      SetStepInProgress(StepInstallRDPWrapper, TXT_InstallRDPWrapper);
-      WizardForm.StatusLabel.Caption := 'Installing RDP Wrapper...';
-      Exec(AppBin(FILE_RDPW_INST), '-i -o', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Log('DEBUG: RDPWInst.exe -i -o exit code = ' + IntToStr(ResultCode));
-      Sleep(SLEEP_MEDIUM);
-      SetStepDone(StepInstallRDPWrapper, TXT_InstallRDPWrapper);
+      // Install TermWrap
+      SetStepInProgress(StepInstallTermWrap, TXT_InstallTermWrap);
+      WizardForm.StatusLabel.Caption := 'Installing TermWrap...';
+      // TermWrap files are bundled and copied earlier; no external installer to run.
+      Sleep(SLEEP_SHORT);
+      SetStepDone(StepInstallTermWrap, TXT_InstallTermWrap);
       
       SetStepInProgress(StepConfigureService, TXT_ConfigureService);
       WizardForm.StatusLabel.Caption := 'Configuring TermWrap service...';
@@ -3089,7 +3004,7 @@ begin
                   'Would you like to restart your computer now?', mbConfirmation, MB_YESNO) = IDYES then
         begin
           // User chose to restart now
-          Exec('shutdown.exe', '/r /t 5 /c "Restarting to complete RDP Wrapper setup"', '', SW_HIDE, ewNoWait, ResultCode);
+          Exec('shutdown.exe', '/r /t 5 /c "Restarting to complete TermWrap setup"', '', SW_HIDE, ewNoWait, ResultCode);
         end;
       end;
     end;
@@ -3129,9 +3044,7 @@ begin
     begin
       // Uninstall completion message
       WizardForm.FinishedHeadingLabel.Caption := 'Uninstallation Complete';
-      CompletionText := 'TermWrap and RDP Wrapper have been successfully removed.' + #13#10#13#10 +
-                       'The Program Files\RDP Wrapper folder and all its contents have been deleted.' + #13#10#13#10 +
-                       'Remote Desktop Services have been restored to their default Windows configuration.';
+      CompletionText := 'TermWrap has been successfully removed.';
       WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
     end
     else if InstallType = 2 then

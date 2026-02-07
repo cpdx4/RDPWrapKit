@@ -13,7 +13,6 @@
 - **Solution**: RDPWrapKit bundles the community's best tools into a single installer that _just works_
 
 ### What's in it
-- [x] [RDPWrapper](https://github.com/stascorp/rdpwrap/releases) - One-click installation for base local RDP functionality
 - [x] [TermWrap](https://github.com/llccd/TermWrap) - Seamless updates (eliminating need for "rdpwrap.ini" files to be updated)
 - [x] Optional user creation during setup
 - [x] Proactively identify and auto-fix common RDP misconfigurations
@@ -26,8 +25,8 @@
    - It is virus free. If worried, you can inspect the [source code](https://github.com/cpdx4/RDPWrapKit/blob/main/RDPWrapKit.iss) or build it yourself (instructions at bottom)
 
 2. Run the **RDPWrapKit-Setup.exe** app:
-   - **For new installs**, use "Typical Setup" ("Install RDPWrap" and "Create Users")
-   - If you're already running RDPWrap, choose "Install RDPWrap" and "Use existing users"
+  - **For new installs**, use "Typical Setup" ("Install TermWrap" and "Create Users")
+  - If you're already running TermWrap, choose "Use existing users" and skip installation
     <details>
       <summary>Show screenshot</summary>
     <img width="598" height="464" alt="Installer_SetupOptions" src="https://github.com/user-attachments/assets/5f2e9b9b-2633-44d4-bdaf-2fdd40b8d74d" />
@@ -60,7 +59,7 @@
 - Open an [issue](https://github.com/cpdx4/RDPWrapKit/issues) on this repository for questions, bugs, or enhancement requests
 
 # Credits
-- RDPWrapKit builds on the fantastic work of the RDP Wrapper and TermWrap. This project does not modify their code.
+- RDPWrapKit builds on the fantastic work of [TermWrap](https://github.com/llccd/TermWrap), which was inspired by [RDPWrapper](https://github.com/stascorp/rdpwrap/releases)
 - Bee Swarm Simulator communities ([BSGH](https://discord.gg/bsgh) and [BSS Grinders](https://discord.gg/K5U3RdGXh6))
 
 
