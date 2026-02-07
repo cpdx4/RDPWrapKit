@@ -78,7 +78,7 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ;   - Files are protected by Windows Defender exclusions added during install
 ; -------------------------------------------------------------------------
 ; Bundle your payload files (only for Full Install, not for Add Users Only)
-Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion
 
 
@@ -192,7 +192,12 @@ Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dwor
 // Forward declarations
 procedure CheckAndInstallMSTSC; forward;
 procedure OnManageUsersClick(Sender: TObject); forward;
+procedure OnPrevUsersPageClick(Sender: TObject); forward;
+procedure OnNextUsersPageClick(Sender: TObject); forward;
+procedure UpdateUsersPageDisplay; forward;
+function IsValidPassword(const Password: string): String; forward;
 procedure OpenTermWrap(Sender: TObject); forward;
+function ValidateLocalCredential(const UserName, Password: string): Boolean; forward;
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
 procedure OnInstallTypeChange(Sender: TObject); forward;
@@ -211,14 +216,20 @@ var
   AdvancedTool5Page: TWizardPage;  // Placeholder tool 5
   SelectedAdvancedTool: Integer;   // Track which tool is selected
   LocalUsersList: TStringList;
+  AdvancedTool1ControlsBuilt: Boolean;
   UserCheckBoxes: array of TCheckBox;
   UserPasswordEdits: array of TEdit;
   UserPasswordStatus: array of TLabel;
+  // Pagination for existing user list display
+  CurrentUserPage: Integer;
+  Tool1PrevButton: TButton;
+  Tool1NextButton: TButton;
+  Tool1PageLabel: TLabel;
+  UsersPerPage: Integer;
   ShortcutsList: TStringList;
   InstallLogPath: string;
   AddMoreRadio: TRadioButton;
   DoneRadio: TRadioButton;
-  SkipUsersCheckBox: TCheckBox;
   // New welcome/options controls
   TypicalRadio: TRadioButton;
   AdvancedRadio: TRadioButton;
@@ -298,7 +309,7 @@ const
   TXT_CreateShortcuts = 'Create RDP shortcuts for selected users';
   TXT_PreTrust = 'Pre-trust RDP certificate for current user';
   TXT_CheckRDP = 'Verify RDP service is listening';
-  TXT_CheckMSTSC = 'Check for Remote Desktop Connection (if missing)';
+  TXT_CheckMSTSC = 'Check for Remote Desktop Connection';
   TXT_InstallMSTSC = 'Install Remote Desktop Connection (if missing)';
   TXT_RemoveFolder = 'Remove TermWrap folder';
   TXT_UninstallTermWrap = 'Uninstall TermWrap';
@@ -1123,7 +1134,11 @@ begin
         UserPasswordEdits[i].Text := '';
     end;
     if Assigned(UserPasswordStatus[i]) then
+    if Assigned(UserPasswordStatus[i]) then
+    begin
+      UserPasswordStatus[i].Caption := '';
       UserPasswordStatus[i].Visible := False;
+    end;
   end;
 end;
 
@@ -1244,8 +1259,15 @@ var
   TopPos: Integer;
   BottomPos: Integer;
 begin
+  // Avoid building controls multiple times (prevents duplicate buttons/labels)
+  if AdvancedTool1ControlsBuilt then
+    exit;
   TopPos := ScaleY(10);
-  
+
+  // Default users-per-page
+  if UsersPerPage = 0 then
+    UsersPerPage := 7;
+
   // Create "Users found" header
   Tool1UsersHeaderLabel := TLabel.Create(AdvancedTool1Page);
   Tool1UsersHeaderLabel.Parent := AdvancedTool1Page.Surface;
@@ -1253,7 +1275,7 @@ begin
   Tool1UsersHeaderLabel.Top := TopPos;
   Tool1UsersHeaderLabel.Caption := 'Users found';
   Tool1UsersHeaderLabel.Font.Style := [fsBold];
-  
+
   // Create "Password" header
   Tool1PasswordHeaderLabel := TLabel.Create(AdvancedTool1Page);
   Tool1PasswordHeaderLabel.Parent := AdvancedTool1Page.Surface;
@@ -1261,42 +1283,74 @@ begin
   Tool1PasswordHeaderLabel.Top := TopPos;
   Tool1PasswordHeaderLabel.Caption := 'Password';
   Tool1PasswordHeaderLabel.Font.Style := [fsBold];
-  
+
   TopPos := TopPos + ScaleY(25);
-  
+
+  // Create controls for all users but only show a page at a time
   for i := 0 to LocalUsersList.Count - 1 do
   begin
+    // Checkbox
     UserCheckBoxes[i] := TCheckBox.Create(AdvancedTool1Page);
     UserCheckBoxes[i].Parent := AdvancedTool1Page.Surface;
     UserCheckBoxes[i].Left := ScaleX(20);
-    UserCheckBoxes[i].Top := TopPos;
     UserCheckBoxes[i].Width := ScaleX(180);
     UserCheckBoxes[i].Caption := LocalUsersList[i];
     UserCheckBoxes[i].OnClick := @OnUserCheckBoxClick;
+    UserCheckBoxes[i].Tag := i;
 
+    // Password edit
     UserPasswordEdits[i] := TEdit.Create(AdvancedTool1Page);
     UserPasswordEdits[i].Parent := AdvancedTool1Page.Surface;
     UserPasswordEdits[i].Left := ScaleX(220);
-    UserPasswordEdits[i].Top := TopPos - ScaleY(2);
     UserPasswordEdits[i].Width := ScaleX(200);
     UserPasswordEdits[i].PasswordChar := '*';
     UserPasswordEdits[i].Enabled := False;
     UserPasswordEdits[i].OnChange := @OnPasswordEditChange;
+    UserPasswordEdits[i].Tag := i;
 
+    // Status label
     UserPasswordStatus[i] := TLabel.Create(AdvancedTool1Page);
     UserPasswordStatus[i].Parent := AdvancedTool1Page.Surface;
     UserPasswordStatus[i].Left := ScaleX(430);
-    UserPasswordStatus[i].Top := TopPos - ScaleY(2);
     UserPasswordStatus[i].Font.Color := clRed;
     UserPasswordStatus[i].Caption := '';
     UserPasswordStatus[i].Visible := False;
+  end;
 
-    TopPos := TopPos + ScaleY(26);
+  // Pagination controls (only if more users than fit on a single page)
+  if LocalUsersList.Count > UsersPerPage then
+  begin
+    // Prev button
+    Tool1PrevButton := TButton.Create(AdvancedTool1Page);
+    Tool1PrevButton.Parent := AdvancedTool1Page.Surface;
+    Tool1PrevButton.Left := ScaleX(20);
+    Tool1PrevButton.Width := ScaleX(80);
+    Tool1PrevButton.Caption := 'Previous';
+    Tool1PrevButton.OnClick := @OnPrevUsersPageClick;
+
+    // Page label
+    Tool1PageLabel := TLabel.Create(AdvancedTool1Page);
+    Tool1PageLabel.Parent := AdvancedTool1Page.Surface;
+    Tool1PageLabel.AutoSize := True;
+    Tool1PageLabel.Left := ScaleX(110);
+
+    // Next button
+    Tool1NextButton := TButton.Create(AdvancedTool1Page);
+    Tool1NextButton.Parent := AdvancedTool1Page.Surface;
+    Tool1NextButton.Width := ScaleX(80);
+    Tool1NextButton.Caption := 'Next';
+    Tool1NextButton.OnClick := @OnNextUsersPageClick;
+  end
+  else
+  begin
+    Tool1PrevButton := nil;
+    Tool1NextButton := nil;
+    Tool1PageLabel := nil;
   end;
 
   // Calculate bottom position for the password reset link
   BottomPos := AdvancedTool1Page.SurfaceHeight - ScaleY(40);
-  
+
   // Create password reset link
   Tool1PasswordResetLink := TLabel.Create(AdvancedTool1Page);
   Tool1PasswordResetLink.Parent := AdvancedTool1Page.Surface;
@@ -1312,7 +1366,160 @@ begin
   Tool1PasswordResetLink.Cursor := crHandPoint;
   Tool1PasswordResetLink.OnClick := @OnPasswordResetLinkClick;
 
+  // Start at first page and arrange visible controls
+  CurrentUserPage := 0;
+  UpdateUsersPageDisplay;
+
   SetUserControlsEnabled(True);
+
+  // Mark controls as built to avoid duplicates on re-entry
+  AdvancedTool1ControlsBuilt := True;
+end;
+
+procedure UpdateUsersPageDisplay;
+var
+  i, PageCount, StartIdx, EndIdx, VisIndex, RowHeight, BaseTop: Integer;
+begin
+  if LocalUsersList.Count = 0 then
+    exit;
+
+  PageCount := (LocalUsersList.Count + UsersPerPage - 1) div UsersPerPage;
+  if CurrentUserPage < 0 then CurrentUserPage := 0;
+  if CurrentUserPage >= PageCount then CurrentUserPage := PageCount - 1;
+
+  StartIdx := CurrentUserPage * UsersPerPage;
+  EndIdx := StartIdx + UsersPerPage - 1;
+  if EndIdx > LocalUsersList.Count - 1 then EndIdx := LocalUsersList.Count - 1;
+
+  RowHeight := ScaleY(26);
+  BaseTop := Tool1UsersHeaderLabel.Top + ScaleY(25);
+  VisIndex := 0;
+
+  for i := 0 to LocalUsersList.Count - 1 do
+  begin
+    if Assigned(UserCheckBoxes[i]) then
+    begin
+      UserCheckBoxes[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+      if UserCheckBoxes[i].Visible then
+        UserCheckBoxes[i].Top := BaseTop + VisIndex * RowHeight;
+    end;
+    if Assigned(UserPasswordEdits[i]) then
+    begin
+      UserPasswordEdits[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+      if UserPasswordEdits[i].Visible then
+        UserPasswordEdits[i].Top := BaseTop + VisIndex * RowHeight - ScaleY(2);
+    end;
+    if Assigned(UserPasswordStatus[i]) then
+    begin
+      UserPasswordStatus[i].Visible := False;
+      if (i >= StartIdx) and (i <= EndIdx) then
+      begin
+        if UserPasswordStatus[i].Caption <> '' then
+          UserPasswordStatus[i].Visible := True;
+        UserPasswordStatus[i].Top := BaseTop + VisIndex * RowHeight - ScaleY(2);
+      end;
+    end;
+
+    if (i >= StartIdx) and (i <= EndIdx) then
+      Inc(VisIndex);
+  end;
+
+  if Assigned(Tool1PrevButton) and Assigned(Tool1NextButton) and Assigned(Tool1PageLabel) then
+  begin
+    Tool1PrevButton.Top := BaseTop + VisIndex * RowHeight + ScaleY(6);
+    Tool1NextButton.Top := Tool1PrevButton.Top;
+    Tool1NextButton.Left := Tool1PrevButton.Left + Tool1PrevButton.Width + ScaleX(120);
+    Tool1PageLabel.Top := Tool1PrevButton.Top + ScaleY(4);
+    Tool1PageLabel.Caption := 'Page ' + IntToStr(CurrentUserPage + 1) + ' of ' + IntToStr(PageCount);
+    Tool1PrevButton.Enabled := CurrentUserPage > 0;
+    Tool1NextButton.Enabled := CurrentUserPage < PageCount - 1;
+  end;
+end;
+
+procedure OnPrevUsersPageClick(Sender: TObject);
+begin
+  if CurrentUserPage > 0 then
+    Dec(CurrentUserPage);
+  UpdateUsersPageDisplay;
+end;
+
+procedure OnNextUsersPageClick(Sender: TObject);
+var
+  PageCount: Integer;
+  StartIdx: Integer;
+  EndIdx: Integer;
+  i: Integer;
+  HasErrors: Boolean;
+  Password: string;
+begin
+  PageCount := (LocalUsersList.Count + UsersPerPage - 1) div UsersPerPage;
+
+  StartIdx := CurrentUserPage * UsersPerPage;
+  EndIdx := StartIdx + UsersPerPage - 1;
+  if EndIdx > LocalUsersList.Count - 1 then
+    EndIdx := LocalUsersList.Count - 1;
+
+  HasErrors := False;
+  for i := StartIdx to EndIdx do
+  begin
+    if Assigned(UserCheckBoxes[i]) and UserCheckBoxes[i].Checked then
+    begin
+      if Assigned(UserPasswordEdits[i]) then
+        Password := UserPasswordEdits[i].Text
+      else
+        Password := '';
+
+      if Password = '' then
+      begin
+        if Assigned(UserPasswordStatus[i]) then
+        begin
+          UserPasswordStatus[i].Caption := 'Password required';
+          UserPasswordStatus[i].Visible := True;
+        end;
+        HasErrors := True;
+        continue;
+      end;
+
+      if IsValidPassword(Password) <> '' then
+      begin
+        if Assigned(UserPasswordStatus[i]) then
+        begin
+          UserPasswordStatus[i].Caption := 'Invalid password';
+          UserPasswordStatus[i].Visible := True;
+        end;
+        HasErrors := True;
+        continue;
+      end;
+
+      if not ValidateLocalCredential(LocalUsersList[i], Password) then
+      begin
+        if Assigned(UserPasswordStatus[i]) then
+        begin
+          UserPasswordStatus[i].Caption := 'Incorrect PW';
+          UserPasswordStatus[i].Visible := True;
+        end;
+        HasErrors := True;
+        continue;
+      end;
+
+      if Assigned(UserPasswordStatus[i]) then
+      begin
+        UserPasswordStatus[i].Caption := '';
+        UserPasswordStatus[i].Visible := False;
+      end;
+    end;
+  end;
+
+  if HasErrors then
+  begin
+    // Keep user on the same page and refresh statuses
+    UpdateUsersPageDisplay;
+    exit;
+  end;
+
+  if CurrentUserPage < PageCount - 1 then
+    Inc(CurrentUserPage);
+  UpdateUsersPageDisplay;
 end;
 
 function UserAlreadyEntered(const UserName: string): Boolean;
@@ -1390,8 +1597,9 @@ end;
 
 function ShouldInstallFiles: Boolean;
 begin
-  // Always include bundled files
-  Result := True;
+  // Only install bundled TermWrap files when a full install or when the
+  // user explicitly selected "Install TermWrap" on the welcome/options page.
+  Result := (InstallType = 0) or DoInstallTermWrap;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -1587,10 +1795,6 @@ begin
   if Assigned(UsersList) then
   begin
     UsersList.Clear;
-  end;
-  if Assigned(ShortcutsList) then
-  begin
-    ShortcutsList.Clear;
   end;
 end;
 
@@ -2280,18 +2484,7 @@ begin
   DoneRadio.Caption := 'I''m done creating users, continue setup';
   DoneRadio.Checked := True;  // Default selection
 
-  // Subtle opt-out for users who already have accounts
-  SkipUsersCheckBox := TCheckBox.Create(UserPage);
-  SkipUsersCheckBox.Parent := UserPage.Surface;
-  SkipUsersCheckBox.Left := ScaleX(20);
-  SkipUsersCheckBox.Top := DoneRadio.Top + ScaleY(22);
-  SkipUsersCheckBox.Width := ScaleX(420);
-  SkipUsersCheckBox.Caption := 'Skip creating users for now (advanced)';
-  SkipUsersCheckBox.Checked := False;
-  if IsDarkColor(UserPage.Surface.Color) then
-    SkipUsersCheckBox.Font.Color := RGBToColor(190,190,190)
-  else
-    SkipUsersCheckBox.Font.Color := clGray;
+  // (Removed subtle opt-out checkbox; users can unselect options on the main dialog)
   
   // Initialize UsersList
   UsersList := TStringList.Create;
@@ -2512,12 +2705,14 @@ begin
             continue;
           end;
 
+          UserPasswordStatus[i].Caption := '';
           UserPasswordStatus[i].Visible := False;
 
           ShortcutsList.Add(LocalUsersList[i] + '|' + Password);
         end
         else if Assigned(UserPasswordStatus[i]) then
         begin
+          UserPasswordStatus[i].Caption := '';
           UserPasswordStatus[i].Visible := False;
         end;
       end;
@@ -2603,7 +2798,7 @@ begin
       end;
 
       // After adding pending entry, ensure at least one user exists
-      if (UsersList.Count = 0) and (not SkipUsersCheckBox.Checked) then
+      if (UsersList.Count = 0) then
       begin
         MsgBox('Please create at least one user account before proceeding.', mbError, MB_OK);
         Result := False;
@@ -2754,6 +2949,8 @@ begin
       AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
       if UsersList.Count > 0 then
         AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
+      if ShortcutsList.Count > 0 then
+        AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepStartSvc, TXT_StartSvc);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
       AddStepPendingLabel(StepCheckRDP, TXT_CheckRDP);
@@ -2764,6 +2961,8 @@ begin
       AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
       if UsersList.Count > 0 then
         AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
+      if ShortcutsList.Count > 0 then
+        AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
     end;
 
@@ -3024,6 +3223,9 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   i: Integer;
   CompletionText: string;
+  Entry: string;
+  UserName: string;
+  Password: string;
 begin
   // Lazy-load user list only when Advanced Tools page is first shown
   if (CurPageID = AdvancedToolsSelectionPage.ID) and (LocalUsersList.Count = 0) then
@@ -3034,6 +3236,16 @@ begin
     SetLength(UserPasswordStatus, LocalUsersList.Count);
     // Build per-user controls on Tool 1 page
     BuildAdvancedUserControls;
+  end;
+
+  // Ensure pagination resets when Advanced Tool 1 page is shown (avoid stale page index after Back/Next)
+  if CurPageID = AdvancedTool1Page.ID then
+  begin
+    if LocalUsersList.Count > 0 then
+    begin
+      CurrentUserPage := 0;
+      UpdateUsersPageDisplay;
+    end;
   end;
   
   // Display completion info on the final page
@@ -3047,35 +3259,54 @@ begin
       CompletionText := 'TermWrap has been successfully removed.';
       WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
     end
-    else if InstallType = 2 then
-    begin
-      // Advanced tools completion message
-      WizardForm.FinishedHeadingLabel.Caption := 'Advanced Tools Complete';
-      CompletionText := 'Advanced tools have been executed successfully.' + #13#10#13#10 +
-                       'Your RDP installation is ready to use.';
-      WriteInstallerLog('CurPageChanged: Showing advanced tools completion message');
-    end
     else
     begin
       // Installation completion message
       WizardForm.FinishedHeadingLabel.Caption := 'Installation Complete';
+      CompletionText := '';
+
+      // Indicate whether TermWrap was installed
+      if DoInstallTermWrap then
+        CompletionText := CompletionText + 'TermWrap has been installed.' + #13#10#13#10;
+
+      // List newly created users (and their shortcuts)
       if CreatedUsersList.Count > 0 then
       begin
-        CompletionText := 'Created ' + IntToStr(CreatedUsersList.Count) + ' user account(s) and desktop shortcuts:' + #13#10;
-        // Iterate through all created users and add to completion text
+        CompletionText := CompletionText + 'Created ' + IntToStr(CreatedUsersList.Count) + ' user account(s) and desktop shortcuts:' + #13#10;
         for i := 0 to CreatedUsersList.Count - 1 do
         begin
           CompletionText := CompletionText + '- ' + CreatedUsersList[i] + #13#10;
         end;
-        CompletionText := CompletionText + #13#10 +
-                         'You can now open RDP connections using these shortcuts.';
+        CompletionText := CompletionText + #13#10;
         WriteInstallerLog('CurPageChanged: Created ' + IntToStr(CreatedUsersList.Count) + ' users');
-      end
-      else
+      end;
+
+      // List shortcuts created for existing users (if any)
+      if ShortcutsList.Count > 0 then
+      begin
+        CompletionText := CompletionText + 'Created ' + IntToStr(ShortcutsList.Count) + ' shortcut(s) for existing user(s):' + #13#10;
+        for i := 0 to ShortcutsList.Count - 1 do
+        begin
+          Entry := ShortcutsList[i];
+          ParseUserEntry(Entry, UserName, Password);
+          CompletionText := CompletionText + '- ' + UserName + #13#10;
+        end;
+        CompletionText := CompletionText + #13#10;
+        WriteInstallerLog('CurPageChanged: Created ' + IntToStr(ShortcutsList.Count) + ' shortcuts for existing users');
+      end;
+
+      // Fallback message when nothing relevant was done
+      if (not DoInstallTermWrap) and (CreatedUsersList.Count = 0) and (ShortcutsList.Count = 0) then
       begin
         CompletionText := 'No user accounts were created during this run.' + #13#10#13#10 +
                           'You can add users later by rerunning this installer and choosing "Create Users Only".';
-        WriteInstallerLog('CurPageChanged: No users created');
+        WriteInstallerLog('CurPageChanged: No users or shortcuts created');
+      end
+      else
+      begin
+        // Encourage using shortcuts if any were created
+        if (CreatedUsersList.Count + ShortcutsList.Count) > 0 then
+          CompletionText := CompletionText + 'You can now open RDP connections using the created shortcuts.';
       end;
     end;
     
