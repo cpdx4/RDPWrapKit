@@ -43,8 +43,8 @@
 ; - CloseApplications: Automatically closes conflicting processes
 ; -------------------------------------------------------------------------
 AppName=RDPWrapKit
-AppVersion=0.48
-VersionInfoVersion=0.48.0.0
+AppVersion=0.49
+VersionInfoVersion=0.49.0.0
 AppPublisher=cpdx4
 AppPublisherURL=https://cpdx4.github.io/RDPWrapKit/
 AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
@@ -284,6 +284,8 @@ var
   FinishedText: TRichEditViewer;
   // Button to open install log on finish page
   ViewLogButton: TButton;
+  // Flag set when Smart App Control (VerifiedAndReputablePolicyState) is detected as On
+  SmartAppControlIsOn: Boolean;
 
 const
   // -------------------------------------------------------------------------
@@ -2079,9 +2081,22 @@ var
   DesiredBottom: Integer;
   BlockTop: Integer;
   Delta: Integer;
+  regVal: Cardinal;
 begin
   // Initialize installer log file
   InitInstallerLog;
+  // Detect Smart App Control (VerifiedAndReputablePolicyState == 1)
+  SmartAppControlIsOn := False;
+  if RegQueryDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\CI\Policy', 'VerifiedAndReputablePolicyState', regVal) then
+  begin
+    WriteInstallerLog('SmartAppControl: Registry value VerifiedAndReputablePolicyState=' + IntToStr(regVal));
+    if regVal = 1 then
+      SmartAppControlIsOn := True;
+  end
+  else
+  begin
+    WriteInstallerLog('SmartAppControl: Registry value VerifiedAndReputablePolicyState not found');
+  end;
   // DON'T stop TermService here - it delays the wizard from showing by 5 seconds
   // It will be stopped later in the ssInstall step instead
   
@@ -3310,6 +3325,16 @@ begin
       end;
     end;
     
+    // If Smart App Control is enabled, add guidance and show a popup
+    if SmartAppControlIsOn then
+    begin
+      CompletionText := CompletionText + #13#10#13#10 +
+        'IMPORTANT: Smart App Control is enabled on this system which intereferes with normal operation.' + #13#10 +
+        'It is highly recommended to set it to Off via: Windows Security app > App & browser control > Smart App Control.';
+      MsgBox('Smart App Control is enabled. It is highly recommended to set it to Off under:' + #13#10 +
+             'Windows Security app > App & browser control > Smart App Control', mbInformation, MB_OK);
+    end;
+
     WizardForm.FinishedLabel.Caption := CompletionText;
     WizardForm.Update;
     WriteInstallerLog('CurPageChanged: Updating FinishedText control');
