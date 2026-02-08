@@ -5,7 +5,7 @@
 2. Run it and choose **Typical Setup**
 3. Open the new RDP shortcut on your desktop
 
-<img width="594" height="459" alt="Installer_Installing" src="https://github.com/user-attachments/assets/5e25e8d3-6ab2-4776-a47d-f42e9f079a2f" />
+  <img width="571" height="346" alt="image" src="https://github.com/user-attachments/assets/bf059039-6677-4105-be13-139f0a536f40" />
 
 ---
 ### Why this exists
@@ -37,7 +37,7 @@
 
 6. The install takes care of all the typical steps required to setup local RDP. Restart if prompted:
 
-      <img width="594" height="459" alt="Installer_Installing" src="https://github.com/user-attachments/assets/5e25e8d3-6ab2-4776-a47d-f42e9f079a2f" />
+      <img width="571" height="346" alt="image" src="https://github.com/user-attachments/assets/bf059039-6677-4105-be13-139f0a536f40" />
 
 8. Open the new RDP shortcut(s) on the desktop:
 
