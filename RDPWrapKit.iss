@@ -79,7 +79,8 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ; -------------------------------------------------------------------------
 ; Bundle your payload files (only for Full Install, not for Add Users Only)
 Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
-Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion
+Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
+Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 
 
 
@@ -96,9 +97,9 @@ Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion
 ;   - uninsdeletevalue flag ensures these entries are removed on uninstall
 ; -------------------------------------------------------------------------
 ; Enable RDP
-Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Terminal Server"; ValueType: dword; ValueName: "fDenyTSConnections"; ValueData: 0; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Terminal Server"; ValueType: dword; ValueName: "fDenyTSConnections"; ValueData: 0; Flags: uninsdeletevalue; Check: ShouldApplyRegistryEntries
 ; Allow minimized RDP
-Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dword; ValueName: "RemoteDesktop_SuppressWhenMinimized"; ValueData: 2; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dword; ValueName: "RemoteDesktop_SuppressWhenMinimized"; ValueData: 2; Flags: uninsdeletevalue; Check: ShouldApplyRegistryEntries
 
 [Run]
 ; Run section is now handled in Code section for proper sequencing
@@ -195,12 +196,17 @@ procedure OnManageUsersClick(Sender: TObject); forward;
 procedure OnPrevUsersPageClick(Sender: TObject); forward;
 procedure OnNextUsersPageClick(Sender: TObject); forward;
 procedure UpdateUsersPageDisplay; forward;
+procedure OnPrevShortcutPageClick(Sender: TObject); forward;
+procedure OnNextShortcutPageClick(Sender: TObject); forward;
+procedure OnShortcutRadioClick(Sender: TObject); forward;
+procedure UpdateShortcutPageDisplay; forward;
 function IsValidPassword(const Password: string): String; forward;
 procedure OpenTermWrap(Sender: TObject); forward;
 function ValidateLocalCredential(const UserName, Password: string): Boolean; forward;
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
 procedure OnInstallTypeChange(Sender: TObject); forward;
+function IsTermWrapInstalled(): Boolean; forward;
 procedure InitInstallerLog; forward;
 procedure WriteInstallerLog(const Msg: string); forward;
 var
@@ -208,12 +214,8 @@ var
   WelcomePage: TWizardPage;
   UserPage: TInputQueryWizardPage;
   AdvancedPage: TWizardPage;
-  AdvancedToolsSelectionPage: TInputOptionWizardPage;  // Main Advanced Tools selection
+  EditSystemwideSettingsPage: TWizardPage;  // Main Edit System-wide settings page
   AdvancedTool1Page: TWizardPage;  // Create RDP desktop shortcuts
-  AdvancedTool2Page: TWizardPage;  // Placeholder tool 2
-  AdvancedTool3Page: TWizardPage;  // Placeholder tool 3
-  AdvancedTool4Page: TWizardPage;  // Placeholder tool 4
-  AdvancedTool5Page: TWizardPage;  // Placeholder tool 5
   SelectedAdvancedTool: Integer;   // Track which tool is selected
   LocalUsersList: TStringList;
   AdvancedTool1ControlsBuilt: Boolean;
@@ -233,21 +235,64 @@ var
   // New welcome/options controls
   TypicalRadio: TRadioButton;
   AdvancedRadio: TRadioButton;
+  AdvancedSettingsRadio: TRadioButton;
   UninstallRadio: TRadioButton;
   chkInstallTermWrap: TCheckBox;
   chkManageUsers: TCheckBox;
   rbCreateUsers: TRadioButton;
   rbUseExistingUsers: TRadioButton;
+  rbEditShortcutSettings: TRadioButton;
   ManageUsersGroup: TPanel;
+  EditShortcutPage: TWizardPage;
+  DesktopRdpFiles: TStringList;
+  ShortcutRadioButtons: array of TRadioButton;
+  CurrentShortcutPage: Integer;
+  ShortcutsPerPage: Integer;
+  ShortcutPrevButton: TButton;
+  ShortcutNextButton: TButton;
+  ShortcutPageLabel: TLabel;
+  ShortcutHeaderLabel: TLabel;
+  ShortcutEmptyLabel: TLabel;
+  EditShortcutControlsBuilt: Boolean;
+  SelectedShortcutIndex: Integer;
+  SelectedShortcutPath: string;
+  FinishedExampleImage: TBitmapImage;
+  FinishedExampleLabel: TLabel;
   // Flags derived from welcome/options controls
   DoInstallTermWrap: Boolean;
   DoManageUsers: Boolean;
   NeedCreateUsers: Boolean;
   JumpToAdvancedTool1: Boolean;
+  DoEditSystemWideSettings: Boolean;
+  OrigEnableRDP: Boolean;
+  OrigShowUsers: Boolean;
+  OrigPreventDuplicate: Boolean;
+  OrigRdpPort: Cardinal;
   OptionsLabel: TLabel;
   Tool1UsersHeaderLabel: TLabel;  // "Users found" header
   Tool1PasswordHeaderLabel: TLabel;  // "Password" header
   Tool1PasswordResetLink: TLabel;  // Password reset link at bottom
+  // Controls for Edit System-wide Settings page
+  lblSysHeader: TLabel;
+  lblWinVer: TLabel;
+  lblWinVerName: TLabel;
+  lblRDPService: TLabel;
+  lblRDPServiceName: TLabel;
+  lblWinRDPVer: TLabel;
+  lblWinRDPVerName: TLabel;
+  lblTermWrapVer: TLabel;
+  lblTermWrapVerName: TLabel;
+
+  lblGenHeader: TLabel;
+  chkEnableRDP: TCheckBox;
+  chkShowUsers: TCheckBox;
+  chkPreventDuplicate: TCheckBox;
+  lblRdpPort: TLabel;
+  edtRdpPort: TEdit;
+  lblPortDefault: TLabel;
+
+  lblActionsHeader: TLabel;
+  chkRestartRDP: TCheckBox;
   // Progress UI on Installing page
   StepsHeaderLabel: TLabel;
   StepAddExcl: TLabel;
@@ -265,7 +310,12 @@ var
   StepInstallMSTSC: TLabel;
   StepRemoveFolder: TLabel;
   StepUninstallTermWrap: TLabel;
-  InstallType: Integer;  // 0 = Full Install, 1 = Add User Only, 2 = Advanced, 3 = Uninstall Everything
+  StepEnableRDP: TLabel;
+  StepShowUsers: TLabel;
+  StepPreventDuplicate: TLabel;
+  StepSetRdpPort: TLabel;
+  StepRestartRDP: TLabel;
+  InstallType: Integer;  // 0 = Full Install, 1 = Add Users Only, 2 = Manage Users and Shortcuts, 3 = Edit Shortcut Settings, 5 = Uninstall Everything
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
   UsersList: TStringList;
   CreatedUsersList: TStringList;  // Store usernames to display on finish page
@@ -281,7 +331,7 @@ var
   // Credits / license blurb on welcome page
   CreditsText: TRichEditViewer;
   // Rich text control on finished page to show long completion messages
-  FinishedText: TRichEditViewer;
+  FinishedText: TLabel;
   // Button to open install log on finish page
   ViewLogButton: TButton;
   // Flag set when Smart App Control (VerifiedAndReputablePolicyState) is detected as On
@@ -376,8 +426,10 @@ const
   // Pre-expanded temp paths for frequently-used temporary files
   // Using constants avoids repeated ExpandConstant() calls
   FILE_ICON_BMP = 'RDPWrapKitIcon.bmp';
+  FILE_RDPEDITSAVE_BMP = 'rdp_edit_save.bmp';
   TEMP_LOCAL_USERS = '{tmp}\\local_users.txt';
   TEMP_ICON_BMP = '{tmp}\\' + FILE_ICON_BMP;
+  TEMP_RDPEDITSAVE_BMP = '{tmp}\\' + FILE_RDPEDITSAVE_BMP;
   // Path to installer log file (auto-created in %TEMP%)
   INSTALL_LOG_PATH = '{tmp}\\RDPWrapKit_install.log';
   
@@ -614,6 +666,32 @@ begin
   WriteInstallerLog('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
   Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   WriteInstallerLog('PowerShell exitcode=' + IntToStr(ResultCode));
+end;
+
+// Execute a PowerShell command and capture stdout to a temp file, returning
+// the trimmed output as a string. Returns empty string on failure.
+function GetPSOutput(const Command: string): string;
+var
+  PSPath: string;
+  RC: Integer;
+  SL: TStringList;
+begin
+  Result := '';
+  PSPath := TempFile('psout.txt');
+  Exec(EXE_POWERSHELL,
+    BuildPowerShellArgs(Command + ' | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force', True),
+    '', SW_HIDE, ewWaitUntilTerminated, RC);
+  if (RC = 0) and FileExists(PSPath) then
+  begin
+    SL := TStringList.Create;
+    try
+      SL.LoadFromFile(PSPath);
+      Result := Trim(SL.Text);
+    finally
+      SL.Free;
+      DeleteFile(PSPath);
+    end;
+  end;
 end;
 
 procedure OpenTermWrap(Sender: TObject);
@@ -1121,6 +1199,175 @@ begin
   Result := UsersList;
 end;
 
+function GetDesktopRdpFiles: TStringList;
+var
+  FilesList: TStringList;
+  FindRec: TFindRec;
+  DesktopPattern: string;
+begin
+  FilesList := TStringList.Create;
+  DesktopPattern := ExpandConstant('{userdesktop}\*.rdp');
+
+  if FindFirst(DesktopPattern, FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Attributes and 16) = 0 then
+          FilesList.Add(ExpandConstant('{userdesktop}\') + FindRec.Name);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+
+  FilesList.Sort;
+  Result := FilesList;
+end;
+
+procedure OnShortcutRadioClick(Sender: TObject);
+begin
+  SelectedShortcutIndex := TRadioButton(Sender).Tag;
+end;
+
+procedure BuildShortcutEditorControls;
+var
+  i: Integer;
+begin
+  if EditShortcutControlsBuilt then
+    exit;
+
+  if ShortcutsPerPage = 0 then
+    ShortcutsPerPage := 8;
+
+  ShortcutHeaderLabel := TLabel.Create(EditShortcutPage);
+  ShortcutHeaderLabel.Parent := EditShortcutPage.Surface;
+  ShortcutHeaderLabel.Left := ScaleX(20);
+  ShortcutHeaderLabel.Top := ScaleY(12);
+  ShortcutHeaderLabel.Caption := 'Desktop .rdp shortcuts';
+  ShortcutHeaderLabel.Font.Style := [fsBold];
+
+  ShortcutEmptyLabel := TLabel.Create(EditShortcutPage);
+  ShortcutEmptyLabel.Parent := EditShortcutPage.Surface;
+  ShortcutEmptyLabel.Left := ScaleX(20);
+  ShortcutEmptyLabel.Top := ShortcutHeaderLabel.Top + ScaleY(28);
+  ShortcutEmptyLabel.Caption := 'No .rdp files were found on your Desktop.';
+  ShortcutEmptyLabel.Visible := False;
+
+  SetLength(ShortcutRadioButtons, DesktopRdpFiles.Count);
+  for i := 0 to DesktopRdpFiles.Count - 1 do
+  begin
+    ShortcutRadioButtons[i] := TRadioButton.Create(EditShortcutPage);
+    ShortcutRadioButtons[i].Parent := EditShortcutPage.Surface;
+    ShortcutRadioButtons[i].Left := ScaleX(20);
+    ShortcutRadioButtons[i].Width := EditShortcutPage.SurfaceWidth - ScaleX(40);
+    ShortcutRadioButtons[i].Caption := ExtractFileName(DesktopRdpFiles[i]);
+    ShortcutRadioButtons[i].Tag := i;
+    ShortcutRadioButtons[i].OnClick := @OnShortcutRadioClick;
+    ShortcutRadioButtons[i].Visible := False;
+  end;
+
+  if DesktopRdpFiles.Count > ShortcutsPerPage then
+  begin
+    ShortcutPrevButton := TButton.Create(EditShortcutPage);
+    ShortcutPrevButton.Parent := EditShortcutPage.Surface;
+    ShortcutPrevButton.Left := ScaleX(20);
+    ShortcutPrevButton.Width := ScaleX(80);
+    ShortcutPrevButton.Caption := 'Previous';
+    ShortcutPrevButton.OnClick := @OnPrevShortcutPageClick;
+
+    ShortcutPageLabel := TLabel.Create(EditShortcutPage);
+    ShortcutPageLabel.Parent := EditShortcutPage.Surface;
+    ShortcutPageLabel.AutoSize := True;
+    ShortcutPageLabel.Left := ScaleX(110);
+
+    ShortcutNextButton := TButton.Create(EditShortcutPage);
+    ShortcutNextButton.Parent := EditShortcutPage.Surface;
+    ShortcutNextButton.Width := ScaleX(80);
+    ShortcutNextButton.Caption := 'Next';
+    ShortcutNextButton.OnClick := @OnNextShortcutPageClick;
+  end
+  else
+  begin
+    ShortcutPrevButton := nil;
+    ShortcutNextButton := nil;
+    ShortcutPageLabel := nil;
+  end;
+
+  CurrentShortcutPage := 0;
+  UpdateShortcutPageDisplay;
+  EditShortcutControlsBuilt := True;
+end;
+
+procedure UpdateShortcutPageDisplay;
+var
+  i, PageCount, StartIdx, EndIdx, VisIndex, BaseTop, RowHeight: Integer;
+begin
+  BaseTop := ShortcutHeaderLabel.Top + ScaleY(26);
+  RowHeight := ScaleY(24);
+
+  if DesktopRdpFiles.Count = 0 then
+  begin
+    ShortcutEmptyLabel.Visible := True;
+    if Assigned(ShortcutPrevButton) then ShortcutPrevButton.Visible := False;
+    if Assigned(ShortcutNextButton) then ShortcutNextButton.Visible := False;
+    if Assigned(ShortcutPageLabel) then ShortcutPageLabel.Visible := False;
+    exit;
+  end;
+
+  ShortcutEmptyLabel.Visible := False;
+
+  PageCount := (DesktopRdpFiles.Count + ShortcutsPerPage - 1) div ShortcutsPerPage;
+  if CurrentShortcutPage < 0 then CurrentShortcutPage := 0;
+  if CurrentShortcutPage >= PageCount then CurrentShortcutPage := PageCount - 1;
+
+  StartIdx := CurrentShortcutPage * ShortcutsPerPage;
+  EndIdx := StartIdx + ShortcutsPerPage - 1;
+  if EndIdx > DesktopRdpFiles.Count - 1 then EndIdx := DesktopRdpFiles.Count - 1;
+
+  VisIndex := 0;
+  for i := 0 to DesktopRdpFiles.Count - 1 do
+  begin
+    ShortcutRadioButtons[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+    if ShortcutRadioButtons[i].Visible then
+    begin
+      ShortcutRadioButtons[i].Top := BaseTop + VisIndex * RowHeight;
+      ShortcutRadioButtons[i].Checked := (i = SelectedShortcutIndex);
+      Inc(VisIndex);
+    end;
+  end;
+
+  if Assigned(ShortcutPrevButton) and Assigned(ShortcutNextButton) and Assigned(ShortcutPageLabel) then
+  begin
+    ShortcutPrevButton.Visible := True;
+    ShortcutNextButton.Visible := True;
+    ShortcutPageLabel.Visible := True;
+    ShortcutPrevButton.Top := BaseTop + VisIndex * RowHeight + ScaleY(6);
+    ShortcutNextButton.Top := ShortcutPrevButton.Top;
+    ShortcutNextButton.Left := ShortcutPrevButton.Left + ShortcutPrevButton.Width + ScaleX(120);
+    ShortcutPageLabel.Top := ShortcutPrevButton.Top + ScaleY(4);
+    ShortcutPageLabel.Caption := 'Page ' + IntToStr(CurrentShortcutPage + 1) + ' of ' + IntToStr(PageCount);
+    ShortcutPrevButton.Enabled := CurrentShortcutPage > 0;
+    ShortcutNextButton.Enabled := CurrentShortcutPage < PageCount - 1;
+  end;
+end;
+
+procedure OnPrevShortcutPageClick(Sender: TObject);
+begin
+  if CurrentShortcutPage > 0 then
+    Dec(CurrentShortcutPage);
+  UpdateShortcutPageDisplay;
+end;
+
+procedure OnNextShortcutPageClick(Sender: TObject);
+var
+  PageCount: Integer;
+begin
+  PageCount := (DesktopRdpFiles.Count + ShortcutsPerPage - 1) div ShortcutsPerPage;
+  if CurrentShortcutPage < PageCount - 1 then
+    Inc(CurrentShortcutPage);
+  UpdateShortcutPageDisplay;
+end;
+
 procedure SetUserControlsEnabled(Enabled: Boolean);
 var
   i: Integer;
@@ -1213,26 +1460,49 @@ end;
 
 procedure OnInstallTypeChange(Sender: TObject);
 begin
-  if Assigned(chkInstallTermWrap) then
-  begin
-    // If Uninstall is selected, disable typical sub-options
-    if Assigned(UninstallRadio) and UninstallRadio.Checked then
-    begin
-      chkInstallTermWrap.Enabled := False;
-      chkManageUsers.Enabled := False;
-      if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := False;
-      if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := False;
-    end
-    else
-    begin
-      // Typical or other flows: enable based on defaults and ManageUsers checkbox
-      chkInstallTermWrap.Enabled := True;
-      chkManageUsers.Enabled := True;
-      if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := chkManageUsers.Checked;
-      if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := chkManageUsers.Checked;
-    end;
-  end;
+  // Always show controls, but only enable them for Typical Setup
+  if Assigned(chkInstallTermWrap) then chkInstallTermWrap.Enabled := Assigned(TypicalRadio) and TypicalRadio.Checked;
+  if Assigned(chkManageUsers) then chkManageUsers.Enabled := Assigned(TypicalRadio) and TypicalRadio.Checked;
+  if Assigned(ManageUsersGroup) then ManageUsersGroup.Enabled := Assigned(TypicalRadio) and TypicalRadio.Checked;
+  if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := Assigned(TypicalRadio) and TypicalRadio.Checked and chkManageUsers.Checked;
+  if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := Assigned(TypicalRadio) and TypicalRadio.Checked and chkManageUsers.Checked;
 end;
+
+function IsTermWrapInstalled(): Boolean;
+var
+  TermWrapPath, ZydisPath: string;
+  TermWrapExists, ZydisExists: Boolean;
+  ServiceDllPath: string;
+  RegistryPointsToTermWrap: Boolean;
+begin
+  // Define the expected paths for TermWrap.dll and Zydis.dll
+  // Files are installed to {commonpf64}\RDPWrapKit\ (matching DefaultDirName)
+  TermWrapPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
+  ZydisPath := ExpandConstant('{commonpf64}\RDPWrapKit\Zydis.dll');
+
+  // Check if the files exist
+  TermWrapExists := FileExists(TermWrapPath);
+  ZydisExists := FileExists(ZydisPath);
+
+  // Check if registry ServiceDll points to TermWrap.dll
+  RegistryPointsToTermWrap := False;
+  if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
+  begin
+    // Check if the ServiceDll path contains TermWrap.dll (case-insensitive)
+    RegistryPointsToTermWrap := (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0);
+  end;
+
+  // Log the results
+  WriteInstallerLog('IsTermWrapInstalled: File check - TermWrap.dll exists: ' + BoolToStr(TermWrapExists) + ' at ' + TermWrapPath);
+  WriteInstallerLog('IsTermWrapInstalled: File check - Zydis.dll exists: ' + BoolToStr(ZydisExists) + ' at ' + ZydisPath);
+  WriteInstallerLog('IsTermWrapInstalled: Registry check - ServiceDll points to TermWrap: ' + BoolToStr(RegistryPointsToTermWrap));
+  if ServiceDllPath <> '' then
+    WriteInstallerLog('IsTermWrapInstalled: Registry check - Current ServiceDll = ' + ServiceDllPath);
+
+  // Return true only if both files exist AND registry points to TermWrap
+  Result := TermWrapExists and ZydisExists and RegistryPointsToTermWrap;
+end;
+
 
 procedure OnViewLogButtonClick(Sender: TObject);
 var
@@ -1604,6 +1874,13 @@ begin
   Result := (InstallType = 0) or DoInstallTermWrap;
 end;
 
+function ShouldApplyRegistryEntries: Boolean;
+begin
+  // Edit Shortcut Settings mode should only launch mstsc /edit and avoid
+  // unrelated installer-side registry changes.
+  Result := InstallType <> 3;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
@@ -1615,27 +1892,24 @@ begin
   // Skip User Page unless the flow indicates user creation is required
   if (PageID = UserPage.ID) and (not NeedCreateUsers) then
     Result := True;
+
+  // Show shortcut editing pages only for Edit Shortcut Settings mode
+  if (PageID = EditShortcutPage.ID) and (InstallType <> 3) then
+    Result := True;
   
   // Skip Ready page - no need to show install path
   if PageID = wpReady then
     Result := True;
   
   // Skip Advanced Tools Selection Page if not in advanced mode or if we jump directly
-  if (PageID = AdvancedToolsSelectionPage.ID) and ((InstallType <> 2) or JumpToAdvancedTool1) then
+  if (PageID = EditSystemwideSettingsPage.ID) and ((InstallType <> 2) or JumpToAdvancedTool1) then
     Result := True;
   
   // Skip Tool pages if not in advanced mode, or if wrong tool is selected
   // Allow AdvancedTool1Page when either in Advanced mode selecting tool 1, or when JumpToAdvancedTool1 is set
   if (PageID = AdvancedTool1Page.ID) and (not JumpToAdvancedTool1) and ((InstallType <> 2) or (SelectedAdvancedTool <> 0)) then
     Result := True;
-  if (PageID = AdvancedTool2Page.ID) and ((InstallType <> 2) or (SelectedAdvancedTool <> 1)) then
-    Result := True;
-  if (PageID = AdvancedTool3Page.ID) and ((InstallType <> 2) or (SelectedAdvancedTool <> 2)) then
-    Result := True;
-  if (PageID = AdvancedTool4Page.ID) and ((InstallType <> 2) or (SelectedAdvancedTool <> 3)) then
-    Result := True;
-  if (PageID = AdvancedTool5Page.ID) and ((InstallType <> 2) or (SelectedAdvancedTool <> 4)) then
-    Result := True;
+  
 end;
 
 function IsVCRedistInstalled: Boolean;
@@ -2060,6 +2334,18 @@ procedure InitializeWizard;
 var
   leftPos, topPos, widthVal: Integer;
   extraGap: Integer;
+  childIndent, childLeft, valueLeft: Integer;
+  // Runtime values used to populate System Status
+  DisplayVersion: string;
+  BuildNumberStr: string;
+  UBRVal: Cardinal;
+  ServiceStatus: string;
+  ServiceDllPath: string;
+  TermsrvVer: string;
+  TermWrapVer: string;
+  PortNumber: Cardinal;
+  DenyVal: Cardinal;
+  SingleSessVal: Cardinal;
   WelcomeExpLabel: TLabel;
   WelcomeIcon: TBitmapImage;
   // Credits labels (non-selectable) and link labels
@@ -2076,8 +2362,10 @@ var
   lblAnd: TLabel;
   lblBSSName: TLabel;
   lblProjectHome: TLabel;
+  // Controls for Edit System-wide Settings page (declared in global var block)
   
   LinkColor: TColor;
+  LabelColor: TColor;
   DesiredBottom: Integer;
   BlockTop: Integer;
   Delta: Integer;
@@ -2124,7 +2412,7 @@ begin
   // Anchor left+right so label width tracks page surface on dynamic layouts
   WelcomeExpLabel.Anchors := [akLeft, akRight];
   // Set a fixed height large enough for wrapped text
-  WelcomeExpLabel.Height := ScaleY(80);
+  WelcomeExpLabel.Height := ScaleY(150);
 
   // Add an image on the left side of the welcome page
   WelcomeIcon := TBitmapImage.Create(WelcomePage);
@@ -2154,7 +2442,7 @@ begin
     'Select what you would like to do:'
   );
 
-  // Create top-level radio buttons: Typical, Advanced, Uninstall
+  // Create top-level radio buttons: Typical, Edit Shortcut, Uninstall
   TypicalRadio := TRadioButton.Create(InstallTypePage);
   TypicalRadio.Parent := InstallTypePage.Surface;
   TypicalRadio.Left := ScaleX(10);
@@ -2164,14 +2452,22 @@ begin
   TypicalRadio.Checked := True;
   TypicalRadio.OnClick := @OnInstallTypeChange;
 
-  // Under Typical, add checkboxes and nested radios
+  // Under Typical, add checkboxes and nested radios (always visible, only enabled for Typical)
   chkInstallTermWrap := TCheckBox.Create(InstallTypePage);
   chkInstallTermWrap.Parent := InstallTypePage.Surface;
   chkInstallTermWrap.Left := ScaleX(30);
   chkInstallTermWrap.Top := ScaleY(36);
-  chkInstallTermWrap.Width := ScaleX(380);
-  chkInstallTermWrap.Caption := 'Install TermWrap';
-  chkInstallTermWrap.Checked := True;
+  chkInstallTermWrap.Width := ScaleX(420);
+  if IsTermWrapInstalled() then
+  begin
+    chkInstallTermWrap.Caption := 'Install TermWrap (Already installed. Selecting this will re-install it)';
+    chkInstallTermWrap.Checked := False;
+  end
+  else
+  begin
+    chkInstallTermWrap.Caption := 'Install TermWrap';
+    chkInstallTermWrap.Checked := True;
+  end;
 
   chkManageUsers := TCheckBox.Create(InstallTypePage);
   chkManageUsers.Parent := InstallTypePage.Surface;
@@ -2182,16 +2478,14 @@ begin
   chkManageUsers.Checked := True;
   chkManageUsers.OnClick := @OnManageUsersClick;
 
-  // Panel to contain the Create/Use Existing radios so they form their own group
   ManageUsersGroup := TPanel.Create(InstallTypePage);
   ManageUsersGroup.Parent := InstallTypePage.Surface;
   ManageUsersGroup.Left := ScaleX(40);
-  ManageUsersGroup.Top := ScaleY(80);
+  ManageUsersGroup.Top := ScaleY(84);
   ManageUsersGroup.Width := ScaleX(360);
-  ManageUsersGroup.Height := ScaleY(64);
+  ManageUsersGroup.Height := ScaleY(88);
   ManageUsersGroup.BorderStyle := bsNone;
   ManageUsersGroup.Color := InstallTypePage.Surface.Color;
-  // Remove bevel to make the panel flat
   ManageUsersGroup.BevelInner := bvNone;
   ManageUsersGroup.BevelOuter := bvNone;
   ManageUsersGroup.BevelWidth := 0;
@@ -2201,7 +2495,7 @@ begin
   rbCreateUsers.Left := ScaleX(10);
   rbCreateUsers.Top := ScaleY(8);
   rbCreateUsers.Width := ScaleX(340);
-  rbCreateUsers.Caption := 'Create users / create shortcuts';
+  rbCreateUsers.Caption := 'Create new users / create shortcuts';
   rbCreateUsers.Checked := True;
   rbCreateUsers.OnClick := @OnManageUsersClick;
 
@@ -2213,6 +2507,16 @@ begin
   rbUseExistingUsers.Caption := 'Use existing users / create shortcuts';
   rbUseExistingUsers.Checked := False;
   rbUseExistingUsers.OnClick := @OnManageUsersClick;
+
+  // Edit Shortcut radio placed halfway between Typical and Uninstall
+  rbEditShortcutSettings := TRadioButton.Create(InstallTypePage);
+  rbEditShortcutSettings.Parent := InstallTypePage.Surface;
+  rbEditShortcutSettings.Left := ScaleX(10);
+  rbEditShortcutSettings.Top := ScaleY(190);
+  rbEditShortcutSettings.Width := ScaleX(420);
+  rbEditShortcutSettings.Caption := 'Edit existing shortcut settings';
+  rbEditShortcutSettings.Checked := False;
+  rbEditShortcutSettings.OnClick := @OnInstallTypeChange;
 
   // Set initial enabled state based on ManageUsers checkbox
   rbCreateUsers.Enabled := chkManageUsers.Checked;
@@ -2226,16 +2530,27 @@ begin
   AdvancedRadio.Left := ScaleX(10);
   AdvancedRadio.Top := ScaleY(150) + extraGap;
   AdvancedRadio.Width := ScaleX(420);
-  AdvancedRadio.Caption := 'Advanced: Tools and Utilities';
+  AdvancedRadio.Caption := 'Manage Users and Shortcuts';
   AdvancedRadio.Checked := False;
   AdvancedRadio.Visible := False;
   AdvancedRadio.OnClick := @OnInstallTypeChange;
 
-  // Uninstall radio (also moved down by the same gap)
+  // Uninstall and Advanced Settings radios (swapped order)
+  // New 4th radio option: Edit System-wide settings (advanced)
+  AdvancedSettingsRadio := TRadioButton.Create(InstallTypePage);
+  AdvancedSettingsRadio.Parent := InstallTypePage.Surface;
+  AdvancedSettingsRadio.Left := ScaleX(10);
+  AdvancedSettingsRadio.Top := ScaleY(176) + extraGap;
+  AdvancedSettingsRadio.Width := ScaleX(420);
+  AdvancedSettingsRadio.Caption := 'Edit System-wide settings (advanced)';
+  AdvancedSettingsRadio.Checked := False;
+  AdvancedSettingsRadio.OnClick := @OnInstallTypeChange;
+
+  // Uninstall radio (moved down slightly to sit below Advanced Settings)
   UninstallRadio := TRadioButton.Create(InstallTypePage);
   UninstallRadio.Parent := InstallTypePage.Surface;
   UninstallRadio.Left := ScaleX(10);
-  UninstallRadio.Top := ScaleY(176) + extraGap;
+  UninstallRadio.Top := ScaleY(200) + extraGap;
   UninstallRadio.Width := ScaleX(420);
   UninstallRadio.Caption := 'Uninstall TermWrap';
   UninstallRadio.Checked := False;
@@ -2414,53 +2729,293 @@ begin
   UserPage.Add('Username:', False);
   UserPage.Add('Password:', True);  // masked input
   
-  // Create Advanced Tools Selection Page with radio buttons (1-5)
-  AdvancedToolsSelectionPage := CreateInputOptionPage(
+  // Create Edit System-wide Settings page as a custom page.
+  // Using a custom page avoids InputOptionPage's built-in checklist control,
+  // which can obscure non-windowed labels in some wizard themes.
+  EditSystemwideSettingsPage := CreateCustomPage(
     InstallTypePage.ID,
-    'Advanced Tools',
-    'Available Tools',
-    'Select a tool to use:',
-    True,
-    False
+    'Edit System-wide settings',
+    'Warning: Changes below should only be changed if you know what you are doing'#13#10 +
+    'Make changes and then click [Next]'
   );
-  
-  AdvancedToolsSelectionPage.Add('1. placeholder');
-  AdvancedToolsSelectionPage.Add('2. placeholder');
-  AdvancedToolsSelectionPage.Add('3. placeholder');
-  AdvancedToolsSelectionPage.Add('4. placeholder');
-  AdvancedToolsSelectionPage.Add('5. placeholder');
-  AdvancedToolsSelectionPage.Values[0] := True;  // Default to tool 1
+  if IsDarkColor(EditSystemwideSettingsPage.Surface.Color) then
+    LabelColor := clWhite
+  else
+    LabelColor := clBlack;
+  // Build controls for Edit System-wide Settings page
+  begin
+    leftPos := ScaleX(20);
+    topPos := ScaleY(12);
+
+    // indentation and value column for neat alignment
+    childIndent := ScaleX(16);
+    childLeft := leftPos + childIndent;
+    valueLeft := childLeft + ScaleX(140);
+
+    // System Status header
+    lblSysHeader := TLabel.Create(EditSystemwideSettingsPage);
+    lblSysHeader.Parent := EditSystemwideSettingsPage.Surface;
+    lblSysHeader.Left := leftPos;
+    lblSysHeader.Top := topPos;
+    lblSysHeader.Caption := 'System Status';
+    lblSysHeader.Font.Style := [fsBold];
+    lblSysHeader.ParentFont := False;
+    lblSysHeader.Font.Color := LabelColor;
+    lblSysHeader.Transparent := True;
+    topPos := topPos + ScaleY(20);
+
+    // Windows Version (name / value)
+    lblWinVerName := TLabel.Create(EditSystemwideSettingsPage);
+    lblWinVerName.Parent := EditSystemwideSettingsPage.Surface;
+    lblWinVerName.Left := childLeft;
+    lblWinVerName.Top := topPos;
+    lblWinVerName.Caption := 'Windows Version:';
+    lblWinVerName.ParentFont := False;
+    lblWinVerName.Font.Color := LabelColor;
+    lblWinVerName.Transparent := True;
+
+    lblWinVer := TLabel.Create(EditSystemwideSettingsPage);
+    lblWinVer.Parent := EditSystemwideSettingsPage.Surface;
+    lblWinVer.Left := valueLeft;
+    lblWinVer.Top := topPos;
+    lblWinVer.Caption := 'v25H2 10.0.26200.2222';
+    lblWinVer.ParentFont := False;
+    lblWinVer.Font.Color := LabelColor;
+    lblWinVer.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    // RDP Service (name / value)
+    lblRDPServiceName := TLabel.Create(EditSystemwideSettingsPage);
+    lblRDPServiceName.Parent := EditSystemwideSettingsPage.Surface;
+    lblRDPServiceName.Left := childLeft;
+    lblRDPServiceName.Top := topPos;
+    lblRDPServiceName.Caption := 'RDP Service:';
+    lblRDPServiceName.ParentFont := False;
+    lblRDPServiceName.Font.Color := LabelColor;
+    lblRDPServiceName.Transparent := True;
+
+    lblRDPService := TLabel.Create(EditSystemwideSettingsPage);
+    lblRDPService.Parent := EditSystemwideSettingsPage.Surface;
+    lblRDPService.Left := valueLeft;
+    lblRDPService.Top := topPos;
+    lblRDPService.Caption := 'Running';
+    lblRDPService.ParentFont := False;
+    lblRDPService.Font.Color := LabelColor;
+    lblRDPService.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    // Windows RDP Version (name / value)
+    lblWinRDPVerName := TLabel.Create(EditSystemwideSettingsPage);
+    lblWinRDPVerName.Parent := EditSystemwideSettingsPage.Surface;
+    lblWinRDPVerName.Left := childLeft;
+    lblWinRDPVerName.Top := topPos;
+    lblWinRDPVerName.Caption := 'RDP DLL Version:';
+    lblWinRDPVerName.ParentFont := False;
+    lblWinRDPVerName.Font.Color := LabelColor;
+    lblWinRDPVerName.Transparent := True;
+
+    lblWinRDPVer := TLabel.Create(EditSystemwideSettingsPage);
+    lblWinRDPVer.Parent := EditSystemwideSettingsPage.Surface;
+    lblWinRDPVer.Left := valueLeft;
+    lblWinRDPVer.Top := topPos;
+    lblWinRDPVer.Caption := '10.0.xxxxx.xxxx';
+    lblWinRDPVer.ParentFont := False;
+    lblWinRDPVer.Font.Color := LabelColor;
+    lblWinRDPVer.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    // TermWrap Version (name / value)
+    lblTermWrapVerName := TLabel.Create(EditSystemwideSettingsPage);
+    lblTermWrapVerName.Parent := EditSystemwideSettingsPage.Surface;
+    lblTermWrapVerName.Left := childLeft;
+    lblTermWrapVerName.Top := topPos;
+    lblTermWrapVerName.Caption := 'TermWrap version:';
+    lblTermWrapVerName.ParentFont := False;
+    lblTermWrapVerName.Font.Color := LabelColor;
+    lblTermWrapVerName.Transparent := True;
+
+    lblTermWrapVer := TLabel.Create(EditSystemwideSettingsPage);
+    lblTermWrapVer.Parent := EditSystemwideSettingsPage.Surface;
+    lblTermWrapVer.Left := valueLeft;
+    lblTermWrapVer.Top := topPos;
+    lblTermWrapVer.Caption := 'x.x.x.x';
+    lblTermWrapVer.ParentFont := False;
+    lblTermWrapVer.Font.Color := LabelColor;
+    lblTermWrapVer.Transparent := True;
+    topPos := topPos + ScaleY(26);
+
+    // General Settings
+    lblGenHeader := TLabel.Create(EditSystemwideSettingsPage);
+    lblGenHeader.Parent := EditSystemwideSettingsPage.Surface;
+    lblGenHeader.Left := leftPos;
+    lblGenHeader.Top := topPos;
+    lblGenHeader.Caption := 'General Settings';
+    lblGenHeader.Font.Style := [fsBold];
+    lblGenHeader.ParentFont := False;
+    lblGenHeader.Font.Color := LabelColor;
+    lblGenHeader.Transparent := True;
+    topPos := topPos + ScaleY(20);
+
+    chkEnableRDP := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkEnableRDP.Parent := EditSystemwideSettingsPage.Surface;
+    chkEnableRDP.Left := childLeft;
+    chkEnableRDP.Top := topPos;
+    chkEnableRDP.Width := ScaleX(420) - childIndent;
+    chkEnableRDP.Caption := 'Enable Remote Desktop';
+    chkEnableRDP.Checked := True;
+    chkEnableRDP.ParentFont := False;
+    chkEnableRDP.Font.Color := LabelColor;
+    topPos := topPos + ScaleY(20);
+
+    chkShowUsers := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkShowUsers.Parent := EditSystemwideSettingsPage.Surface;
+    chkShowUsers.Left := childLeft;
+    chkShowUsers.Top := topPos;
+    chkShowUsers.Width := ScaleX(420) - childIndent;
+    chkShowUsers.Caption := 'Show users on logon screen';
+    chkShowUsers.Checked := True;
+    chkShowUsers.ParentFont := False;
+    chkShowUsers.Font.Color := LabelColor;
+    topPos := topPos + ScaleY(20);
+
+    chkPreventDuplicate := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkPreventDuplicate.Parent := EditSystemwideSettingsPage.Surface;
+    chkPreventDuplicate.Left := childLeft;
+    chkPreventDuplicate.Top := topPos;
+    chkPreventDuplicate.Width := ScaleX(420) - childIndent;
+    chkPreventDuplicate.Caption := 'Prevent duplicate connections per user';
+    chkPreventDuplicate.Checked := True;
+    chkPreventDuplicate.ParentFont := False;
+    chkPreventDuplicate.Font.Color := LabelColor;
+    topPos := topPos + ScaleY(26);
+
+    lblRdpPort := TLabel.Create(EditSystemwideSettingsPage);
+    lblRdpPort.Parent := EditSystemwideSettingsPage.Surface;
+    lblRdpPort.Left := childLeft;
+    lblRdpPort.Top := topPos;
+    lblRdpPort.Caption := 'RDP Port:';
+    lblRdpPort.ParentFont := False;
+    lblRdpPort.Font.Color := LabelColor;
+    lblRdpPort.Transparent := True;
+
+    edtRdpPort := TEdit.Create(EditSystemwideSettingsPage);
+    edtRdpPort.Parent := EditSystemwideSettingsPage.Surface;
+    edtRdpPort.Left := childLeft + ScaleX(90);
+    edtRdpPort.Top := topPos - ScaleY(2);
+    edtRdpPort.Width := ScaleX(80);
+    edtRdpPort.Text := '3389';
+    edtRdpPort.ParentFont := False;
+    edtRdpPort.Font.Color := LabelColor;
+
+    lblPortDefault := TLabel.Create(EditSystemwideSettingsPage);
+    lblPortDefault.Parent := EditSystemwideSettingsPage.Surface;
+    lblPortDefault.Left := childLeft + ScaleX(180);
+    lblPortDefault.Top := topPos;
+    lblPortDefault.Caption := '(default: 3389)';
+    lblPortDefault.ParentFont := False;
+    lblPortDefault.Font.Color := LabelColor;
+    lblPortDefault.Transparent := True;
+    topPos := topPos + ScaleY(36);
+
+    // Actions
+    lblActionsHeader := TLabel.Create(EditSystemwideSettingsPage);
+    lblActionsHeader.Parent := EditSystemwideSettingsPage.Surface;
+    lblActionsHeader.Left := leftPos;
+    lblActionsHeader.Top := topPos;
+    lblActionsHeader.Caption := 'Actions';
+    lblActionsHeader.Font.Style := [fsBold];
+    lblActionsHeader.ParentFont := False;
+    lblActionsHeader.Font.Color := LabelColor;
+    lblActionsHeader.Transparent := True;
+    topPos := topPos + ScaleY(20);
+
+    chkRestartRDP := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkRestartRDP.Parent := EditSystemwideSettingsPage.Surface;
+    chkRestartRDP.Left := childLeft;
+    chkRestartRDP.Top := topPos;
+    chkRestartRDP.Width := ScaleX(420) - childIndent;
+    chkRestartRDP.Caption := 'Restart RDP Service';
+    chkRestartRDP.Checked := False;
+    chkRestartRDP.ParentFont := False;
+    chkRestartRDP.Font.Color := LabelColor;
+    // Populate dynamic system values for display
+    // Windows Version (DisplayVersion/ReleaseId + build.UBR)
+    DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
+    if DisplayVersion = '' then
+      DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
+    BuildNumberStr := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuildNumber', '');
+    UBRVal := SafeRegDword(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'UBR', 0);
+    if (DisplayVersion <> '') and (BuildNumberStr <> '') then
+      lblWinVer.Caption := 'v' + DisplayVersion + ' 10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
+    else if (BuildNumberStr <> '') then
+      lblWinVer.Caption := '10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
+    else
+      lblWinVer.Caption := 'Unknown';
+
+    // RDP Service status (TermService)
+    ServiceStatus := GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status');
+    if ServiceStatus = '' then
+      lblRDPService.Caption := 'Not installed'
+    else
+      lblRDPService.Caption := ServiceStatus;
+
+    // termsrv.dll version
+    TermsrvVer := GetPSOutput('(Get-Item -Path (Join-Path $env:windir ''System32\\termsrv.dll'') -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
+    if TermsrvVer = '' then
+      lblWinRDPVer.Caption := 'Unknown'
+    else
+      lblWinRDPVer.Caption := TermsrvVer;
+
+    // TermWrap version (installed app path)
+    TermWrapVer := 'Not installed';
+    ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
+    if FileExists(ServiceDllPath) then
+      TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
+    if TermWrapVer = '' then
+      lblTermWrapVer.Caption := 'Unknown'
+    else
+      lblTermWrapVer.Caption := TermWrapVer;
+
+
+    // Enable Remote Desktop (fDenyTSConnections = 0 means enabled)
+    if RegQueryDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', DenyVal) then
+      chkEnableRDP.Checked := (DenyVal = 0)
+    else
+      chkEnableRDP.Checked := False;
+
+    // Show users on logon screen (best-effort: DontDisplayLastUserName = 0 => show)
+    if RegQueryDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', DenyVal) then
+      chkShowUsers.Checked := (DenyVal = 0)
+    else
+      chkShowUsers.Checked := True;
+
+    // Prevent duplicate connections per user (fSingleSessionPerUser = 1 => single session)
+    if RegQueryDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', SingleSessVal) then
+      chkPreventDuplicate.Checked := (SingleSessVal = 1)
+    else
+      chkPreventDuplicate.Checked := False;
+
+    // RDP listening port
+    if RegQueryDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', 'PortNumber', PortNumber) then
+      edtRdpPort.Text := IntToStr(PortNumber)
+    else
+      edtRdpPort.Text := IntToStr(RDP_LISTEN_PORT);
+  end
   
   // Create Tool 1 Page: Create RDP desktop shortcuts for existing local users
   AdvancedTool1Page := CreateCustomPage(
-    AdvancedToolsSelectionPage.ID,
+    EditSystemwideSettingsPage.ID,
     'Create RDP Desktop Shortcuts',
     'This is a list of users found on this PC. Checkmark the accounts you want to make desktop shortcuts for and type their password.'
   );
   
   // Create placeholder pages for tools 2-5
-  AdvancedTool2Page := CreateCustomPage(
-    AdvancedToolsSelectionPage.ID,
-    'Tool 2',
-    'Placeholder tool 2'
-  );
-  
-  AdvancedTool3Page := CreateCustomPage(
-    AdvancedToolsSelectionPage.ID,
-    'Tool 3',
-    'Placeholder tool 3'
-  );
-  
-  AdvancedTool4Page := CreateCustomPage(
-    AdvancedToolsSelectionPage.ID,
-    'Tool 4',
-    'Placeholder tool 4'
-  );
-  
-  AdvancedTool5Page := CreateCustomPage(
-    AdvancedToolsSelectionPage.ID,
-    'Tool 5',
-    'Placeholder tool 5'
+  // Removed placeholder advanced tool pages (2-5) — not needed anymore
+
+  EditShortcutPage := CreateCustomPage(
+    InstallTypePage.ID,
+    'Edit Shortcut Settings',
+    'Select one Desktop .rdp shortcut to edit.'
   );
   
   // Keep old AdvancedPage for backward compatibility (not used in new flow)
@@ -2468,9 +3023,16 @@ begin
   
   // Initialize lists for tracking
   LocalUsersList := TStringList.Create;  // Will be populated when Advanced Tools page is shown
+  DesktopRdpFiles := TStringList.Create;
   SetLength(UserCheckBoxes, 0);
   SetLength(UserPasswordEdits, 0);
   SetLength(UserPasswordStatus, 0);
+  SetLength(ShortcutRadioButtons, 0);
+  CurrentShortcutPage := 0;
+  ShortcutsPerPage := 8;
+  SelectedShortcutIndex := -1;
+  SelectedShortcutPath := '';
+  EditShortcutControlsBuilt := False;
   ShortcutsList := TStringList.Create;
   
   // Add label for options section
@@ -2547,34 +3109,58 @@ begin
   StepCheckRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);         topPos := topPos + ScaleY(16);
   StepCheckMSTSC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
   StepInstallMSTSC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
+  StepRemoveFolder := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
   StepUninstallTermWrap := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
-  StepRemoveFolder := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);
+  StepEnableRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
+  StepShowUsers := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
+  StepPreventDuplicate := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
+  StepSetRdpPort := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
+  StepRestartRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
 
-  // Create a scrollable rich text viewer on the Finished page and hide the default label
-  FinishedText := TRichEditViewer.Create(WizardForm.FinishedLabel.Parent);
+  // Create a label on the Finished page to show completion messages (positioned right below header)
+  FinishedText := TLabel.Create(WizardForm.FinishedLabel.Parent);
   FinishedText.Parent := WizardForm.FinishedLabel.Parent;
   FinishedText.Left := WizardForm.FinishedLabel.Left;
-  FinishedText.Top := WizardForm.FinishedLabel.Top;
+  FinishedText.Top := WizardForm.FinishedHeadingLabel.Top + WizardForm.FinishedHeadingLabel.Height + ScaleY(8);
   FinishedText.Width := WizardForm.FinishedLabel.Width;
-  // Calculate height based on parent's available space, not the label's original small height
-  FinishedText.Height := WizardForm.FinishedLabel.Parent.ClientHeight - WizardForm.FinishedLabel.Top - ScaleY(35);
-  FinishedText.ScrollBars := ssVertical;
-  FinishedText.BorderStyle := bsNone;
-  FinishedText.Color := WizardForm.FinishedLabel.Color;
+  FinishedText.AutoSize := False;
+  FinishedText.WordWrap := True;
+  FinishedText.Transparent := True;
   FinishedText.Font.Size := WizardForm.FinishedLabel.Font.Size;
   FinishedText.Visible := True;
   WizardForm.FinishedLabel.Visible := False;
 
-  // Create a button to view the install log on the Finished page (positioned directly below text)
-  ViewLogButton := TButton.Create(WizardForm.FinishedLabel.Parent);
-  ViewLogButton.Parent := WizardForm.FinishedLabel.Parent;
-  ViewLogButton.Left := WizardForm.FinishedLabel.Left;
-  ViewLogButton.Top := FinishedText.Top + FinishedText.Height + ScaleY(5);
-  ViewLogButton.Width := ScaleX(160);
-  ViewLogButton.Height := ScaleY(24);
+  // Create a button to save the install log, placed in the bottom button bar next to Finish
+  ViewLogButton := TButton.Create(WizardForm);
+  ViewLogButton.Parent := WizardForm;
+  ViewLogButton.Width := ScaleX(120);
+  ViewLogButton.Height := WizardForm.NextButton.Height;
+  ViewLogButton.Left := WizardForm.NextButton.Left - ViewLogButton.Width - ScaleX(10);
+  ViewLogButton.Top := WizardForm.NextButton.Top;
   ViewLogButton.Caption := 'Save Install Log';
   ViewLogButton.OnClick := @OnViewLogButtonClick;
-  ViewLogButton.Visible := True;
+  ViewLogButton.Visible := False;  // only shown on the Finished page
+
+  // Optional example image shown only on the real final page when using
+  // Edit Shortcut Settings mode.
+  FinishedExampleImage := TBitmapImage.Create(WizardForm.FinishedLabel.Parent);
+  FinishedExampleImage.Parent := WizardForm.FinishedLabel.Parent;
+  FinishedExampleImage.Left := WizardForm.FinishedLabel.Left;
+  FinishedExampleImage.Top := FinishedText.Top + ScaleY(110);
+  FinishedExampleImage.Width := ScaleX(210);
+  FinishedExampleImage.Height := ScaleY(220);
+  FinishedExampleImage.Stretch := False;
+  FinishedExampleImage.Visible := False;
+
+  FinishedExampleLabel := TLabel.Create(WizardForm.FinishedLabel.Parent);
+  FinishedExampleLabel.Parent := WizardForm.FinishedLabel.Parent;
+  FinishedExampleLabel.Left := WizardForm.FinishedLabel.Left;
+  FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
+  FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
+  FinishedExampleLabel.AutoSize := False;
+  FinishedExampleLabel.WordWrap := True;
+  FinishedExampleLabel.Caption := '';
+  FinishedExampleLabel.Visible := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -2584,6 +3170,7 @@ var
   i: Integer;
   SelectedCount: Integer;
   HasErrors: Boolean;
+  LaunchResultCode: Integer;
 begin
   Result := True;
   
@@ -2594,14 +3181,36 @@ begin
     DoInstallTermWrap := False;
     DoManageUsers := False;
     NeedCreateUsers := False;
+    JumpToAdvancedTool1 := False;
+    DoEditSystemWideSettings := False;
 
     if UninstallRadio.Checked then
     begin
-      InstallType := 3; // Uninstall Everything
+      InstallType := 5; // Uninstall Everything (new mapping)
     end
-    else if AdvancedRadio.Checked then
+    else if AdvancedRadio.Checked or (Assigned(AdvancedSettingsRadio) and AdvancedSettingsRadio.Checked) then
     begin
       InstallType := 2; // Advanced tools
+      if Assigned(AdvancedSettingsRadio) then
+        DoEditSystemWideSettings := AdvancedSettingsRadio.Checked
+      else
+        DoEditSystemWideSettings := False;
+    end
+    else if rbEditShortcutSettings.Checked then
+    begin
+      // Top-level Edit Shortcut flow
+      InstallType := 3; // Edit Shortcut Settings (new mapping)
+      NeedCreateUsers := False;
+      JumpToAdvancedTool1 := False;
+      if Assigned(DesktopRdpFiles) then
+        DesktopRdpFiles.Free;
+      DesktopRdpFiles := GetDesktopRdpFiles;
+      EditShortcutControlsBuilt := False;
+      SetLength(ShortcutRadioButtons, 0);
+      SelectedShortcutIndex := -1;
+      SelectedShortcutPath := '';
+      Result := True;
+      exit;
     end
     else // Typical selected
     begin
@@ -2609,7 +3218,9 @@ begin
       DoManageUsers := chkManageUsers.Checked;
 
       if DoManageUsers and rbCreateUsers.Checked then
-        NeedCreateUsers := True
+      begin
+        NeedCreateUsers := True;
+      end
       else
         NeedCreateUsers := False;
 
@@ -2645,6 +3256,11 @@ begin
         // Fallback to Full Install
         InstallType := 0;
       end;
+    // Track whether the user asked specifically to edit system-wide settings
+    if Assigned(AdvancedSettingsRadio) then
+      DoEditSystemWideSettings := AdvancedSettingsRadio.Checked
+    else
+      DoEditSystemWideSettings := False;
       // If user chose Use existing users from Typical, jump directly to Advanced tool 1
       if DoManageUsers and rbUseExistingUsers.Checked then
       begin
@@ -2661,19 +3277,36 @@ begin
         JumpToAdvancedTool1 := False;
     end;
   end
-  else if CurPageID = AdvancedToolsSelectionPage.ID then
+  else if CurPageID = EditShortcutPage.ID then
   begin
-    // Store selected advanced tool (0-4 for tools 1-5)
-    if AdvancedToolsSelectionPage.Values[0] then
-      SelectedAdvancedTool := 0
-    else if AdvancedToolsSelectionPage.Values[1] then
-      SelectedAdvancedTool := 1
-    else if AdvancedToolsSelectionPage.Values[2] then
-      SelectedAdvancedTool := 2
-    else if AdvancedToolsSelectionPage.Values[3] then
-      SelectedAdvancedTool := 3
-    else
-      SelectedAdvancedTool := 4;
+    if DesktopRdpFiles.Count = 0 then
+    begin
+      MsgBox('No .rdp shortcuts were found on your Desktop.', mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+
+    if (SelectedShortcutIndex < 0) or (SelectedShortcutIndex >= DesktopRdpFiles.Count) then
+    begin
+      MsgBox('Select a shortcut to edit before continuing.', mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+
+    SelectedShortcutPath := DesktopRdpFiles[SelectedShortcutIndex];
+
+    if not Exec(FILE_MSTSC, '/edit "' + SelectedShortcutPath + '"', '', SW_SHOW, ewNoWait, LaunchResultCode) then
+    begin
+      MsgBox('Failed to launch Remote Desktop editor. Verify mstsc is available and try again.', mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+  end
+  else if CurPageID = EditSystemwideSettingsPage.ID then
+  begin
+    // No placeholder tools anymore; default to tool 1 behavior when needed
+    // Set SelectedAdvancedTool to a non-zero value so intermediate advanced pages are skipped
+    SelectedAdvancedTool := 1;
   end
   else if CurPageID = AdvancedTool1Page.ID then
   begin
@@ -2750,7 +3383,7 @@ begin
   else if CurPageID = UserPage.ID then
   begin
     // Skip user page for uninstall and advanced types
-    if (InstallType = 2) or (InstallType = 3) then
+    if (InstallType = 2) or (InstallType = 3) or (InstallType = 5) then
     begin
       Result := True;
       exit;
@@ -2938,7 +3571,7 @@ begin
     
     // Initialize and show relevant steps (pending state) with contiguous layout
     BeginStepLayout;
-    if InstallType = 3 then
+    if InstallType = 5 then
     begin
       StepsHeaderLabel.Caption := 'Uninstall Steps:';
       AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
@@ -2946,9 +3579,23 @@ begin
       AddStepPendingLabel(StepRemoveFolder, TXT_RemoveFolder);
       AddStepPendingLabel(StepStartSvc, TXT_RestartSvc);
     end
+    else if (InstallType = 2) and DoEditSystemWideSettings then
+    begin
+      StepsHeaderLabel.Caption := 'System changes:';
+      if Assigned(chkEnableRDP) and (chkEnableRDP.Checked <> OrigEnableRDP) then
+        AddStepPendingLabel(StepEnableRDP, 'Enable Remote Desktop');
+      if Assigned(chkShowUsers) and (chkShowUsers.Checked <> OrigShowUsers) then
+        AddStepPendingLabel(StepShowUsers, 'Show users on logon screen');
+      if Assigned(chkPreventDuplicate) and (chkPreventDuplicate.Checked <> OrigPreventDuplicate) then
+        AddStepPendingLabel(StepPreventDuplicate, 'Prevent duplicate connections per user');
+      if (StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT) <> OrigRdpPort) then
+        AddStepPendingLabel(StepSetRdpPort, 'Set RDP listening port to ' + edtRdpPort.Text);
+      if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
+        AddStepPendingLabel(StepRestartRDP, 'Restart Remote Desktop Services');
+    end
     else if InstallType = 2 then
     begin
-      StepsHeaderLabel.Caption := 'Advanced Steps:';
+      StepsHeaderLabel.Caption := 'Manage Users and Shortcuts:';
       AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
     end
@@ -2970,22 +3617,26 @@ begin
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
       AddStepPendingLabel(StepCheckRDP, TXT_CheckRDP);
     end
-    else // InstallType = 1 (Add Users Only)
+    else if InstallType = 1 then
     begin
       StepsHeaderLabel.Caption := 'Install Steps:';
-      AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
       if UsersList.Count > 0 then
         AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
       if ShortcutsList.Count > 0 then
         AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
+    end
+    else // InstallType = 3 (Edit Shortcut Settings)
+    begin
+      StepsHeaderLabel.Caption := 'Shortcut Settings:';
+      AddStepPendingLabel(StepCreateShortcuts, 'Open selected .rdp in editor');
     end;
 
     if InstallType = 0 then
       CheckAndInstallMSTSC;
 
     // Handle uninstall cleanup
-    if InstallType = 3 then
+    if InstallType = 5 then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing uninstallation...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
@@ -3024,6 +3675,12 @@ begin
       WizardForm.StatusLabel.Caption := 'Preparing advanced tools...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
     end
+    else if InstallType = 3 then
+    begin
+      WizardForm.StatusLabel.Caption := 'Preparing shortcut editor completion...';
+      WizardForm.ProgressGauge.Style := npbstMarquee;
+      SetStepDone(StepCreateShortcuts, 'Open selected .rdp in editor');
+    end
     // Only stop TermService for Full Install (not for Add Users Only)
     else if InstallType = 0 then
     begin
@@ -3047,9 +3704,98 @@ begin
   if CurStep = ssPostInstall then
   begin
     // Handle uninstall completion
-    if InstallType = 3 then
+    if InstallType = 5 then
     begin
       WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap has been removed.';
+    end
+    // Edit System-wide settings flow (apply queued registry/service changes)
+    else if (InstallType = 2) and DoEditSystemWideSettings then
+    begin
+      // Apply changes in logical order
+      // Enable/Disable Remote Desktop
+      if Assigned(chkEnableRDP) and (chkEnableRDP.Checked <> OrigEnableRDP) then
+      begin
+        SetStepInProgress(StepEnableRDP, 'Applying enable/disable Remote Desktop');
+        if chkEnableRDP.Checked then
+        begin
+          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0) then
+            WriteInstallerLog('Applied fDenyTSConnections=0 (Enable RDP)')
+          else
+            WriteInstallerLog('Failed to write fDenyTSConnections');
+        end
+        else
+        begin
+          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 1) then
+            WriteInstallerLog('Applied fDenyTSConnections=1 (Disable RDP)')
+          else
+            WriteInstallerLog('Failed to write fDenyTSConnections');
+        end;
+        SetStepDone(StepEnableRDP, 'Enable Remote Desktop');
+      end;
+
+      // Show users on logon screen
+      if Assigned(chkShowUsers) and (chkShowUsers.Checked <> OrigShowUsers) then
+      begin
+        SetStepInProgress(StepShowUsers, 'Updating Show users on logon screen');
+        if chkShowUsers.Checked then
+        begin
+          if RegWriteDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', 0) then
+            WriteInstallerLog('Applied DontDisplayLastUserName=0 (Show users)')
+          else
+            WriteInstallerLog('Failed to write DontDisplayLastUserName');
+        end
+        else
+        begin
+          if RegWriteDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', 1) then
+            WriteInstallerLog('Applied DontDisplayLastUserName=1 (Hide users)')
+          else
+            WriteInstallerLog('Failed to write DontDisplayLastUserName');
+        end;
+        SetStepDone(StepShowUsers, 'Show users on logon screen');
+      end;
+
+      // Prevent duplicate connections per user
+      if Assigned(chkPreventDuplicate) and (chkPreventDuplicate.Checked <> OrigPreventDuplicate) then
+      begin
+        SetStepInProgress(StepPreventDuplicate, 'Updating single-session-per-user setting');
+        if chkPreventDuplicate.Checked then
+        begin
+          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1) then
+            WriteInstallerLog('Applied fSingleSessionPerUser=1 (Single session)')
+          else
+            WriteInstallerLog('Failed to write fSingleSessionPerUser');
+        end
+        else
+        begin
+          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 0) then
+            WriteInstallerLog('Applied fSingleSessionPerUser=0 (Allow multiple sessions)')
+          else
+            WriteInstallerLog('Failed to write fSingleSessionPerUser');
+        end;
+        SetStepDone(StepPreventDuplicate, 'Prevent duplicate connections per user');
+      end;
+
+      // RDP port change
+      if (StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT) <> OrigRdpPort) then
+      begin
+        SetStepInProgress(StepSetRdpPort, 'Setting RDP listening port');
+        if RegWriteDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', 'PortNumber', StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT)) then
+          WriteInstallerLog('Applied new RDP PortNumber=' + edtRdpPort.Text)
+        else
+          WriteInstallerLog('Failed to write RDP PortNumber');
+        SetStepDone(StepSetRdpPort, 'Set RDP listening port');
+      end;
+
+      // Restart RDP Service if requested
+      if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
+      begin
+        SetStepInProgress(StepRestartRDP, 'Restarting Remote Desktop Services');
+        StopTermService;
+        StartTermService;
+        SetStepDone(StepRestartRDP, 'Restart Remote Desktop Services');
+      end;
+
+      WizardForm.StatusLabel.Caption := 'System changes applied.';
     end
     // Advanced mode: tools and utilities
     else if InstallType = 2 then
@@ -3065,6 +3811,10 @@ begin
       SetStepDone(StepPreTrust, TXT_PreTrust);
       ClearPasswordsFromMemory;
       WizardForm.StatusLabel.Caption := 'Advanced tools executed.';
+    end
+    else if InstallType = 3 then
+    begin
+      WizardForm.StatusLabel.Caption := 'Shortcut settings editor launched.';
     end
     // Full Install: Download VC++, apply registry, start service
     else if InstallType = 0 then
@@ -3242,8 +3992,25 @@ var
   UserName: string;
   Password: string;
 begin
+  // Show the Save Install Log button only on the Finished page
+  if Assigned(ViewLogButton) then
+    ViewLogButton.Visible := (CurPageID = wpFinished);
+
+  if CurPageID = EditShortcutPage.ID then
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
+
+  if CurPageID = EditShortcutPage.ID then
+  begin
+    if not Assigned(DesktopRdpFiles) then
+      DesktopRdpFiles := GetDesktopRdpFiles;
+    if not EditShortcutControlsBuilt then
+      BuildShortcutEditorControls
+    else
+      UpdateShortcutPageDisplay;
+  end;
+
   // Lazy-load user list only when Advanced Tools page is first shown
-  if (CurPageID = AdvancedToolsSelectionPage.ID) and (LocalUsersList.Count = 0) then
+  if (CurPageID = EditSystemwideSettingsPage.ID) and (LocalUsersList.Count = 0) then
   begin
     LocalUsersList := GetLocalUsers;
     SetLength(UserCheckBoxes, LocalUsersList.Count);
@@ -3251,6 +4018,16 @@ begin
     SetLength(UserPasswordStatus, LocalUsersList.Count);
     // Build per-user controls on Tool 1 page
     BuildAdvancedUserControls;
+  end;
+
+  // Capture original System-wide settings when the Edit System-wide Settings page is shown
+  if CurPageID = EditSystemwideSettingsPage.ID then
+  begin
+    if Assigned(chkEnableRDP) then OrigEnableRDP := chkEnableRDP.Checked else OrigEnableRDP := False;
+    if Assigned(chkShowUsers) then OrigShowUsers := chkShowUsers.Checked else OrigShowUsers := True;
+    if Assigned(chkPreventDuplicate) then OrigPreventDuplicate := chkPreventDuplicate.Checked else OrigPreventDuplicate := False;
+    OrigRdpPort := StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT);
+    WriteInstallerLog('CurPageChanged: Captured original system settings: EnableRDP=' + BoolToStr(OrigEnableRDP) + ', ShowUsers=' + BoolToStr(OrigShowUsers) + ', SingleSession=' + BoolToStr(OrigPreventDuplicate) + ', Port=' + IntToStr(OrigRdpPort));
   end;
 
   // Ensure pagination resets when Advanced Tool 1 page is shown (avoid stale page index after Back/Next)
@@ -3266,13 +4043,48 @@ begin
   // Display completion info on the final page
   if CurPageID = wpFinished then
   begin
+    // Reset optional finish-page image controls by default.
+    if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
+    if Assigned(FinishedExampleLabel) then FinishedExampleLabel.Visible := False;
+
     WriteInstallerLog('CurPageChanged: Finish page shown');
-    if InstallType = 3 then
+    if InstallType = 5 then
     begin
       // Uninstall completion message
       WizardForm.FinishedHeadingLabel.Caption := 'Uninstallation Complete';
       CompletionText := 'TermWrap has been successfully removed.';
       WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
+    end
+    else if InstallType = 3 then
+    begin
+      WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Editor Complete';
+      CompletionText :=
+        'The shortcut was opened in the Remote Desktop Connection app. Make your changes there.' + #13#10#13#10 +
+        'Important: Always click [Save] on the General tab.';
+      WriteInstallerLog('CurPageChanged: Showing shortcut editor completion message');
+
+      if Assigned(FinishedExampleImage) and Assigned(FinishedExampleLabel) then
+      begin
+        FinishedExampleImage.Top := FinishedText.Top + ScaleY(100);
+        FinishedExampleImage.Width := ScaleX(210);
+        FinishedExampleImage.Height := ScaleY(220);
+        FinishedExampleImage.Stretch := False;
+        // Load the rdp_edit_save.bmp image from temp
+        try
+          ExtractTemporaryFile(FILE_RDPEDITSAVE_BMP);
+          FinishedExampleImage.Bitmap.LoadFromFile(ExpandConstant(TEMP_RDPEDITSAVE_BMP));
+        except
+          // If image fails to load, hide the control
+          FinishedExampleImage.Visible := False;
+        end;
+        FinishedExampleImage.Visible := True;
+        FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
+        FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
+        FinishedExampleLabel.AutoSize := False;
+        FinishedExampleLabel.WordWrap := True;
+        FinishedExampleLabel.Caption := '';
+        FinishedExampleLabel.Visible := True;
+      end;
     end
     else
     begin
@@ -3337,17 +4149,25 @@ begin
 
     WizardForm.FinishedLabel.Caption := CompletionText;
     WizardForm.Update;
+
+    // Shrink the heading label to fit its actual text (removes extra whitespace)
+    WizardForm.FinishedHeadingLabel.AutoSize := True;
+    // Reposition the status label right below the compact heading
+    FinishedText.Top := WizardForm.FinishedHeadingLabel.Top + WizardForm.FinishedHeadingLabel.Height + ScaleY(8);
+
     WriteInstallerLog('CurPageChanged: Updating FinishedText control');
-    // Populate the rich viewer if available
+    // Populate the label if available
     if Assigned(FinishedText) then
     begin
       WriteInstallerLog('CurPageChanged: FinishedText control is assigned');
-      // Ensure finished text color contrasts with page surface
-      if IsDarkColor(FinishedText.Color) then
+      // Ensure text color contrasts with page surface
+      if IsDarkColor(WizardForm.Color) then
         FinishedText.Font.Color := clWhite
       else
         FinishedText.Font.Color := clBlack;
-      FinishedText.RTFText := PlainToRtfWithColor(CompletionText, FinishedText.Font.Color);
+      FinishedText.Caption := CompletionText;
+      // Auto-size height based on content
+      FinishedText.AutoSize := True;
       FinishedText.Update;
       WriteInstallerLog('CurPageChanged: FinishedText populated with completion message');
     end
