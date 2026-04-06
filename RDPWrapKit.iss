@@ -28,8 +28,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.50"
-#define APP_VERSION_FILEINFO "0.50.0.0"
+#define APP_VERSION_STRING "0.5.0"
+#define APP_VERSION_FILEINFO "0.5.0.0"
 
 [Setup]
 AppName=RDPWrapKit
@@ -435,8 +435,40 @@ type
 function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
   external 'GetSystemTime@kernel32.dll stdcall';
 
+// Compares two dotted version strings (e.g. "0.4.9" vs "0.4.10").
+// Returns 1 if A > B, -1 if A < B, 0 if equal.
+function CompareVersions(A, B: String): Integer;
+var
+  AParts, BParts: TStringList;
+  i, AVal, BVal, MaxLen: Integer;
+begin
+  Result := 0;
+  AParts := TStringList.Create;
+  BParts := TStringList.Create;
+  try
+    AParts.Delimiter := '.';
+    AParts.StrictDelimiter := True;
+    AParts.DelimitedText := A;
+    BParts.Delimiter := '.';
+    BParts.StrictDelimiter := True;
+    BParts.DelimitedText := B;
+    if AParts.Count > BParts.Count then MaxLen := AParts.Count
+    else MaxLen := BParts.Count;
+    for i := 0 to MaxLen - 1 do
+    begin
+      if i < AParts.Count then AVal := StrToIntDef(AParts[i], 0) else AVal := 0;
+      if i < BParts.Count then BVal := StrToIntDef(BParts[i], 0) else BVal := 0;
+      if AVal > BVal then begin Result := 1; Break; end;
+      if AVal < BVal then begin Result := -1; Break; end;
+    end;
+  finally
+    AParts.Free;
+    BParts.Free;
+  end;
+end;
+
 // Fetches the latest release tag from GitHub Releases API.
-// Returns tag_name (e.g. "0.50") with leading "v" stripped, or "" on failure.
+// Returns tag_name (e.g. "0.4.9") with leading "v" stripped, or "" on failure.
 function GetLatestGitHubVersion(): String;
 var
   Http: Variant;
@@ -494,7 +526,7 @@ begin
   CurrentVersion := '{#APP_VERSION_STRING}';
   LatestVersion := GetLatestGitHubVersion();
   // Only prompt when a version string was returned and it is strictly newer
-  if (LatestVersion <> '') and (LatestVersion > CurrentVersion) then
+  if (LatestVersion <> '') and (CompareVersions(LatestVersion, CurrentVersion) > 0) then
   begin
     Msg := 'A newer version is available: ' + LatestVersion + #13#10
          + 'You are about to install: ' + CurrentVersion + #13#10#13#10
