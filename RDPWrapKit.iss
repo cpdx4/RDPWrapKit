@@ -32,19 +32,6 @@
 #define APP_VERSION_FILEINFO "0.50.0.0"
 
 [Setup]
-; -------------------------------------------------------------------------
-; SETUP CONFIGURATION
-; -------------------------------------------------------------------------
-; This section defines the installer's core configuration including
-; application metadata, installation paths, compression settings, and
-; security requirements.
-;
-; IMPORTANT NOTES:
-; - PrivilegesRequired=admin: Required for service management and registry edits
-; - ArchitecturesInstallIn64BitMode: Ensures proper 64-bit installation
-; - SolidCompression: Reduces installer size significantly
-; - CloseApplications: Automatically closes conflicting processes
-; -------------------------------------------------------------------------
 AppName=RDPWrapKit
 AppVersion={#APP_VERSION_STRING}
 VersionInfoVersion={#APP_VERSION_FILEINFO}
@@ -66,21 +53,8 @@ WizardStyle=modern dynamic
 SetupIconFile="assets\RDPWrapKitIcon.ico"
 
 [Files]
-; -------------------------------------------------------------------------
-; FILE DEPLOYMENT
-; -------------------------------------------------------------------------
-; Defines which files are copied during installation and under what conditions.
-; 
-; CONDITIONAL DEPLOYMENT:
-;   - ShouldInstallFiles check ensures files are only copied when TermWrap
-;     installation is selected (not for user-only operations)
-;   - Icon file always extracted to temp for welcome page display
-;
-; SECURITY:
-;   - All files require admin privileges due to PrivilegesRequired setting
-;   - Files are protected by Windows Defender exclusions added during install
-; -------------------------------------------------------------------------
-; Bundle your payload files (only when DoInstallTermWrap = True, checked by ShouldInstallFiles)
+; Icon file always extracted to temp for welcome page display.
+; TermWrap files only copied when DoInstallTermWrap = True (checked via ShouldInstallFiles).
 Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
@@ -88,108 +62,17 @@ Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipi
 
 
 [Registry]
-; -------------------------------------------------------------------------
-; REGISTRY MODIFICATIONS
-; -------------------------------------------------------------------------
-; Enables RDP connections and optimizes Remote Desktop client behavior.
-;
-; fDenyTSConnections=0: Enables Terminal Services (RDP) connections
-; RemoteDesktop_SuppressWhenMinimized=2: Allows RDP to work when minimized
-;
-; CLEANUP:
-;   - uninsdeletevalue flag ensures these entries are removed on uninstall
-; -------------------------------------------------------------------------
-; Enable RDP
+; Enable RDP (fDenyTSConnections=0). Removed on uninstall via uninsdeletevalue.
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Terminal Server"; ValueType: dword; ValueName: "fDenyTSConnections"; ValueData: 0; Flags: uninsdeletevalue; Check: ShouldApplyRegistryEntries
 
 [Run]
 ; Run section is now handled in Code section for proper sequencing
 
 [UninstallRun]
-; No separate uninstall runs needed - registry cleanup is handled in code section
+; Registry cleanup handled via uninsdeletevalue flags and Code section.
 
 [Code]
-{ =============================================================================
-  PASCAL SCRIPT CODE SECTION
-  =============================================================================
-  
-  This section contains all the Pascal Script code that drives the installer's
-  custom logic, UI, and installation flow.
-  
-  ARCHITECTURE OVERVIEW:
-  ----------------------
-  procedure OnInstallModeChange(Sender: TObject); forward;
-     - Defines reusable values for executables, paths, URLs, timeouts
-     - Reduces magic numbers and string literals throughout code
-     - Centralizes configuration for easy maintenance
-  
-  2. External Windows API Declarations:
-     - NetUserGetInfo/NetUserEnum: User account validation
-     - LogonUser: Credential verification
-     - GetTickCount: Timing operations
-  
-  3. Helper Functions:
-     - Path construction (AppRoot, AppBin, TempFile)
-     - PowerShell execution (BuildPowerShellArgs, ExecPowerShellHidden)
-     - Command execution (RunHidden, RunCmdHidden)
-     - UI utilities (BoolToStr, SleepWithUI, color/RTF helpers)
-  
-  4. Core Installation Logic:
-     - Service management (StopTermService, StartTermService)
-     - User creation and validation
-     - RDP shortcut generation with encrypted passwords
-     - VC++ Redistributable installation
-     - Windows Defender exclusion management
-  
-  5. UI Management:
-    - Custom wizard pages (welcome, options, user creation, create-shortcuts)
-     - Progressive step indicators on installation page
-     - Credits and attribution display
-  
-  6. Installation Flow:
-     - PrepareToInstall: Pre-installation checks
-     - CurStepChanged: Main installation orchestration
-     - CurPageChanged: Page-specific initialization
-     - NextButtonClick: Input validation and page navigation
-  
-  SECURITY DESIGN:
-  ----------------
-  - Passwords encrypted with PowerShell SecureString before temp file storage
-  - Temporary files with sensitive data deleted immediately after use
-  - All PowerShell commands use -ExecutionPolicy Bypass to avoid policy blocks
-  - Hidden window modes prevent password exposure in UI
-  - Local credential validation before account creation
-  
-  ERROR HANDLING:
-  ---------------
-  - Service operations include retry logic with exponential backoff
-  - Optional components (like VC++ check) gracefully degrade on failure
-  - User feedback provided for all critical errors
-  - Exit codes logged for troubleshooting
-  
-  PERFORMANCE OPTIMIZATIONS:
-  -------------------------
-  - Lazy loading of user lists (only when create-shortcuts page shown)
-  - Parallel tool invocations where possible
-  - Minimized sleep durations (100-500ms instead of seconds)
-  - Service state verified after stop/start operations
-  
-  CODING STANDARDS:
-  -----------------
-  - Descriptive function and variable names
-  - Consistent indentation and formatting
-  - Comments explain WHY not just WHAT
-  - Magic numbers replaced with named constants
-  - DRY principle applied throughout
-  
-  MAINTENANCE NOTES:
-  ------------------
-  - Update version numbers in both [Setup] section and constants
-  - Test all paths (install, create-shortcuts, uninstall) before release
-  - Verify PowerShell commands work on latest Windows versions
-  - Keep URL constants updated if upstream projects move
-  
-============================================================================= }
+{ Pascal Script: installer UI, validation, and install flow. }
 
 // Forward declarations
 procedure CheckAndInstallMSTSC; forward;
@@ -210,6 +93,7 @@ procedure OnInstallModeChange(Sender: TObject); forward;
 procedure OnFullScreenClick(Sender: TObject); forward;
 procedure OnResolutionChange(Sender: TObject); forward;
 function IsTermWrapInstalled(): Boolean; forward;
+function BoolToStr(Value: Boolean): string; forward;
 procedure EnsureTermServiceRunsAsNetworkService; forward;
 procedure EnsureUmRdpServiceAutomatic; forward;
 procedure InitInstallerLog; forward;
@@ -406,6 +290,13 @@ const
   REG_UMRDPSERVICE = 'SYSTEM\CurrentControlSet\Services\UmRdpService';
   REG_UMRDPSERVICE_PARAMS = 'SYSTEM\CurrentControlSet\Services\UmRdpService\Parameters';
   REG_VCREDIST = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+  REG_SHOW_USERS = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System';
+  REG_RDP_TCP = 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp';
+  // Loopback alias used by TermWrap for local RDP sessions
+  RDP_LOOPBACK_IP = '127.0.0.2';
+  // Default RDP window resolution written into generated .rdp shortcut files
+  DEFAULT_RDP_WIDTH  = 1366;
+  DEFAULT_RDP_HEIGHT = 768;
   // User groups
   GROUP_ADMINISTRATORS = 'Administrators';
   GROUP_RDP_USERS = 'Remote Desktop Users';
@@ -506,17 +397,7 @@ const
   PASSWORD_PIPELINE_DIAG = 0;
   BUILD_FINGERPRINT = 'stabledebug-v21-ps-dquote-fix';
 
-// =============================================================================
-// EXTERNAL WINDOWS API FUNCTION DECLARATIONS
-// =============================================================================
-// These functions provide access to Windows system functionality not available
-// through standard Inno Setup commands.
-//
-// SECURITY IMPLICATIONS:
-// - NetUserGetInfo/NetUserEnum: Read-only access to local user accounts
-// - LogonUser: Validates credentials without creating sessions
-// - All operations require admin privileges (enforced by installer config)
-// =============================================================================
+// External Windows API declarations
 
 function NetUserGetInfo(ServerName: String; UserName: String; Level: Cardinal; var BufPtr: Cardinal): Cardinal;
   external 'NetUserGetInfo@netapi32.dll stdcall';
@@ -552,13 +433,8 @@ type
 function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
   external 'GetSystemTime@kernel32.dll stdcall';
 
-// =============================================================================
-// GITHUB UPDATE CHECK
-// =============================================================================
-
-// Fetches the latest release tag from the GitHub Releases API.
-// Returns the tag_name string (e.g. "0.50") with any leading "v" stripped,
-// or an empty string if the request fails for any reason.
+// Fetches the latest release tag from GitHub Releases API.
+// Returns tag_name (e.g. "0.50") with leading "v" stripped, or "" on failure.
 function GetLatestGitHubVersion(): String;
 var
   Http: Variant;
@@ -633,20 +509,14 @@ begin
 end;
 
 // =============================================================================
-// UTILITY AND HELPER FUNCTIONS
-// =============================================================================
-// This section contains reusable functions that simplify common operations
-// throughout the installer. These functions follow the DRY principle and
-// provide consistent behavior across different installation paths.
+// HELPER FUNCTIONS
 // =============================================================================
 
 // -----------------------------------------------------------------------------
 // USER ACCOUNT VALIDATION
 // -----------------------------------------------------------------------------
 
-// Check if a local user account exists on the system
-// Returns: True if user exists, False otherwise
-// Uses: Windows NetAPI for fast, reliable user enumeration
+// Check if a local user account exists
 function UserExists(const UserName: string): Boolean;
 var
   BufPtr: Cardinal;
@@ -657,10 +527,7 @@ begin
     NetApiBufferFree(BufPtr);
 end;
 
-// Parse a pipe-delimited user entry string into username and password components
-// Format: "username|password"
-// Used for: Internal user list storage and processing
-// Security: This function handles sensitive data - ensure calling code cleans up
+// Parse a "username|password" string into its components
 procedure ParseUserEntry(const Entry: string; var UserName, Password: string);
 var
   PipePos: Integer;
@@ -813,15 +680,8 @@ end;
 // -----------------------------------------------------------------------------
 // PATH CONSTRUCTION HELPERS
 // -----------------------------------------------------------------------------
-// These functions provide consistent, reusable path building for commonly
-// accessed locations. Using these helpers ensures paths remain correct even
-// if installation directory structure changes.
-// -----------------------------------------------------------------------------
 
-// Build an expanded path under {tmp} to avoid repeating ExpandConstant() calls
-// Parameter: FileName - The filename to place in temp directory
-// Returns: Fully expanded path like C:\Users\...\AppData\Local\Temp\filename
-// Usage: Simplifies temporary file creation throughout the installer
+// Expand a filename under {tmp}
 function TempFile(const FileName: string): string;
 begin
   Result := ExpandConstant('{tmp}\' + FileName);
@@ -951,19 +811,6 @@ begin
   DeleteFile(ScriptPath);
 end;
 
-function ExecSavedPowerShellDebugScript(const ScriptTag, UserName, ScriptContent: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
-var
-  ScriptPath: string;
-begin
-  ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
-  SaveStringToFile(ScriptPath, ScriptContent, False);
-  WriteInstallerLog('PowerShell File: ' + ScriptPath);
-  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if not Result then
-    WriteInstallerLog('ERROR: Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
-  DeleteFile(ScriptPath);
-end;
-
 function ExecSavedPowerShellDebugScriptParams(const ScriptTag, UserName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
 var
   ScriptPath: string;
@@ -1054,16 +901,12 @@ begin
     WriteInstallerLog('Signature verdict: Microsoft publisher validation failed');
 end;
 
-// Resolve mstsc.exe dynamically instead of using a hardcoded drive/path
+// Resolve mstsc.exe path dynamically
 function GetMstscPath: string;
 begin
   Result := ExpandConstant('{sys}\mstsc.exe');
   if not FileExists(Result) then
-  begin
-    Result := ExpandConstant('{win}\System32\mstsc.exe');
-    if not FileExists(Result) then
-      Result := '';
-  end;
+    Result := '';
 end;
 
 function ValidateRdpPortInput(const PortText: string; var PortValue: Integer; var ErrorText: string): Boolean;
@@ -1104,20 +947,8 @@ end;
 // -----------------------------------------------------------------------------
 // POWERSHELL EXECUTION HELPERS
 // -----------------------------------------------------------------------------
-// Standardized PowerShell invocation builders that ensure consistent behavior,
-// security settings, and error handling across all PS operations.
-//
-// SECURITY NOTES:
-// - ExecutionPolicy Bypass: Required for unsigned scripts to run
-// - NonInteractive: Prevents prompts that would hang the installer
-// - WindowStyle Hidden: Prevents password exposure in console windows
-// -----------------------------------------------------------------------------
 
-// Construct standardized PowerShell arguments for command execution
-// Parameters:
-//   Command - The PowerShell command(s) to execute
-//   Hidden - If True, runs with -NonInteractive -WindowStyle Hidden
-// Returns: Complete argument string for Exec() function
+// Build PowerShell -Command args
 function BuildPowerShellArgs(const Command: string; Hidden: Boolean): string;
 begin
   if Hidden then
@@ -1126,7 +957,7 @@ begin
     Result := PS_ARGS_BASE + ' -Command "' + Command + '"';
 end;
 
-// Standardize PowerShell script execution with optional extra parameters
+// Build PowerShell -File args (with optional extra params)
 function BuildPowerShellFileArgs(const ScriptPath, ExtraParams: string; Hidden: Boolean): string;
 var
   BaseArgs: string;
@@ -1211,19 +1042,16 @@ end;
 
 // === Utility helpers ========================================================
 
-// App install root helper
 function AppRoot: string;
 begin
   Result := ExpandConstant('{app}');
 end;
 
-// Path to a file under the app install root
 function AppBin(const FileName: string): string;
 begin
   Result := ExpandConstant('{app}\' + FileName);
 end;
 
-// Installer log helpers
 function SafeRegString(const Root: Integer; const Key, ValueName: string; const Fallback: string): string;
 var
   S: string;
@@ -1290,8 +1118,9 @@ begin
   if ST.wHour < 10 then h := '0' + IntToStr(ST.wHour) else h := IntToStr(ST.wHour);
   if ST.wMinute < 10 then m := '0' + IntToStr(ST.wMinute) else m := IntToStr(ST.wMinute);
   if ST.wSecond < 10 then s := '0' + IntToStr(ST.wSecond) else s := IntToStr(ST.wSecond);
-  if ST.wMilliseconds < 100 then ms := '0' + IntToStr(ST.wMilliseconds) else ms := IntToStr(ST.wMilliseconds);
-  if ST.wMilliseconds < 10 then ms := '00' + IntToStr(ST.wMilliseconds);
+  if ST.wMilliseconds < 10 then ms := '00' + IntToStr(ST.wMilliseconds)
+  else if ST.wMilliseconds < 100 then ms := '0' + IntToStr(ST.wMilliseconds)
+  else ms := IntToStr(ST.wMilliseconds);
   Result := '[' + h + ':' + m + ':' + s + '.' + ms + ']';
 end;
 
@@ -1334,14 +1163,6 @@ var
 begin
   Lvl := NormalizeLogLevel(Msg);
   Result := '[' + Lvl + '] ' + Msg;
-end;
-
-function BoolText(const Value: Boolean): string;
-begin
-  if Value then
-    Result := 'Yes'
-  else
-    Result := 'No';
 end;
 
 function GetCurrentInstallModeName: string;
@@ -1408,8 +1229,8 @@ begin
 
   LogKeyValue('Top-level selection', ChosenAction);
   LogKeyValue('Resolved mode', GetCurrentInstallModeName);
-  LogKeyValue('Install TermWrap', BoolText(DoInstallTermWrap));
-  LogKeyValue('Create shortcuts', BoolText(DoCreateRdpShortcuts));
+  LogKeyValue('Install TermWrap', BoolToStr(DoInstallTermWrap));
+  LogKeyValue('Create shortcuts', BoolToStr(DoCreateRdpShortcuts));
 
   if Assigned(rbCreateUsers) and Assigned(rbUseExistingUsers) then
   begin
@@ -1453,16 +1274,11 @@ begin
   end;
 end;
 
-function PasswordDebugSummary(const Password: string): string;
-begin
-  Result := 'details=<redacted>';
-end;
-
 procedure LogPasswordPipeline(const StageName, UserName, Password: string);
 begin
   if PASSWORD_PIPELINE_DIAG = 0 then
     exit;
-  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] user=' + UserName + ' :: ' + PasswordDebugSummary(Password));
+  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] user=' + UserName + ' :: details=<redacted>');
 end;
 
 procedure LogEncryptedFileSummary(const StageName, FilePath: string);
@@ -1639,17 +1455,6 @@ begin
   Result := RunHidden(EXE_CMD, '/c ' + CmdLine);
 end;
 
-// Check if a process is running (by executable name)
-function ProcessExists(const ProcessName: string): Boolean;
-var
-  RC: Integer;
-begin
-  // Use tasklist to check if process is running
-  // tasklist returns 0 if found, 1 if not found
-  RC := RunCmdHidden('tasklist /FI "IMAGENAME eq ' + ProcessName + '" /FO CSV /NH');
-  Result := (RC = 0);
-end;
-
 // Convert boolean to string
 function BoolToStr(Value: Boolean): string;
 begin
@@ -1674,11 +1479,6 @@ begin
   Result := SIM_SCENARIO_NET_FAIL_POWERSHELL <> 0;
 end;
 
-function SimulateNetFailure: Boolean;
-begin
-  Result := SimulateNetFailPowerShell;
-end;
-
 procedure LogSimulationScenario(const ScenarioText: string);
 begin
   WriteInstallerLog('SIMULATED SCENARIO: ' + ScenarioText);
@@ -1687,7 +1487,7 @@ end;
 
 function RunNetHidden(const Params: string): Integer;
 begin
-  if SimulateNetFailure then
+  if SimulateNetFailPowerShell then
   begin
     if SimulateNetFailPowerShell and (not SimLogNetPsShown) then
     begin
@@ -1806,10 +1606,6 @@ begin
   Result := Result + '}';
 end;
 
-// BuildCreditsRtf removed — welcome page uses individual TLabel controls instead
-
-// (moved: layout helper procedures are now declared after SetStepPending/Done)
-
 // Resolve localized group name from a well-known SID; fallback to provided name
 function GetLocalizedGroupName(const Sid, Fallback: string): string;
 var
@@ -1851,7 +1647,7 @@ begin
     'try { ' +
     '  $regPath = ''HKCU:\Software\Microsoft\Terminal Server Client\LocalDevices''; ' +
     '  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }; ' +
-    '  New-ItemProperty -Path $regPath -Name ''127.0.0.2'' -PropertyType DWord -Value 76 -Force | Out-Null; ' +
+    '  New-ItemProperty -Path $regPath -Name ''' + RDP_LOOPBACK_IP + ''' -PropertyType DWord -Value 76 -Force | Out-Null; ' +
     '  exit 0 ' +
     '} catch { ' +
     '  exit 1 ' +
@@ -1885,19 +1681,9 @@ end;
 // -----------------------------------------------------------------------------
 // WINDOWS SERVICE MANAGEMENT
 // -----------------------------------------------------------------------------
-// Functions for controlling the Terminal Services (TermService) which must be
-// stopped before modifying TermWrap DLLs and restarted afterward.
-//
-// CRITICAL NOTES:
-// - Service must be fully stopped before DLL replacement or corruption occurs
-// - Includes retry logic as service can be slow to stop
-// - Service state verification after operations
-// -----------------------------------------------------------------------------
 
-// Stop the Terminal Service (RDP) with retry logic
-// This is required before replacing TermWrap DLLs
-// Attempts: Up to 5 tries with progressive delays
-// Side effects: Disconnects all active RDP sessions
+// Stop TermService with retry logic (up to 5 attempts).
+// Required before replacing TermWrap DLLs; disconnects active RDP sessions.
 procedure StopTermService;
 var
   ResultCode: Integer;
@@ -1983,70 +1769,88 @@ begin
   Result := RC;
 end;
 
-procedure EnsureTermServiceRunsAsNetworkService;
+// Shared helper: query a string value, fix it via sc.exe if wrong, then verify.
+procedure EnsureServiceStringConfig(const RegKey, ValueName, ScArgs, TargetValue, CheckDesc, FixDesc: string);
 var
-  CurrentObjectName: string;
-  PostFixObjectName: string;
+  Current: string;
   RC: Integer;
 begin
-  CurrentObjectName := '';
-  if RegQueryStringValue(HKLM, REG_TERMSERVICE, 'ObjectName', CurrentObjectName) then
-    WriteInstallerLog('TermService account check: current ObjectName=' + CurrentObjectName)
+  Current := '';
+  if RegQueryStringValue(HKLM, RegKey, ValueName, Current) then
+    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=' + Current)
   else
-    WriteInstallerLog('TermService account check: current ObjectName=<missing>');
+    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=<missing>');
 
-  if CompareText(Trim(CurrentObjectName), 'NT AUTHORITY\NetworkService') = 0 then
-    exit;
+  if CompareText(Trim(Current), TargetValue) = 0 then
+    Exit;
 
-  RC := RunHidden('sc.exe', 'config TermService obj= "NT AUTHORITY\NetworkService" password= ""');
+  RC := RunHidden('sc.exe', ScArgs);
   if RC = 0 then
-    WriteInstallerLog('TermService account fix: set ObjectName to NT AUTHORITY\NetworkService')
+    WriteInstallerLog(FixDesc + ': success')
   else
-    WriteInstallerLog('WARNING: TermService account fix failed: sc.exe exit=' + IntToStr(RC));
+    WriteInstallerLog('WARNING: ' + FixDesc + ' failed: sc.exe exit=' + IntToStr(RC));
 
   Sleep(SLEEP_SHORT);
-  PostFixObjectName := '';
-  if RegQueryStringValue(HKLM, REG_TERMSERVICE, 'ObjectName', PostFixObjectName) then
-    WriteInstallerLog('TermService account check (post-fix): current ObjectName=' + PostFixObjectName)
+  Current := '';
+  if RegQueryStringValue(HKLM, RegKey, ValueName, Current) then
+    WriteInstallerLog(CheckDesc + ' (post-fix): ' + ValueName + '=' + Current)
   else
-    WriteInstallerLog('WARNING: TermService account check (post-fix): ObjectName could not be read');
+    WriteInstallerLog('WARNING: ' + CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
 end;
 
-// Backward-compatible wrapper (ignores exit code)
+// Shared helper: query a DWord value, fix it via sc.exe if wrong, then verify.
+procedure EnsureServiceDWordConfig(const RegKey, ValueName, ScArgs: string; TargetValue: Cardinal; const CheckDesc, FixDesc: string);
+var
+  Current: Cardinal;
+  RC: Integer;
+begin
+  Current := $FFFFFFFF;
+  if RegQueryDWordValue(HKLM, RegKey, ValueName, Current) then
+    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=' + IntToStr(Current))
+  else
+    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=<unable to read>');
+
+  if Current = TargetValue then
+    Exit;
+
+  RC := RunHidden('sc.exe', ScArgs);
+  if RC = 0 then
+    WriteInstallerLog(FixDesc + ': success')
+  else
+    WriteInstallerLog('WARNING: ' + FixDesc + ' failed: sc.exe exit=' + IntToStr(RC));
+
+  Sleep(SLEEP_SHORT);
+  if RegQueryDWordValue(HKLM, RegKey, ValueName, Current) then
+    WriteInstallerLog(CheckDesc + ' (post-fix): ' + ValueName + '=' + IntToStr(Current))
+  else
+    WriteInstallerLog('WARNING: ' + CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
+end;
+
+procedure EnsureTermServiceRunsAsNetworkService;
+begin
+  EnsureServiceStringConfig(
+    REG_TERMSERVICE, 'ObjectName',
+    'config TermService obj= "NT AUTHORITY\NetworkService" password= ""',
+    'NT AUTHORITY\NetworkService',
+    'TermService account check',
+    'TermService account fix: set ObjectName to NT AUTHORITY\NetworkService');
+end;
+
+// Wrapper that calls StartTermServiceEx and discards the exit code
 procedure StartTermService;
 begin
   StartTermServiceEx;
 end;
 
 procedure EnsureUmRdpServiceAutomatic;
-var
-  CurrentStartValue: Cardinal;
-  RC: Integer;
 begin
-  CurrentStartValue := 0;
-  WriteInstallerLog('UmRdpService startup type check: querying current Start value');
-
-  if RegQueryDWordValue(HKLM, REG_UMRDPSERVICE, 'Start', CurrentStartValue) then
-    WriteInstallerLog('UmRdpService startup type check: current Start=' + IntToStr(CurrentStartValue))
-  else
-    WriteInstallerLog('UmRdpService startup type check: current Start value=<unable to read>');
-
   // Start type 2 = Automatic
-  if CurrentStartValue = 2 then
-    exit;
-
-  RC := RunHidden('sc.exe', 'config UmRdpService start=auto');
-  if RC = 0 then
-    WriteInstallerLog('UmRdpService startup type fix: set Start=2 (Automatic)')
-  else
-    WriteInstallerLog('WARNING: UmRdpService startup type fix failed: sc.exe exit=' + IntToStr(RC));
-
-  Sleep(SLEEP_SHORT);
-  CurrentStartValue := 0;
-  if RegQueryDWordValue(HKLM, REG_UMRDPSERVICE, 'Start', CurrentStartValue) then
-    WriteInstallerLog('UmRdpService startup type check (post-fix): Start=' + IntToStr(CurrentStartValue))
-  else
-    WriteInstallerLog('WARNING: UmRdpService startup type check (post-fix): Start could not be read');
+  EnsureServiceDWordConfig(
+    REG_UMRDPSERVICE, 'Start',
+    'config UmRdpService start=auto',
+    2,
+    'UmRdpService startup type check',
+    'UmRdpService startup type fix: set Start=2 (Automatic)');
 end;
 
 function IsExcludedUser(const UserName: string): Boolean;
@@ -2276,7 +2080,6 @@ begin
       if not UserPasswordEdits[i].Enabled then
         UserPasswordEdits[i].Text := '';
     end;
-    if Assigned(UserPasswordStatus[i]) then
     if Assigned(UserPasswordStatus[i]) then
     begin
       UserPasswordStatus[i].Caption := '';
@@ -2858,30 +2661,18 @@ begin
   // Show Create Shortcuts for Existing Users page only when:
   //   Install mode + Create RDP shortcuts + Use existing users
   if PageID = Page_CreateShortcutsForExistingUsers.ID then
-  begin
-    if (SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting) then
-      Result := False
-    else
-      Result := True;
-  end;
+    Result := not ((SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting));
 
   // Show Shortcut Settings page when creating shortcuts (any method) or editing shortcuts
   if PageID = Page_ShortcutSettings.ID then
-  begin
-    if ((SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts) or
-       (SelectedInstallMode = installModeEditShortcuts) then
-      Result := False
-    else
-      Result := True;
-  end;
+    Result := not (((SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts) or
+                   (SelectedInstallMode = installModeEditShortcuts));
 
 end;
 
 function IsVCRedistInstalled: Boolean;
 var
   Major: Cardinal;
-  Minor: Cardinal;
-  Bld: Cardinal;
 begin
   if SimulateNoVCRedist then
   begin
@@ -2894,17 +2685,8 @@ begin
     exit;
   end;
 
-  // Check for VC++ 2015-2022 Redistributable (x64)
-  // The registry key stores the version information
-  Result := RegQueryDWordValue(HKLM, REG_VCREDIST, 'Major', Major) and
-            RegQueryDWordValue(HKLM, REG_VCREDIST, 'Minor', Minor) and
-            RegQueryDWordValue(HKLM, REG_VCREDIST, 'Bld', Bld);
-  
-  if Result then
-  begin
-    // Check if version is 14.0 or higher (covers 2015-2022)
-    Result := (Major >= 14);
-  end;
+  // Check for VC++ 2015-2022 Redistributable (x64), version 14.x or higher
+  Result := RegQueryDWordValue(HKLM, REG_VCREDIST, 'Major', Major) and (Major >= 14);
 end;
 
 procedure SecureCleanupTempFiles(const UserName: string);
@@ -2944,6 +2726,44 @@ begin
   end;
 end;
 
+// Read shortcut display settings from UI controls into output vars.
+// Shared by WriteRDPFileDirect, GenerateRDPPowerShellScript, and WriteShortcutSettingsToRdpFile.
+procedure GetShortcutDisplaySettings(var ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer);
+var
+  ResStr: string;
+  XPos: Integer;
+begin
+  if Assigned(chkFullScreen) and chkFullScreen.Checked then
+    ScreenModeId := 2
+  else
+    ScreenModeId := 1;
+
+  DesktopWidth  := DEFAULT_RDP_WIDTH;
+  DesktopHeight := DEFAULT_RDP_HEIGHT;
+  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
+  begin
+    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
+    begin
+      if Assigned(edtCustomWidth)  then DesktopWidth  := StrToIntDef(Trim(edtCustomWidth.Text),  DEFAULT_RDP_WIDTH);
+      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), DEFAULT_RDP_HEIGHT);
+    end
+    else
+    begin
+      ResStr := cboResolution.Items[cboResolution.ItemIndex];
+      XPos := Pos(' x ', ResStr);
+      if XPos > 0 then
+      begin
+        DesktopWidth  := StrToIntDef(Trim(Copy(ResStr, 1, XPos - 1)), DEFAULT_RDP_WIDTH);
+        DesktopHeight := StrToIntDef(Trim(Copy(ResStr, XPos + 3, Length(ResStr))), DEFAULT_RDP_HEIGHT);
+      end;
+    end;
+  end;
+
+  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then UseMultiMon := 1 else UseMultiMon := 0;
+  if Assigned(chkSound) and chkSound.Checked then AudioMode := 0 else AudioMode := 2;
+  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then RedirectClipboard := 1 else RedirectClipboard := 0;
+end;
+
 function WriteRDPFileDirect(const UserName, RDPPath, EncPath: string): Boolean;
 var
   ScreenModeId: Integer;
@@ -2952,8 +2772,6 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
-  ResStr: string;
-  XPos: Integer;
   SL: TStringList;
   EncTextRaw: AnsiString;
   EncText: string;
@@ -2972,50 +2790,11 @@ begin
     end;
   end;
 
-  if Assigned(chkFullScreen) and chkFullScreen.Checked then
-    ScreenModeId := 2
-  else
-    ScreenModeId := 1;
-
-  DesktopWidth := 1366;
-  DesktopHeight := 768;
-  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
-  begin
-    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
-    begin
-      if Assigned(edtCustomWidth) then DesktopWidth := StrToIntDef(Trim(edtCustomWidth.Text), 1366);
-      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
-    end
-    else
-    begin
-      ResStr := cboResolution.Items[cboResolution.ItemIndex];
-      XPos := Pos(' x ', ResStr);
-      if XPos > 0 then
-      begin
-        DesktopWidth := StrToIntDef(Trim(Copy(ResStr, 1, XPos - 1)), 1366);
-        DesktopHeight := StrToIntDef(Trim(Copy(ResStr, XPos + 3, Length(ResStr))), 768);
-      end;
-    end;
-  end;
-
-  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then
-    UseMultiMon := 1
-  else
-    UseMultiMon := 0;
-
-  if Assigned(chkSound) and chkSound.Checked then
-    AudioMode := 0
-  else
-    AudioMode := 2;
-
-  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then
-    RedirectClipboard := 1
-  else
-    RedirectClipboard := 0;
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
 
   SL := TStringList.Create;
   try
-    SL.Add('full address:s:127.0.0.2');
+    SL.Add('full address:s:' + RDP_LOOPBACK_IP);
     SL.Add('username:s:' + UserName);
     SL.Add('screen mode id:i:' + IntToStr(ScreenModeId));
     SL.Add('desktopwidth:i:' + IntToStr(DesktopWidth));
@@ -3077,54 +2856,8 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
-  ResStr: string;
-  XPos: Integer;
 begin
-  // Determine screen mode: 2 = full screen, 1 = windowed
-  if Assigned(chkFullScreen) and chkFullScreen.Checked then
-    ScreenModeId := 2
-  else
-    ScreenModeId := 1;
-
-  // Parse resolution — use custom W/H boxes if "Custom" is selected
-  DesktopWidth := 1366;
-  DesktopHeight := 768;
-  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
-  begin
-    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
-    begin
-      if Assigned(edtCustomWidth)  then DesktopWidth  := StrToIntDef(Trim(edtCustomWidth.Text),  1366);
-      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
-    end
-    else
-    begin
-      ResStr := cboResolution.Items[cboResolution.ItemIndex];
-      XPos := Pos(' x ', ResStr);
-      if XPos > 0 then
-      begin
-        DesktopWidth := StrToInt(Trim(Copy(ResStr, 1, XPos - 1)));
-        DesktopHeight := StrToInt(Trim(Copy(ResStr, XPos + 3, Length(ResStr))));
-      end;
-    end;
-  end;
-
-  // Use all monitors
-  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then
-    UseMultiMon := 1
-  else
-    UseMultiMon := 0;
-
-  // Audio: 0 = play on this PC, 2 = disabled
-  if Assigned(chkSound) and chkSound.Checked then
-    AudioMode := 0
-  else
-    AudioMode := 2;
-
-  // Clipboard redirection
-  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then
-    RedirectClipboard := 1
-  else
-    RedirectClipboard := 0;
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
 
   Result :=
     'param([string]$EncPath = '''')' + #13#10 +
@@ -3140,7 +2873,7 @@ begin
     '    Write-Host "No encrypted password available; shortcut will prompt for password"' + #13#10 +
     '  }' + #13#10 +
     '  $rdp = @()' + #13#10 +
-    '  $rdp += "full address:s:127.0.0.2"' + #13#10 +
+    '  $rdp += "full address:s:' + RDP_LOOPBACK_IP + '"' + #13#10 +
     '  $rdp += "username:s:' + UserName + '"' + #13#10 +
     '  $rdp += "screen mode id:i:' + IntToStr(ScreenModeId) + '"' + #13#10 +
     '  $rdp += "desktopwidth:i:' + IntToStr(DesktopWidth) + '"' + #13#10 +
@@ -3323,8 +3056,6 @@ var
   PSParams: string;
   SL: TStringList;
   j: Integer;
-  GroupExists: Boolean;
-  GroupCheckStatus: Integer; // 0=unknown, 1=exists, 2=missing
   NetRc: Integer;
   ExecOk: Boolean;
   UserCreateOutputAlreadyLogged: Boolean;
@@ -3516,15 +3247,8 @@ begin
       PSParams := BuildPSNamedParam('GroupName', GroupRDPUsersName);
       ExecPowerShellScriptContent('check_rdp_group.ps1', PSScript, PSParams, True, ResultCode);
     end;
-    GroupExists := False;
-    GroupCheckStatus := 0;
-    if ResultCode = 0 then
-      GroupCheckStatus := 1
-    else if ResultCode = 2 then
-      GroupCheckStatus := 2;
-    GroupExists := (GroupCheckStatus = 1);
-
-    if GroupExists or (GroupCheckStatus = 0) then
+    // Skip adding to the group only when we confirmed it is missing (PS returned 2)
+    if ResultCode <> 2 then
     begin
       OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
       NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupRDPUsersName) + ' ' + QuoteExeArg(UserName) + ' /add');
@@ -3751,7 +3475,7 @@ begin
   if not FileExists(OutPath) then exit;
 
   // Defaults (match BuildShortcutSettingsBlock initial state)
-  ScreenMode := 1; DesktopWidth := 1366; DesktopHeight := 768;
+  ScreenMode := 1; DesktopWidth := DEFAULT_RDP_WIDTH; DesktopHeight := DEFAULT_RDP_HEIGHT;
   UseMultiMon := 0; AudioMode := 0; RedirectClipboard := 1;
 
   Lines := TStringList.Create;
@@ -3765,8 +3489,8 @@ begin
       Key := Copy(Line, 1, EqPos - 1);
       Val := Trim(Copy(Line, EqPos + 1, Length(Line)));
       if      Key = 'screen_mode_id'    then ScreenMode       := StrToIntDef(Val, 1)
-      else if Key = 'desktopwidth'      then DesktopWidth     := StrToIntDef(Val, 1366)
-      else if Key = 'desktopheight'     then DesktopHeight    := StrToIntDef(Val, 768)
+      else if Key = 'desktopwidth'      then DesktopWidth     := StrToIntDef(Val, DEFAULT_RDP_WIDTH)
+      else if Key = 'desktopheight'     then DesktopHeight    := StrToIntDef(Val, DEFAULT_RDP_HEIGHT)
       else if Key = 'use_multimon'      then UseMultiMon      := StrToIntDef(Val, 0)
       else if Key = 'audiomode'         then AudioMode        := StrToIntDef(Val, 0)
       else if Key = 'redirectclipboard' then RedirectClipboard := StrToIntDef(Val, 1);
@@ -3781,7 +3505,7 @@ begin
 
   ResIndex := -1;  // -1 = no preset match yet
   if      (DesktopWidth = 1280) and (DesktopHeight = 720)  then ResIndex := 0
-  else if (DesktopWidth = 1366) and (DesktopHeight = 768)  then ResIndex := 1
+  else if (DesktopWidth = DEFAULT_RDP_WIDTH) and (DesktopHeight = DEFAULT_RDP_HEIGHT) then ResIndex := 1
   else if (DesktopWidth = 1600) and (DesktopHeight = 900)  then ResIndex := 2
   else if (DesktopWidth = 1920) and (DesktopHeight = 1080) then ResIndex := 3
   else if (DesktopWidth = 2560) and (DesktopHeight = 1440) then ResIndex := 4
@@ -3813,36 +3537,11 @@ procedure WriteShortcutSettingsToRdpFile(const RdpPath: string);
 // current shortcut settings UI controls, then writes the file back in-place.
 var
   ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
-  ResStr: string;
-  XPos, ResultCode: Integer;
+  ResultCode: Integer;
   PSScript, ScriptPath: string;
 begin
   // Collect values from UI controls
-  if Assigned(chkFullScreen) and chkFullScreen.Checked then ScreenModeId := 2 else ScreenModeId := 1;
-
-  DesktopWidth := 1366; DesktopHeight := 768;
-  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
-  begin
-    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
-    begin
-      if Assigned(edtCustomWidth)  then DesktopWidth  := StrToIntDef(Trim(edtCustomWidth.Text),  1366);
-      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
-    end
-    else
-    begin
-      ResStr := cboResolution.Items[cboResolution.ItemIndex];
-      XPos := Pos(' x ', ResStr);
-      if XPos > 0 then
-      begin
-        DesktopWidth := StrToInt(Trim(Copy(ResStr, 1, XPos - 1)));
-        DesktopHeight := StrToInt(Trim(Copy(ResStr, XPos + 3, Length(ResStr))));
-      end;
-    end;
-  end;
-
-  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then UseMultiMon := 1 else UseMultiMon := 0;
-  if Assigned(chkSound) and chkSound.Checked then AudioMode := 0 else AudioMode := 2;
-  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then RedirectClipboard := 1 else RedirectClipboard := 0;
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
 
   // PowerShell: update specific keys in the .rdp file without touching the rest (e.g. password hash)
   PSScript :=
@@ -4005,6 +3704,18 @@ begin
   chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
   chkShowMoreShortcutOptions.Checked := False;
   chkShowMoreShortcutOptions.Visible := False;
+end;
+
+// Populate a TCheckBox from a registry DWord: Checked = (value = TrueValue).
+// Falls back to DefaultChecked when the key/value is absent.
+procedure LoadDWordCheckbox(Root: Integer; const Key, Name: string; TrueValue: Cardinal; Ctrl: TCheckBox; DefaultChecked: Boolean);
+var
+  V: Cardinal;
+begin
+  if RegQueryDWordValue(Root, Key, Name, V) then
+    Ctrl.Checked := (V = TrueValue)
+  else
+    Ctrl.Checked := DefaultChecked;
 end;
 
 procedure InitializeWizard;
@@ -4703,25 +4414,16 @@ begin
 
 
     // Enable Remote Desktop (fDenyTSConnections = 0 means enabled)
-    if RegQueryDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', DenyVal) then
-      chkEnableRDP.Checked := (DenyVal = 0)
-    else
-      chkEnableRDP.Checked := False;
+    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, chkEnableRDP, False);
 
     // Show users on logon screen (best-effort: DontDisplayLastUserName = 0 => show)
-    if RegQueryDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', DenyVal) then
-      chkShowUsers.Checked := (DenyVal = 0)
-    else
-      chkShowUsers.Checked := True;
+    LoadDWordCheckbox(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, chkShowUsers, True);
 
     // Prevent duplicate connections per user (fSingleSessionPerUser = 1 => single session)
-    if RegQueryDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', SingleSessVal) then
-      chkPreventDuplicate.Checked := (SingleSessVal = 1)
-    else
-      chkPreventDuplicate.Checked := False;
+    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, chkPreventDuplicate, False);
 
     // RDP listening port
-    if RegQueryDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', 'PortNumber', PortNumber) then
+    if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
       edtRdpPort.Text := IntToStr(PortNumber)
     else
       edtRdpPort.Text := IntToStr(RDP_LISTEN_PORT);
@@ -5452,14 +5154,14 @@ begin
         SetStepInProgress(StepShowUsers, 'Updating Show users on logon screen');
         if chkShowUsers.Checked then
         begin
-          if RegWriteDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', 0) then
+          if RegWriteDWordValue(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0) then
             WriteInstallerLog('Applied DontDisplayLastUserName=0 (Show users)')
           else
             WriteInstallerLog('Failed to write DontDisplayLastUserName');
         end
         else
         begin
-          if RegWriteDWordValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', 'DontDisplayLastUserName', 1) then
+          if RegWriteDWordValue(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 1) then
             WriteInstallerLog('Applied DontDisplayLastUserName=1 (Hide users)')
           else
             WriteInstallerLog('Failed to write DontDisplayLastUserName');
@@ -5492,7 +5194,7 @@ begin
       if (StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT) <> OrigRdpPort) then
       begin
         SetStepInProgress(StepSetRdpPort, 'Setting RDP listening port');
-        if RegWriteDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', 'PortNumber', StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT)) then
+        if RegWriteDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT)) then
           WriteInstallerLog('Applied new RDP PortNumber=' + edtRdpPort.Text)
         else
           WriteInstallerLog('Failed to write RDP PortNumber');
@@ -5760,11 +5462,28 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
 begin
   // Handle removal when using the standard uninstaller
   if CurUninstallStep = usUninstall then
   begin
     RemoveDefenderExclusionForApp;
+
+    // Remove the RDP pre-trust entry written by PreTrustRDPCertCurrentUser
+    ExecPowerShellHidden(
+      '$ErrorActionPreference = ''Stop''; ' +
+      'try { ' +
+      '  $regPath = ''HKCU:\Software\Microsoft\Terminal Server Client\LocalDevices''; ' +
+      '  if (Test-Path $regPath) { ' +
+      '    Remove-ItemProperty -Path $regPath -Name ''' + RDP_LOOPBACK_IP + ''' -Force -ErrorAction SilentlyContinue ' +
+      '  }; ' +
+      '  exit 0 ' +
+      '} catch { ' +
+      '  exit 1 ' +
+      '}',
+      ResultCode);
+    Log('DEBUG: Remove pre-trust registry entry exit code = ' + IntToStr(ResultCode) + ' (0=success, 1=error)');
   end;
 end;
 
