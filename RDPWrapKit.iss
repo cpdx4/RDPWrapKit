@@ -28,6 +28,9 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
+#define APP_VERSION_STRING "0.50"
+#define APP_VERSION_FILEINFO "0.50.0.0"
+
 [Setup]
 ; -------------------------------------------------------------------------
 ; SETUP CONFIGURATION
@@ -43,8 +46,8 @@
 ; - CloseApplications: Automatically closes conflicting processes
 ; -------------------------------------------------------------------------
 AppName=RDPWrapKit
-AppVersion=0.49
-VersionInfoVersion=0.49.0.0
+AppVersion={#APP_VERSION_STRING}
+VersionInfoVersion={#APP_VERSION_FILEINFO}
 AppPublisher=cpdx4
 AppPublisherURL=https://cpdx4.github.io/RDPWrapKit/
 AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
@@ -77,7 +80,7 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ;   - All files require admin privileges due to PrivilegesRequired setting
 ;   - Files are protected by Windows Defender exclusions added during install
 ; -------------------------------------------------------------------------
-; Bundle your payload files (only for Install TermWrap, not for Add Users Only)
+; Bundle your payload files (only when DoInstallTermWrap = True, checked by ShouldInstallFiles)
 Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
@@ -98,8 +101,6 @@ Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipi
 ; -------------------------------------------------------------------------
 ; Enable RDP
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Terminal Server"; ValueType: dword; ValueName: "fDenyTSConnections"; ValueData: 0; Flags: uninsdeletevalue; Check: ShouldApplyRegistryEntries
-; Allow minimized RDP
-Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dword; ValueName: "RemoteDesktop_SuppressWhenMinimized"; ValueData: 2; Flags: uninsdeletevalue; Check: ShouldApplyRegistryEntries
 
 [Run]
 ; Run section is now handled in Code section for proper sequencing
@@ -184,7 +185,7 @@ Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dwor
   MAINTENANCE NOTES:
   ------------------
   - Update version numbers in both [Setup] section and constants
-  - Test all paths (typical, create-shortcuts, uninstall) before release
+  - Test all paths (install, create-shortcuts, uninstall) before release
   - Verify PowerShell commands work on latest Windows versions
   - Keep URL constants updated if upstream projects move
   
@@ -192,7 +193,7 @@ Root: HKLM; Subkey: "Software\Microsoft\Terminal Server Client"; ValueType: dwor
 
 // Forward declarations
 procedure CheckAndInstallMSTSC; forward;
-procedure OnManageUsersClick(Sender: TObject); forward;
+procedure OnCreateRdpShortcutsClick(Sender: TObject); forward;
 procedure OnPrevUsersPageClick(Sender: TObject); forward;
 procedure OnNextUsersPageClick(Sender: TObject); forward;
 procedure UpdateUsersPageDisplay; forward;
@@ -206,9 +207,15 @@ function ValidateLocalCredential(const UserName, Password: string): Boolean; for
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
 procedure OnInstallModeChange(Sender: TObject); forward;
+procedure OnFullScreenClick(Sender: TObject); forward;
+procedure OnResolutionChange(Sender: TObject); forward;
 function IsTermWrapInstalled(): Boolean; forward;
+procedure EnsureTermServiceRunsAsNetworkService; forward;
+procedure EnsureUmRdpServiceAutomatic; forward;
 procedure InitInstallerLog; forward;
 procedure WriteInstallerLog(const Msg: string); forward;
+procedure LogSectionHeader(const Title: string); forward;
+procedure LogKeyValue(const KeyName, KeyValue: string); forward;
 var
   Page_InstallOptions: TWizardPage;
   WelcomePage: TWizardPage;
@@ -216,8 +223,6 @@ var
   // AdvancedPage removed - single create-shortcuts page retained
   EditSystemwideSettingsPage: TWizardPage;  // Main Edit System-wide settings page
   Page_CreateShortcutsForExistingUsers: TWizardPage;  // Create RDP desktop shortcuts
-  // SelectedAdvancedTool removed; routing to the Create Shortcuts page is determined by
-  // `SelectedInstallMode = itCreateShortcutsForExistingUsers`.
   LocalUsersList: TStringList;
   CreateShortcutsControlsBuilt: Boolean;
   UserCheckBoxes: array of TCheckBox;
@@ -234,16 +239,17 @@ var
   AddMoreRadio: TRadioButton;
   DoneRadio: TRadioButton;
   // New welcome/options controls
-  rbTypicalSetup: TRadioButton;
+  rbInstall: TRadioButton;
   rbEditSystemwideSettings: TRadioButton;
   rbUninstall: TRadioButton;
   chkInstallTermWrap: TCheckBox;
-  chkManageUsers: TCheckBox;
+  chkCreateRdpShortcuts: TCheckBox;
   rbCreateUsers: TRadioButton;
   rbUseExistingUsers: TRadioButton;
   rbEditShortcutSettings: TRadioButton;
-  ManageUsersGroup: TPanel;
+  CreateRdpShortcutsGroup: TPanel;
   EditShortcutPage: TWizardPage;
+  Page_ShortcutSettings: TWizardPage;
   DesktopRdpFiles: TStringList;
   ShortcutRadioButtons: array of TRadioButton;
   CurrentShortcutPage: Integer;
@@ -260,10 +266,8 @@ var
   FinishedExampleLabel: TLabel;
   // Flags derived from welcome/options controls
   DoInstallTermWrap: Boolean;
-  DoManageUsers: Boolean;
-  NeedCreateUsers: Boolean;
-  // JumpToAdvancedTool1 removed; routing to the CreateShortcuts page is now
-  // determined by `SelectedInstallMode = itCreateShortcutsForExistingUsers`.
+  DoCreateRdpShortcuts: Boolean;
+  CreateUserMode: Integer;       // createUserModeNew or createUserModeExisting (only used when DoCreateRdpShortcuts = True)
   DoEditSystemWideSettings: Boolean;
   OrigEnableRDP: Boolean;
   OrigShowUsers: Boolean;
@@ -281,8 +285,8 @@ var
   lblRDPServiceName: TLabel;
   lblWinRDPVer: TLabel;
   lblWinRDPVerName: TLabel;
-  lblTermWrapVer: TLabel;
-  lblTermWrapVerName: TLabel;
+  lblWrapperVer: TLabel;
+  lblWrapperVerName: TLabel;
 
   lblGenHeader: TLabel;
   chkEnableRDP: TCheckBox;
@@ -316,8 +320,17 @@ var
   StepPreventDuplicate: TLabel;
   StepSetRdpPort: TLabel;
   StepRestartRDP: TLabel;
-  SelectedInstallMode: Integer;  // use named constants: itInstallTermWrap, itCreateNewUsers, itEditSystemwideSettings, itEditShortcuts, itUninstall
+  SelectedInstallMode: Integer;  // installModeInstall, installModeEditShortcuts, installModeEditSystemwideSettings, installModeUninstall
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
+  DoShowMstscEdit: Boolean;  // True = open mstsc /edit after writing settings (EditShortcuts path)
+  // Simulation marker flags (log once per run)
+  SimLogNoMstscShown: Boolean;
+  SimLogNoVCRedistShown: Boolean;
+  SimLogNetPsShown: Boolean;
+  LastLoggedPageId: Integer;
+  LastLoggedPageTick: Cardinal;
+  LastSuppressedPageLogs: Integer;
+  PendingDebugCleanupFiles: TStringList;
   UsersList: TStringList;
   CreatedUsersList: TStringList;  // Store usernames to display on finish page
   CurrentUserIndex: Integer;
@@ -337,6 +350,21 @@ var
   ViewLogButton: TButton;
   // Flag set when Smart App Control (VerifiedAndReputablePolicyState) is detected as On
   SmartAppControlIsOn: Boolean;
+  // Shortcut settings controls on Create RDP User Account page
+  lblShortcutSection: TLabel;
+  lblScreenSize: TLabel;
+  cboResolution: TComboBox;
+  chkFullScreen: TCheckBox;
+  chkUseAllMonitors: TCheckBox;
+  chkCopyPaste: TCheckBox;
+  chkSound: TCheckBox;
+  lblShortcutTips: TLabel;
+  lblMultiShortcutEditingNote: TLabel;
+  chkShowMoreShortcutOptions: TCheckBox;
+  lblCustomWidth: TLabel;
+  edtCustomWidth: TEdit;
+  lblCustomHeight: TLabel;
+  edtCustomHeight: TEdit;
 
 const
   // -------------------------------------------------------------------------
@@ -375,6 +403,7 @@ const
   REG_TERMSERVICE_PARAMS = 'SYSTEM\CurrentControlSet\Services\TermService\Parameters';
   REG_TERMSERVICE = 'SYSTEM\CurrentControlSet\Services\TermService';
   REG_TERMINAL_SERVER = 'SYSTEM\CurrentControlSet\Control\Terminal Server';
+  REG_UMRDPSERVICE = 'SYSTEM\CurrentControlSet\Services\UmRdpService';
   REG_UMRDPSERVICE_PARAMS = 'SYSTEM\CurrentControlSet\Services\UmRdpService\Parameters';
   REG_VCREDIST = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
   // User groups
@@ -408,7 +437,6 @@ const
   FILE_ZYDIS = 'Zydis.dll';
   URL_VCREDIST_X64 = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
   RDP_LISTEN_PORT = 3389;
-  FILE_MSTSC = 'C:\\Windows\\System32\\mstsc.exe';
   URL_RDP_INSTALLER = 'https://go.microsoft.com/fwlink/?linkid=2247659';
   
   // -------------------------------------------------------------------------
@@ -445,22 +473,38 @@ const
   URL_PROJECT_HOME = 'https://cpdx4.github.io/RDPWrapKit/';
 
   // -------------------------------------------------------------------------
-  // INSTALL MODE CONSTANTS (ordered to match UI intent)
+  // INSTALL MODE CONSTANTS
   // -------------------------------------------------------------------------
-  // Modes used in the wizard flow to select which actions to perform
-  // Order:
-  // 0 = Install TermWrap and related components
-  // 1 = Create new local users and shortcuts
-  // 2 = Create Shortcuts for Existing Users
-  // 3 = Edit existing shortcut settings
-  // 4 = Edit system-wide settings
-  // 5 = Uninstall
-  itInstallTermWrap = 0;                         // Install TermWrap and related components
-  itCreateNewUsers = 1;                          // Create new local users and shortcuts
-  itCreateShortcutsForExistingUsers = 2;         // Create Shortcuts for Existing Users
-  itEditShortcuts = 3;                           // Edit existing shortcut settings
-  itEditSystemwideSettings = 4;                  // Edit system-wide RDP settings
-  itUninstall = 5;                               // Uninstall everything
+  // Four top-level modes. The Install mode uses boolean flags (DoInstallTermWrap,
+  // DoCreateRdpShortcuts) and CreateUserMode to describe what happens within it.
+  installModeInstall = 0;                        // Install: TermWrap + optional shortcuts
+  installModeEditShortcuts = 1;                  // Edit existing shortcut settings
+  installModeEditSystemwideSettings = 2;         // Edit system-wide RDP settings
+  installModeUninstall = 3;                      // Uninstall everything
+
+  // CREATE USER MODE CONSTANTS (only relevant when DoCreateRdpShortcuts = True)
+  createUserModeNew = 0;                         // Create new local user accounts
+  createUserModeExisting = 1;                    // Use existing local user accounts
+
+  // -------------------------------------------------------------------------
+  // TEST SCENARIO TOGGLES (set 1 to enable, 0 to disable)
+  // -------------------------------------------------------------------------
+  // Use only one scenario at a time for predictable behavior.
+  SIM_SCENARIO_NO_MSTSC =0;
+  SIM_SCENARIO_NO_VCREDIST = 0;
+  SIM_SCENARIO_NET_FAIL_POWERSHELL = 0;
+
+  // Suppress duplicate CurPageChanged log blocks if the same page is raised
+  // again within this short interval (UI refresh/re-entry noise).
+  PAGE_LOG_DEDUPE_MS = 600;
+
+  // Debug controls
+  PRESERVE_USER_CREATE_DEBUG_LOGS = 0;
+  CLEANUP_DEBUG_FILES_ON_FINISH = 0;
+
+  // Password pipeline diagnostics (temporary deep debugging)
+  PASSWORD_PIPELINE_DIAG = 0;
+  BUILD_FINGERPRINT = 'stabledebug-v21-ps-dquote-fix';
 
 // =============================================================================
 // EXTERNAL WINDOWS API FUNCTION DECLARATIONS
@@ -507,6 +551,86 @@ type
 
 function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
   external 'GetSystemTime@kernel32.dll stdcall';
+
+// =============================================================================
+// GITHUB UPDATE CHECK
+// =============================================================================
+
+// Fetches the latest release tag from the GitHub Releases API.
+// Returns the tag_name string (e.g. "0.50") with any leading "v" stripped,
+// or an empty string if the request fails for any reason.
+function GetLatestGitHubVersion(): String;
+var
+  Http: Variant;
+  Response: String;
+  TagStart, TagEnd: Integer;
+  Tag: String;
+  Remainder: String;
+begin
+  Result := '';
+  try
+    Http := CreateOleObject('WinHttp.WinHttpRequest.5.1');
+    Http.Open('GET', 'https://api.github.com/repos/cpdx4/RDPWrapKit/releases/latest', False);
+    Http.SetRequestHeader('User-Agent', 'RDPWrapKit-Installer');
+    Http.Send('');
+    if Http.Status <> 200 then
+      Exit;
+    Response := Http.ResponseText;
+    // Extract the value of "tag_name":"..."
+    TagStart := Pos('"tag_name"', Response);
+    if TagStart = 0 then
+      Exit;
+    // Move past "tag_name" to get the substring starting from there
+    Remainder := Copy(Response, TagStart + Length('"tag_name"'), Length(Response));
+    // Find the opening quote in the remainder
+    TagStart := Pos('"', Remainder);
+    if TagStart = 0 then
+      Exit;
+    // Extract from after the opening quote
+    Remainder := Copy(Remainder, TagStart + 1, Length(Remainder));
+    // Find the closing quote
+    TagEnd := Pos('"', Remainder);
+    if TagEnd = 0 then
+      Exit;
+    Tag := Copy(Remainder, 1, TagEnd - 1);
+    // Strip optional leading "v"
+    if (Length(Tag) > 0) and (Tag[1] = 'v') then
+      Tag := Copy(Tag, 2, Length(Tag) - 1);
+    Result := Tag;
+  except
+    Result := '';
+  end;
+end;
+
+// Runs at installer startup before the wizard opens.
+// Shows an update prompt when a newer version is available on GitHub.
+// Returns False to abort the installer, True to continue.
+function InitializeSetup(): Boolean;
+var
+  LatestVersion: String;
+  CurrentVersion: String;
+  Msg: String;
+  Answer: Integer;
+begin
+  Result := True;
+  CurrentVersion := '{#APP_VERSION_STRING}';
+  LatestVersion := GetLatestGitHubVersion();
+  // Only prompt when a version string was returned and it is strictly newer
+  if (LatestVersion <> '') and (LatestVersion > CurrentVersion) then
+  begin
+    Msg := 'A newer version is available: ' + LatestVersion + #13#10
+         + 'You are about to install: ' + CurrentVersion + #13#10#13#10
+         + 'Open the latest release page instead?';
+    Answer := MsgBox(Msg, mbConfirmation, MB_YESNOCANCEL);
+    if Answer = IDYES then
+    begin
+      ShellExec('open', 'https://github.com/cpdx4/RDPWrapKit/releases/latest', '', '', SW_SHOWNORMAL, ewNoWait, Answer);
+      Result := False;
+    end else if Answer = IDCANCEL then
+      Result := False;
+    // IDNO falls through with Result = True (install anyway)
+  end;
+end;
 
 // =============================================================================
 // UTILITY AND HELPER FUNCTIONS
@@ -558,15 +682,33 @@ begin
     Result := Entry;
 end;
 
+function PosFrom(const Needle, Haystack: string; const FromPos: Integer): Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  if (Needle = '') or (Haystack = '') or (FromPos < 1) or (FromPos > Length(Haystack)) then
+    exit;
+  for i := FromPos to Length(Haystack) - Length(Needle) + 1 do
+  begin
+    if Copy(Haystack, i, Length(Needle)) = Needle then
+    begin
+      Result := i;
+      exit;
+    end;
+  end;
+end;
+
 // Mask common password flags in arbitrary command strings (e.g. -Password "..." or -Password ...)
 function MaskPasswordsInString(const S: string): string;
 var
   U: string;
-  idx, p, startPos, endPos: Integer;
+  idx, p, startPos, endPos, SearchPos: Integer;
 begin
   Result := S;
   U := UpperCase(Result);
-  idx := Pos('-PASSWORD', U);
+  SearchPos := 1;
+  idx := PosFrom('-PASSWORD', U, SearchPos);
   while idx > 0 do
   begin
     p := idx + Length('-PASSWORD');
@@ -594,7 +736,77 @@ begin
       Insert('*****', Result, p);
     end;
     U := UpperCase(Result);
-    idx := Pos('-PASSWORD', U);
+    SearchPos := idx + Length('-PASSWORD') + 1;
+    idx := PosFrom('-PASSWORD', U, SearchPos);
+  end;
+end;
+
+procedure NextArgRange(const S: string; var Cursor, StartPos, EndPos: Integer);
+begin
+  while (Cursor <= Length(S)) and (S[Cursor] = ' ') do
+    Inc(Cursor);
+
+  StartPos := Cursor;
+  EndPos := 0;
+  if Cursor > Length(S) then
+    exit;
+
+  if S[Cursor] = '"' then
+  begin
+    Inc(Cursor);
+    while (Cursor <= Length(S)) and (S[Cursor] <> '"') do
+      Inc(Cursor);
+    if Cursor <= Length(S) then
+      EndPos := Cursor
+    else
+      EndPos := Length(S);
+    Inc(Cursor);
+  end
+  else
+  begin
+    while (Cursor <= Length(S)) and (S[Cursor] <> ' ') do
+      Inc(Cursor);
+    EndPos := Cursor - 1;
+  end;
+end;
+
+function StripWrappingQuotes(const S: string): string;
+begin
+  Result := S;
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+end;
+
+function MaskCommandForLog(const FileName, Params: string): string;
+var
+  Cur: Integer;
+  A1Start, A1End, A2Start, A2End, A3Start, A3End: Integer;
+  Arg1: string;
+begin
+  Result := MaskPasswordsInString(Params);
+
+  if CompareText(FileName, 'net.exe') <> 0 then
+    exit;
+
+  Cur := 1;
+  A1Start := 0; A1End := 0;
+  A2Start := 0; A2End := 0;
+  A3Start := 0; A3End := 0;
+
+  NextArgRange(Result, Cur, A1Start, A1End);
+  if (A1Start <= 0) or (A1End < A1Start) then
+    exit;
+
+  Arg1 := UpperCase(StripWrappingQuotes(Copy(Result, A1Start, A1End - A1Start + 1)));
+  if Arg1 <> 'USER' then
+    exit;
+
+  NextArgRange(Result, Cur, A2Start, A2End); // username
+  NextArgRange(Result, Cur, A3Start, A3End); // password
+  if (A3Start > 0) and (A3End >= A3Start) then
+  begin
+    Delete(Result, A3Start, A3End - A3Start + 1);
+    Insert('"*****"', Result, A3Start);
   end;
 end;
 
@@ -615,6 +827,37 @@ begin
   Result := ExpandConstant('{tmp}\' + FileName);
 end;
 
+function EnsureDebugWorkDir: string;
+var
+  BaseDir: string;
+begin
+  BaseDir := ExpandConstant('{localappdata}\RDPWrapKit');
+  if (not DirExists(BaseDir)) and (not CreateDir(BaseDir)) then
+  begin
+    WriteInstallerLog('WARNING: Could not create debug work base directory: ' + BaseDir);
+    Result := ExpandConstant('{tmp}');
+    exit;
+  end;
+
+  Result := BaseDir + '\DebugLogs';
+  if (not DirExists(Result)) and (not CreateDir(Result)) then
+  begin
+    WriteInstallerLog('WARNING: Could not create debug work directory: ' + Result);
+    Result := ExpandConstant('{tmp}');
+    exit;
+  end;
+
+  WriteInstallerLog('Debug work directory ready: ' + Result);
+end;
+
+function DebugLogFile(const FileName: string): string;
+begin
+  Result := EnsureDebugWorkDir + '\' + FileName;
+end;
+
+function BuildPowerShellFileArgs(const ScriptPath, ExtraParams: string; Hidden: Boolean): string; forward;
+function GetPSOutput(const Command: string): string; forward;
+
 // Create a filesystem-safe filename from an arbitrary string by replacing
 // non-alphanumeric characters with underscores.
 function SanitizeFileName(const S: string): string;
@@ -631,6 +874,231 @@ begin
     else
       Result := Result + '_';
   end;
+end;
+
+// Escape single quotes for use in PowerShell single-quoted literals
+function PSSingleQuote(const S: string): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    if S[i] = '''' then
+      Result := Result + ''''''
+    else
+      Result := Result + S[i];
+  end;
+end;
+
+// Build a safe named PowerShell argument using single-quoted values
+function BuildPSNamedParam(const Name, Value: string): string;
+var
+  i: Integer;
+  SafeName: string;
+  Escaped: string;
+  c: Char;
+begin
+  SafeName := '';
+  for i := 1 to Length(Name) do
+  begin
+    c := Name[i];
+    if ((c >= 'A') and (c <= 'Z')) or ((c >= 'a') and (c <= 'z')) or ((c >= '0') and (c <= '9')) then
+      SafeName := SafeName + c;
+  end;
+  if SafeName = '' then
+    SafeName := 'Param';
+  // Double-quote the value so Windows CreateProcess (CommandLineToArgvW) strips the
+  // surrounding quotes correctly when PowerShell runs in -File mode.
+  // Single quotes have no special meaning in CreateProcess and would be passed as literals.
+  Escaped := '';
+  for i := 1 to Length(Value) do
+  begin
+    if Value[i] = '"' then
+      Escaped := Escaped + '\"'
+    else
+      Escaped := Escaped + Value[i];
+  end;
+  Result := '-' + SafeName + ' "' + Escaped + '"';
+end;
+
+// Quote an argument for direct executable invocation (CreateProcess semantics)
+function QuoteExeArg(const S: string): string;
+var
+  i: Integer;
+  Escaped: string;
+begin
+  Escaped := '';
+  for i := 1 to Length(S) do
+  begin
+    if S[i] = '"' then
+      Escaped := Escaped + '\"'
+    else
+      Escaped := Escaped + S[i];
+  end;
+  Result := '"' + Escaped + '"';
+end;
+
+// Execute PowerShell script content through a temporary script file
+function ExecPowerShellScriptContent(const ScriptBaseName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
+var
+  ScriptPath: string;
+begin
+  ScriptPath := TempFile(ScriptBaseName);
+  SaveStringToFile(ScriptPath, ScriptContent, False);
+  WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
+  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+end;
+
+function ExecSavedPowerShellDebugScript(const ScriptTag, UserName, ScriptContent: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
+var
+  ScriptPath: string;
+begin
+  ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
+  SaveStringToFile(ScriptPath, ScriptContent, False);
+  WriteInstallerLog('PowerShell File: ' + ScriptPath);
+  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not Result then
+    WriteInstallerLog('ERROR: Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+  DeleteFile(ScriptPath);
+end;
+
+function ExecSavedPowerShellDebugScriptParams(const ScriptTag, UserName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
+var
+  ScriptPath: string;
+begin
+  ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
+  SaveStringToFile(ScriptPath, ScriptContent, False);
+  WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
+  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not Result then
+    WriteInstallerLog('ERROR: Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+  DeleteFile(ScriptPath);
+end;
+
+function BuildAddGroupMemberPowerShellScript(const GroupName, UserName, OutPath, SuccessTag: string): string;
+begin
+  Result :=
+    'param([string]$GroupName, [string]$UserName, [string]$OutPath, [string]$SuccessTag)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'try {' + #13#10 +
+    '  Add-LocalGroupMember -Group $GroupName -Member $UserName -ErrorAction Stop' + #13#10 +
+    '  @($SuccessTag, (''Group={0}'' -f $GroupName), (''User={0}'' -f $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  @(' + #13#10 +
+    '    ''ADD_GROUP_FAIL'',' + #13#10 +
+    '    (''Group={0}'' -f $GroupName),' + #13#10 +
+    '    (''User={0}'' -f $UserName),' + #13#10 +
+    '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
+    '    ''Message='' + $_.Exception.Message,' + #13#10 +
+    '    ''HResult='' + $_.Exception.HResult,' + #13#10 +
+    '    ''CategoryInfo='' + $_.CategoryInfo.ToString(),' + #13#10 +
+    '    ''FullyQualifiedErrorId='' + $_.FullyQualifiedErrorId,' + #13#10 +
+    '    ''StackTrace:'',' + #13#10 +
+    '    ($_ | Out-String)' + #13#10 +
+    '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+function ValidateGroupMembership(const GroupName, UserName: string): Boolean;
+var
+  PSScript: string;
+  PSParams: string;
+  ResultCode: Integer;
+begin
+  PSScript :=
+    'param([string]$GroupName, [string]$UserName)' + #13#10 +
+    '$ErrorActionPreference = ''SilentlyContinue''' + #13#10 +
+    '$ok = $false' + #13#10 +
+    'try {' + #13#10 +
+    '  $members = Get-LocalGroupMember -Group $GroupName -ErrorAction Stop' + #13#10 +
+    '  foreach ($m in $members) {' + #13#10 +
+    '    if (($m.Name -eq $UserName) -or ($m.Name -like ''*\'' + $UserName)) { $ok = $true; break }' + #13#10 +
+    '  }' + #13#10 +
+    '} catch { }' + #13#10 +
+    'if ($ok) { exit 0 } else { exit 1 }';
+
+  PSParams := BuildPSNamedParam('GroupName', GroupName) + ' ' + BuildPSNamedParam('UserName', UserName);
+  ExecSavedPowerShellDebugScriptParams('check_group_member_' + SanitizeFileName(GroupName), UserName, PSScript, PSParams, True, ResultCode);
+  Result := (ResultCode = 0);
+end;
+
+// Verify file is authenticode-signed by Microsoft Corporation
+function IsSignedByMicrosoftCorporation(const FilePath: string): Boolean;
+var
+  OutText: string;
+begin
+  LogSectionHeader('SIGNATURE VALIDATION');
+  LogKeyValue('File', FilePath);
+  OutText := GetPSOutput(
+    '$sig = Get-AuthenticodeSignature -FilePath ''' + PSSingleQuote(FilePath) + '''; ' +
+    '$subj = ''''; $issuer = ''''; $thumb = ''''; $nb = ''''; $na = ''''; ' +
+    'if ($sig.SignerCertificate -ne $null) { ' +
+    '  $subj = $sig.SignerCertificate.Subject; ' +
+    '  $issuer = $sig.SignerCertificate.Issuer; ' +
+    '  $thumb = $sig.SignerCertificate.Thumbprint; ' +
+    '  $nb = $sig.SignerCertificate.NotBefore.ToString(''u''); ' +
+    '  $na = $sig.SignerCertificate.NotAfter.ToString(''u'') ' +
+    '}; ' +
+    '$isMs = ($subj -like ''*CN=Microsoft Corporation*''); ' +
+    '$ok = (($sig.Status -eq ''Valid'') -and $isMs); ' +
+    '''STATUS='' + $sig.Status + ''|IS_MICROSOFT='' + $isMs + ''|SUBJECT='' + $subj + ''|ISSUER='' + $issuer + ''|THUMBPRINT='' + $thumb + ''|NOT_BEFORE='' + $nb + ''|NOT_AFTER='' + $na + ''|RESULT='' + ($(if($ok){''OK''}else{''BAD''}))');
+  WriteInstallerLog('Signature details: ' + OutText);
+  Result := Pos('|RESULT=OK', UpperCase(Trim(OutText))) > 0;
+  if Result then
+    WriteInstallerLog('Signature verdict: Microsoft publisher validation passed')
+  else
+    WriteInstallerLog('Signature verdict: Microsoft publisher validation failed');
+end;
+
+// Resolve mstsc.exe dynamically instead of using a hardcoded drive/path
+function GetMstscPath: string;
+begin
+  Result := ExpandConstant('{sys}\mstsc.exe');
+  if not FileExists(Result) then
+  begin
+    Result := ExpandConstant('{win}\System32\mstsc.exe');
+    if not FileExists(Result) then
+      Result := '';
+  end;
+end;
+
+function ValidateRdpPortInput(const PortText: string; var PortValue: Integer; var ErrorText: string): Boolean;
+var
+  i: Integer;
+  CleanText: string;
+begin
+  Result := False;
+  PortValue := 0;
+  ErrorText := '';
+  CleanText := Trim(PortText);
+
+  if CleanText = '' then
+  begin
+    ErrorText := 'RDP Port is required.';
+    exit;
+  end;
+
+  for i := 1 to Length(CleanText) do
+  begin
+    if (CleanText[i] < '0') or (CleanText[i] > '9') then
+    begin
+      ErrorText := 'RDP Port must contain digits only.';
+      exit;
+    end;
+  end;
+
+  PortValue := StrToIntDef(CleanText, 0);
+  if (PortValue < 1) or (PortValue > 65535) then
+  begin
+    ErrorText := 'RDP Port must be between 1 and 65535.';
+    exit;
+  end;
+
+  Result := True;
 end;
 
 // -----------------------------------------------------------------------------
@@ -827,20 +1295,328 @@ begin
   Result := '[' + h + ':' + m + ':' + s + '.' + ms + ']';
 end;
 
+function RepeatChar(const Ch: string; const Count: Integer): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 1 to Count do
+    Result := Result + Ch;
+end;
+
+procedure LogSectionHeader(const Title: string);
+begin
+  WriteInstallerLog('+' + RepeatChar('-', 78) + '+');
+  WriteInstallerLog('| ' + Title);
+  WriteInstallerLog('+' + RepeatChar('-', 78) + '+');
+end;
+
+function NormalizeLogLevel(const Msg: string): string;
+var
+  U: string;
+begin
+  U := UpperCase(Trim(Msg));
+  if Pos('ERROR:', U) = 1 then
+    Result := 'ERROR'
+  else if Pos('WARNING:', U) = 1 then
+    Result := 'WARN '
+  else if Pos('SIMULATED SCENARIO:', U) = 1 then
+    Result := 'SIM  '
+  else if Pos('DEBUG:', U) = 1 then
+    Result := 'DEBUG'
+  else
+    Result := 'INFO ';
+end;
+
+function BeautifyLogMessage(const Msg: string): string;
+var
+  Lvl: string;
+begin
+  Lvl := NormalizeLogLevel(Msg);
+  Result := '[' + Lvl + '] ' + Msg;
+end;
+
+function BoolText(const Value: Boolean): string;
+begin
+  if Value then
+    Result := 'Yes'
+  else
+    Result := 'No';
+end;
+
+function GetCurrentInstallModeName: string;
+begin
+  case SelectedInstallMode of
+    installModeInstall:
+      Result := 'Install';
+    installModeEditShortcuts:
+      Result := 'Edit Shortcut Settings';
+    installModeEditSystemwideSettings:
+      Result := 'Edit System-wide Settings';
+    installModeUninstall:
+      Result := 'Uninstall';
+  else
+    Result := 'Unknown(' + IntToStr(SelectedInstallMode) + ')';
+  end;
+end;
+
+function GetPageNameById(const PageID: Integer): string;
+begin
+  if PageID = wpWelcome then Result := 'Welcome'
+  else if PageID = wpLicense then Result := 'License Agreement'
+  else if PageID = wpPassword then Result := 'Password'
+  else if PageID = wpInfoBefore then Result := 'Info Before'
+  else if PageID = wpUserInfo then Result := 'User Info'
+  else if PageID = wpSelectDir then Result := 'Select Destination Location'
+  else if PageID = wpSelectComponents then Result := 'Select Components'
+  else if PageID = wpSelectProgramGroup then Result := 'Select Start Menu Folder'
+  else if PageID = wpSelectTasks then Result := 'Select Additional Tasks'
+  else if PageID = wpReady then Result := 'Ready to Install'
+  else if PageID = wpPreparing then Result := 'Preparing to Install'
+  else if PageID = wpInstalling then Result := 'Installing'
+  else if PageID = wpInfoAfter then Result := 'Info After'
+  else if PageID = wpFinished then Result := 'Finished'
+  else if Assigned(WelcomePage) and (PageID = WelcomePage.ID) then Result := 'Custom: Welcome'
+  else if Assigned(Page_InstallOptions) and (PageID = Page_InstallOptions.ID) then Result := 'Custom: Setup Options'
+  else if Assigned(UserPage) and (PageID = UserPage.ID) then Result := 'Custom: Create RDP User Account'
+  else if Assigned(Page_ShortcutSettings) and (PageID = Page_ShortcutSettings.ID) then Result := 'Custom: Shortcut Settings'
+  else if Assigned(Page_CreateShortcutsForExistingUsers) and (PageID = Page_CreateShortcutsForExistingUsers.ID) then Result := 'Custom: Create Shortcuts for Existing Users'
+  else if Assigned(EditShortcutPage) and (PageID = EditShortcutPage.ID) then Result := 'Custom: Edit Existing Shortcut'
+  else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide Settings'
+  else
+    Result := 'Custom/Unknown';
+end;
+
+procedure LogPageContext(const PageID: Integer);
+var
+  ChosenAction: string;
+begin
+  LogKeyValue('PageId', IntToStr(PageID));
+  LogKeyValue('PageName', GetPageNameById(PageID));
+  LogKeyValue('Wizard Next Caption', WizardForm.NextButton.Caption);
+
+  if Assigned(rbInstall) and rbInstall.Checked then
+    ChosenAction := 'Install'
+  else if Assigned(rbEditShortcutSettings) and rbEditShortcutSettings.Checked then
+    ChosenAction := 'Edit Shortcut Settings'
+  else if Assigned(rbEditSystemwideSettings) and rbEditSystemwideSettings.Checked then
+    ChosenAction := 'Edit System-wide Settings'
+  else if Assigned(rbUninstall) and rbUninstall.Checked then
+    ChosenAction := 'Uninstall'
+  else
+    ChosenAction := 'Not selected yet';
+
+  LogKeyValue('Top-level selection', ChosenAction);
+  LogKeyValue('Resolved mode', GetCurrentInstallModeName);
+  LogKeyValue('Install TermWrap', BoolText(DoInstallTermWrap));
+  LogKeyValue('Create shortcuts', BoolText(DoCreateRdpShortcuts));
+
+  if Assigned(rbCreateUsers) and Assigned(rbUseExistingUsers) then
+  begin
+    if rbCreateUsers.Checked then
+      LogKeyValue('Shortcut user source', 'Create new users')
+    else if rbUseExistingUsers.Checked then
+      LogKeyValue('Shortcut user source', 'Use existing users')
+    else
+      LogKeyValue('Shortcut user source', 'Not selected');
+  end;
+end;
+
+procedure LogKeyValue(const KeyName, KeyValue: string);
+begin
+  WriteInstallerLog('  - ' + KeyName + ': ' + KeyValue);
+end;
+
+procedure DumpTextFileToLog(const HeaderText, FilePath: string);
+var
+  Tmp: TStringList;
+  k: Integer;
+begin
+  if not FileExists(FilePath) then
+  begin
+    WriteInstallerLog('WARNING: ' + HeaderText + ' file not found: ' + FilePath);
+    exit;
+  end;
+
+  Tmp := TStringList.Create;
+  try
+    try
+      Tmp.LoadFromFile(FilePath);
+      WriteInstallerLog(HeaderText + ' (' + IntToStr(Tmp.Count) + ' lines):');
+      for k := 0 to Tmp.Count - 1 do
+        WriteInstallerLog('DEBUG: ' + Tmp[k]);
+    except
+      WriteInstallerLog('WARNING: Failed to read debug output file: ' + FilePath);
+    end;
+  finally
+    Tmp.Free;
+  end;
+end;
+
+function PasswordDebugSummary(const Password: string): string;
+begin
+  Result := 'details=<redacted>';
+end;
+
+procedure LogPasswordPipeline(const StageName, UserName, Password: string);
+begin
+  if PASSWORD_PIPELINE_DIAG = 0 then
+    exit;
+  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] user=' + UserName + ' :: ' + PasswordDebugSummary(Password));
+end;
+
+procedure LogEncryptedFileSummary(const StageName, FilePath: string);
+var
+  EncRaw: AnsiString;
+  EncText: string;
+begin
+  if PASSWORD_PIPELINE_DIAG = 0 then
+    exit;
+
+  if not FileExists(FilePath) then
+  begin
+    WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] encrypted file missing: ' + FilePath);
+    exit;
+  end;
+
+  if not LoadStringFromFile(FilePath, EncRaw) then
+  begin
+    WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] failed reading encrypted file: ' + FilePath);
+    exit;
+  end;
+
+  EncText := Trim(String(EncRaw));
+  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] encLen=' + IntToStr(Length(EncText)) +
+    ' | encPrefix=' + Copy(EncText, 1, 24));
+end;
+
+procedure PreserveDebugLogFileToDesktop(const FilePath: string);
+var
+  DestDir: string;
+  DestPath: string;
+  BaseName: string;
+begin
+  if PRESERVE_USER_CREATE_DEBUG_LOGS = 0 then
+    exit;
+
+  if not FileExists(FilePath) then
+    exit;
+
+  DestDir := ExpandConstant('{userdesktop}\RDPWrapKit_DebugLogs');
+  if (not DirExists(DestDir)) and (not CreateDir(DestDir)) then
+  begin
+    WriteInstallerLog('WARNING: Could not create debug log folder: ' + DestDir);
+    exit;
+  end;
+
+  BaseName := ChangeFileExt(ExtractFileName(FilePath), '');
+  DestPath := DestDir + '\' + BaseName + '_' + IntToStr(GetTickCount) + '.log';
+  if CopyFile(FilePath, DestPath, False) then
+    WriteInstallerLog('Saved debug user-create log: ' + DestPath)
+  else
+    WriteInstallerLog('WARNING: Failed to save debug user-create log copy for ' + FilePath);
+end;
+
+procedure RegisterDebugFileForFinishCleanup(const FilePath: string);
+begin
+  if (Trim(FilePath) = '') or (not FileExists(FilePath)) then
+    exit;
+  if not Assigned(PendingDebugCleanupFiles) then
+    PendingDebugCleanupFiles := TStringList.Create;
+  if PendingDebugCleanupFiles.IndexOf(FilePath) < 0 then
+  begin
+    PendingDebugCleanupFiles.Add(FilePath);
+    WriteInstallerLog('Deferred cleanup registered for Finish: ' + FilePath);
+  end;
+end;
+
+procedure CleanupPendingDebugFiles;
+var
+  i: Integer;
+  P: string;
+begin
+  if not Assigned(PendingDebugCleanupFiles) then
+    exit;
+
+  if CLEANUP_DEBUG_FILES_ON_FINISH = 0 then
+  begin
+    LogSectionHeader('FINISH CLEANUP: DEFERRED DEBUG FILES');
+    WriteInstallerLog('Deferred debug cleanup skipped by configuration; files retained for troubleshooting');
+    LogKeyValue('Queued files retained', IntToStr(PendingDebugCleanupFiles.Count));
+    PendingDebugCleanupFiles.Clear;
+    exit;
+  end;
+
+  LogSectionHeader('FINISH CLEANUP: DEFERRED DEBUG FILES');
+  LogKeyValue('Queued files', IntToStr(PendingDebugCleanupFiles.Count));
+
+  for i := 0 to PendingDebugCleanupFiles.Count - 1 do
+  begin
+    P := PendingDebugCleanupFiles[i];
+    if FileExists(P) then
+    begin
+      if DeleteFile(P) then
+        WriteInstallerLog('Deleted deferred debug file: ' + P)
+      else
+        WriteInstallerLog('WARNING: Failed to delete deferred debug file: ' + P);
+    end
+    else
+      WriteInstallerLog('Deferred debug file already missing: ' + P);
+  end;
+
+  PendingDebugCleanupFiles.Clear;
+end;
+
+procedure PromptManualDownload(const ComponentName, Url, Reason: string);
+var
+  Choice: Integer;
+  RC: Integer;
+begin
+  LogSectionHeader('MANUAL DOWNLOAD REQUIRED');
+  LogKeyValue('Component', ComponentName);
+  LogKeyValue('Reason', Reason);
+  LogKeyValue('URL', Url);
+
+  Choice := MsgBox(
+    'Failed to install ' + ComponentName + '.' + #13#10 +
+    'Reason: ' + Reason + #13#10#13#10 +
+    'Download URL:' + #13#10 + Url + #13#10#13#10 +
+    'Open the download page now?',
+    mbError,
+    MB_YESNO);
+
+  if Choice = IDYES then
+  begin
+    WriteInstallerLog('Manual download prompt: user chose YES for ' + ComponentName);
+    if not ShellExec('', Url, '', '', SW_SHOWNORMAL, ewNoWait, RC) then
+      WriteInstallerLog('Manual download launch failed for ' + ComponentName + ', ShellExec rc=' + IntToStr(RC))
+    else
+      WriteInstallerLog('Manual download launch succeeded for ' + ComponentName);
+  end
+  else
+  begin
+    WriteInstallerLog('Manual download prompt: user chose NO for ' + ComponentName);
+  end;
+end;
+
 procedure InitInstallerLog;
 begin
   InstallLogPath := ExpandConstant(INSTALL_LOG_PATH);
   try
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' RDPWrapKit install log started' + #13#10, False);
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' +' + RepeatChar('=', 78) + '+' + #13#10, False);
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' | RDPWrapKit Installer Log' + #13#10, True);
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' | Session started (UTC)' + #13#10, True);
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' +' + RepeatChar('=', 78) + '+' + #13#10, True);
   except
   end;
+  LogSectionHeader('ENVIRONMENT SNAPSHOT');
   LogSystemInfo;
 end;
 
 procedure WriteInstallerLog(const Msg: string);
 begin
   try
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' ' + Msg + #13#10, True);
+    SaveStringToFile(InstallLogPath, GetTimestampString + ' ' + BeautifyLogMessage(Msg) + #13#10, True);
   except
   end;
 end;
@@ -851,7 +1627,7 @@ var
   RC: Integer;
 begin
   RC := 0;
-  WriteInstallerLog('Exec: ' + FileName + ' ' + MaskPasswordsInString(Params));
+  WriteInstallerLog('Exec: ' + FileName + ' ' + MaskCommandForLog(FileName, Params));
   Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
   WriteInstallerLog('ExitCode: ' + IntToStr(RC) + ' for ' + FileName);
   Result := RC;
@@ -881,6 +1657,49 @@ begin
     Result := 'True'
   else
     Result := 'False';
+end;
+
+function SimulateNoMstsc: Boolean;
+begin
+  Result := SIM_SCENARIO_NO_MSTSC <> 0;
+end;
+
+function SimulateNoVCRedist: Boolean;
+begin
+  Result := SIM_SCENARIO_NO_VCREDIST <> 0;
+end;
+
+function SimulateNetFailPowerShell: Boolean;
+begin
+  Result := SIM_SCENARIO_NET_FAIL_POWERSHELL <> 0;
+end;
+
+function SimulateNetFailure: Boolean;
+begin
+  Result := SimulateNetFailPowerShell;
+end;
+
+procedure LogSimulationScenario(const ScenarioText: string);
+begin
+  WriteInstallerLog('SIMULATED SCENARIO: ' + ScenarioText);
+  Log('SIMULATED SCENARIO: ' + ScenarioText);
+end;
+
+function RunNetHidden(const Params: string): Integer;
+begin
+  if SimulateNetFailure then
+  begin
+    if SimulateNetFailPowerShell and (not SimLogNetPsShown) then
+    begin
+      LogSimulationScenario('System fails on net.exe commands and uses PowerShell fallback');
+      SimLogNetPsShown := True;
+    end;
+    WriteInstallerLog('Simulation: forcing net.exe failure for params: ' + MaskCommandForLog('net.exe', Params));
+    Result := 1;
+    exit;
+  end;
+
+  Result := RunHidden('net.exe', Params);
 end;
 
 // Sleep with UI updates
@@ -1045,10 +1864,10 @@ procedure AddDefenderExclusionForApp;
 var
   ResultCode: Integer;
 begin
-  // Ensure Defender excludes the install folder before any executables run
+  // Ensure Defender exclusions are scoped to the two runtime DLLs only
   ExecPowerShellHidden(
-    '$path = ''' + ExpandConstant('{app}') + '''; ' +
-    'try { $p = Get-MpPreference; if (-not ($p.ExclusionPath -contains $path)) { Add-MpPreference -ExclusionPath $path } } catch { }',
+    '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
+    'try { $p = Get-MpPreference; foreach ($path in $paths) { if (-not ($p.ExclusionPath -contains $path)) { Add-MpPreference -ExclusionPath $path } } } catch { }',
     ResultCode);
 end;
 
@@ -1056,10 +1875,10 @@ procedure RemoveDefenderExclusionForApp;
 var
   ResultCode: Integer;
 begin
-  // Remove Defender exclusion for the install folder during uninstall
+  // Remove Defender exclusions for the two runtime DLLs during uninstall
   ExecPowerShellHidden(
-    '$path = ''' + ExpandConstant('{app}') + '''; ' +
-    'try { Remove-MpPreference -ExclusionPath $path } catch { }',
+    '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
+    'try { foreach ($path in $paths) { Remove-MpPreference -ExclusionPath $path } } catch { }',
     ResultCode);
 end;
 
@@ -1164,10 +1983,70 @@ begin
   Result := RC;
 end;
 
+procedure EnsureTermServiceRunsAsNetworkService;
+var
+  CurrentObjectName: string;
+  PostFixObjectName: string;
+  RC: Integer;
+begin
+  CurrentObjectName := '';
+  if RegQueryStringValue(HKLM, REG_TERMSERVICE, 'ObjectName', CurrentObjectName) then
+    WriteInstallerLog('TermService account check: current ObjectName=' + CurrentObjectName)
+  else
+    WriteInstallerLog('TermService account check: current ObjectName=<missing>');
+
+  if CompareText(Trim(CurrentObjectName), 'NT AUTHORITY\NetworkService') = 0 then
+    exit;
+
+  RC := RunHidden('sc.exe', 'config TermService obj= "NT AUTHORITY\NetworkService" password= ""');
+  if RC = 0 then
+    WriteInstallerLog('TermService account fix: set ObjectName to NT AUTHORITY\NetworkService')
+  else
+    WriteInstallerLog('WARNING: TermService account fix failed: sc.exe exit=' + IntToStr(RC));
+
+  Sleep(SLEEP_SHORT);
+  PostFixObjectName := '';
+  if RegQueryStringValue(HKLM, REG_TERMSERVICE, 'ObjectName', PostFixObjectName) then
+    WriteInstallerLog('TermService account check (post-fix): current ObjectName=' + PostFixObjectName)
+  else
+    WriteInstallerLog('WARNING: TermService account check (post-fix): ObjectName could not be read');
+end;
+
 // Backward-compatible wrapper (ignores exit code)
 procedure StartTermService;
 begin
   StartTermServiceEx;
+end;
+
+procedure EnsureUmRdpServiceAutomatic;
+var
+  CurrentStartValue: Cardinal;
+  RC: Integer;
+begin
+  CurrentStartValue := 0;
+  WriteInstallerLog('UmRdpService startup type check: querying current Start value');
+
+  if RegQueryDWordValue(HKLM, REG_UMRDPSERVICE, 'Start', CurrentStartValue) then
+    WriteInstallerLog('UmRdpService startup type check: current Start=' + IntToStr(CurrentStartValue))
+  else
+    WriteInstallerLog('UmRdpService startup type check: current Start value=<unable to read>');
+
+  // Start type 2 = Automatic
+  if CurrentStartValue = 2 then
+    exit;
+
+  RC := RunHidden('sc.exe', 'config UmRdpService start=auto');
+  if RC = 0 then
+    WriteInstallerLog('UmRdpService startup type fix: set Start=2 (Automatic)')
+  else
+    WriteInstallerLog('WARNING: UmRdpService startup type fix failed: sc.exe exit=' + IntToStr(RC));
+
+  Sleep(SLEEP_SHORT);
+  CurrentStartValue := 0;
+  if RegQueryDWordValue(HKLM, REG_UMRDPSERVICE, 'Start', CurrentStartValue) then
+    WriteInstallerLog('UmRdpService startup type check (post-fix): Start=' + IntToStr(CurrentStartValue))
+  else
+    WriteInstallerLog('WARNING: UmRdpService startup type check (post-fix): Start could not be read');
 end;
 
 function IsExcludedUser(const UserName: string): Boolean;
@@ -1187,23 +2066,19 @@ var
   ResultCode: Integer;
   i: Integer;
   Line: string;
+  PSCommand: string;
 begin
   UsersList := TStringList.Create;
   PSPath := ExpandConstant(TEMP_LOCAL_USERS);
-  
-  // Use optimized PowerShell command
-  Exec(EXE_POWERSHELL,
-    BuildPowerShellArgs(
-      'Get-LocalUser | ' +
-      'Where-Object { $_.Enabled -eq $true -and $_.PrincipalSource -eq ''Local'' } | ' +
-      'Select-Object -ExpandProperty Name | ' +
-      'Out-File -Encoding UTF8 ''' + PSPath + ''' -Force', True),
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  if (ResultCode = 0) and FileExists(PSPath) then
+  PSCommand :=
+    'try { Get-LocalUser | Where-Object { $_.Enabled -eq $true -and $_.PrincipalSource -eq ''Local'' } | Select-Object -ExpandProperty Name | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; exit 0 } ' +
+    'catch { exit 1 }';
+  Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if FileExists(PSPath) then
   begin
     UsersList.LoadFromFile(PSPath);
-    // Filter in reverse to avoid index issues
     for i := UsersList.Count - 1 downto 0 do
     begin
       Line := Trim(UsersList[i]);
@@ -1212,7 +2087,7 @@ begin
       else
         UsersList[i] := Line;
     end;
-    DeleteFile(PSPath);  // Clean up temp file
+    DeleteFile(PSPath);
   end;
 
   Result := UsersList;
@@ -1360,7 +2235,7 @@ begin
     ShortcutPrevButton.Visible := True;
     ShortcutNextButton.Visible := True;
     ShortcutPageLabel.Visible := True;
-    ShortcutPrevButton.Top := BaseTop + VisIndex * RowHeight + ScaleY(6);
+    ShortcutPrevButton.Top := EditShortcutPage.SurfaceHeight - ScaleY(30);
     ShortcutNextButton.Top := ShortcutPrevButton.Top;
     ShortcutNextButton.Left := ShortcutPrevButton.Left + ShortcutPrevButton.Width + ScaleX(120);
     ShortcutPageLabel.Top := ShortcutPrevButton.Top + ScaleY(4);
@@ -1466,25 +2341,60 @@ begin
   end;
 end;
 
-procedure OnManageUsersClick(Sender: TObject);
+procedure OnCreateRdpShortcutsClick(Sender: TObject);
 begin
   if Assigned(rbCreateUsers) then
-    rbCreateUsers.Enabled := chkManageUsers.Checked;
+    rbCreateUsers.Enabled := chkCreateRdpShortcuts.Checked;
   if Assigned(rbUseExistingUsers) then
-    rbUseExistingUsers.Enabled := chkManageUsers.Checked;
+    rbUseExistingUsers.Enabled := chkCreateRdpShortcuts.Checked;
   // Update derived flags so page skipping and next-button validation are accurate
-  DoManageUsers := chkManageUsers.Checked;
-  NeedCreateUsers := DoManageUsers and Assigned(rbCreateUsers) and rbCreateUsers.Checked;
+  DoCreateRdpShortcuts := chkCreateRdpShortcuts.Checked;
+  if DoCreateRdpShortcuts then
+  begin
+    if Assigned(rbCreateUsers) and rbCreateUsers.Checked then
+      CreateUserMode := createUserModeNew
+    else
+      CreateUserMode := createUserModeExisting;
+  end;
 end;
 
   procedure OnInstallModeChange(Sender: TObject);
 begin
-  // Always show controls, but only enable them for Typical Setup
-  if Assigned(chkInstallTermWrap) then chkInstallTermWrap.Enabled := Assigned(rbTypicalSetup) and rbTypicalSetup.Checked;
-  if Assigned(chkManageUsers) then chkManageUsers.Enabled := Assigned(rbTypicalSetup) and rbTypicalSetup.Checked;
-  if Assigned(ManageUsersGroup) then ManageUsersGroup.Enabled := Assigned(rbTypicalSetup) and rbTypicalSetup.Checked;
-  if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := Assigned(rbTypicalSetup) and rbTypicalSetup.Checked and chkManageUsers.Checked;
-  if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := Assigned(rbTypicalSetup) and rbTypicalSetup.Checked and chkManageUsers.Checked;
+  // Always show controls, but only enable them for Install mode
+  if Assigned(chkInstallTermWrap) then chkInstallTermWrap.Enabled := Assigned(rbInstall) and rbInstall.Checked;
+  if Assigned(chkCreateRdpShortcuts) then chkCreateRdpShortcuts.Enabled := Assigned(rbInstall) and rbInstall.Checked;
+  if Assigned(CreateRdpShortcutsGroup) then CreateRdpShortcutsGroup.Enabled := Assigned(rbInstall) and rbInstall.Checked;
+  if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := Assigned(rbInstall) and rbInstall.Checked and chkCreateRdpShortcuts.Checked;
+  if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := Assigned(rbInstall) and rbInstall.Checked and chkCreateRdpShortcuts.Checked;
+end;
+
+procedure OnFullScreenClick(Sender: TObject);
+begin
+  if Assigned(cboResolution) then
+    cboResolution.Enabled := not chkFullScreen.Checked;
+  // When full screen is forced, hide the custom size inputs; otherwise restore them
+  if chkFullScreen.Checked then
+  begin
+    if Assigned(lblCustomWidth)  then lblCustomWidth.Visible  := False;
+    if Assigned(edtCustomWidth)  then edtCustomWidth.Visible  := False;
+    if Assigned(lblCustomHeight) then lblCustomHeight.Visible := False;
+    if Assigned(edtCustomHeight) then edtCustomHeight.Visible := False;
+  end
+  else
+    OnResolutionChange(nil);
+end;
+
+procedure OnResolutionChange(Sender: TObject);
+var
+  IsCustom: Boolean;
+begin
+  if not Assigned(cboResolution) then exit;
+  IsCustom := (cboResolution.ItemIndex >= 0) and
+              (cboResolution.Items[cboResolution.ItemIndex] = 'Custom');
+  if Assigned(lblCustomWidth)  then lblCustomWidth.Visible  := IsCustom;
+  if Assigned(edtCustomWidth)  then edtCustomWidth.Visible  := IsCustom;
+  if Assigned(lblCustomHeight) then lblCustomHeight.Visible := IsCustom;
+  if Assigned(edtCustomHeight) then edtCustomHeight.Visible := IsCustom;
 end;
 
 function IsTermWrapInstalled(): Boolean;
@@ -1640,7 +2550,7 @@ begin
   end;
 
   // Calculate bottom position for the password reset link
-  BottomPos := Page_CreateShortcutsForExistingUsers.SurfaceHeight - ScaleY(40);
+  BottomPos := Page_CreateShortcutsForExistingUsers.SurfaceHeight - ScaleY(70);
 
   // Create password reset link
   Tool1PasswordResetLink := TLabel.Create(Page_CreateShortcutsForExistingUsers);
@@ -1717,7 +2627,7 @@ begin
 
   if Assigned(Tool1PrevButton) and Assigned(Tool1NextButton) and Assigned(Tool1PageLabel) then
   begin
-    Tool1PrevButton.Top := BaseTop + VisIndex * RowHeight + ScaleY(6);
+    Tool1PrevButton.Top := Page_CreateShortcutsForExistingUsers.SurfaceHeight - ScaleY(30);
     Tool1NextButton.Top := Tool1PrevButton.Top;
     Tool1NextButton.Left := Tool1PrevButton.Left + Tool1PrevButton.Width + ScaleX(120);
     Tool1PageLabel.Top := Tool1PrevButton.Top + ScaleY(4);
@@ -1866,13 +2776,33 @@ begin
 end;
 
 function IsValidPassword(const Password: string): String;
+var
+  i: Integer;
+  c: Char;
 begin
   Result := '';  // Empty string means valid
   
   if Length(Password) = 0 then
     Result := 'Password cannot be empty.'
   else if Length(Password) > 128 then
-    Result := 'Password is too long (maximum 128 characters).';
+    Result := 'Password is too long (maximum 128 characters).'
+  else
+  begin
+    for i := 1 to Length(Password) do
+    begin
+      c := Password[i];
+      if (Ord(c) < 32) or (Ord(c) = 127) then
+      begin
+        Result := 'Password cannot contain control characters.';
+        exit;
+      end;
+      if (c = '''') or (c = '"') or (c = '`') then
+      begin
+        Result := 'Password cannot contain quote characters (single quote, double quote, or backtick).';
+        exit;
+      end;
+    end;
+  end;
 end;
 
 function ValidateLocalCredential(const UserName, Password: string): Boolean;
@@ -1890,14 +2820,14 @@ function ShouldInstallFiles: Boolean;
 begin
   // Only install bundled TermWrap files when Install TermWrap is selected or when the
   // user explicitly selected "Install TermWrap" on the welcome/options page.
-  Result := (SelectedInstallMode = itInstallTermWrap) or DoInstallTermWrap;
+  Result := DoInstallTermWrap;
 end;
 
 function ShouldApplyRegistryEntries: Boolean;
 begin
   // Edit Shortcut Settings mode should only launch mstsc /edit and avoid
   // unrelated installer-side registry changes.
-  Result := SelectedInstallMode <> itEditShortcuts;
+  Result := SelectedInstallMode <> installModeEditShortcuts;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -1908,36 +2838,43 @@ begin
   if PageID = wpSelectDir then
     Result := True;
   
-  // Skip User Page unless the flow indicates user creation is required
-  if (PageID = UserPage.ID) and (not NeedCreateUsers) then
+  // Skip User Page unless installing in Install mode with Create new users selected
+  if (PageID = UserPage.ID) and
+     ((SelectedInstallMode <> installModeInstall) or (not DoCreateRdpShortcuts) or (CreateUserMode <> createUserModeNew)) then
     Result := True;
 
   // Show shortcut editing pages only for Edit Shortcut Settings mode
-  if (PageID = EditShortcutPage.ID) and (SelectedInstallMode <> itEditShortcuts) then
+  if (PageID = EditShortcutPage.ID) and (SelectedInstallMode <> installModeEditShortcuts) then
     Result := True;
-  
+
   // Skip Ready page - no need to show install path
   if PageID = wpReady then
     Result := True;
-  
-  // Skip Create Shortcuts Selection Page if not in Create Shortcuts mode or if we jump directly
-  if (PageID = EditSystemwideSettingsPage.ID) and ((SelectedInstallMode <> itEditSystemwideSettings) or (SelectedInstallMode = itCreateShortcutsForExistingUsers)) then
+
+  // Show Edit System-wide settings page only in that mode
+  if (PageID = EditSystemwideSettingsPage.ID) and (SelectedInstallMode <> installModeEditSystemwideSettings) then
     Result := True;
-  
-  // Tool pages visibility:
-  // - Show Page_CreateShortcutsForExistingUsers when the user explicitly jumped to it,
-  //   or when doing Install TermWrap (InstallType = 0) and managing users,
-  //   or when in Create Shortcuts mode and tool 1 is selected.
-    if PageID = Page_CreateShortcutsForExistingUsers.ID then
-    begin
-      if (SelectedInstallMode = itCreateShortcutsForExistingUsers) then
-        Result := False
-      else if (SelectedInstallMode = itInstallTermWrap) and DoManageUsers then
-        Result := False
-      else
-        Result := True;
-    end;
-  
+
+  // Show Create Shortcuts for Existing Users page only when:
+  //   Install mode + Create RDP shortcuts + Use existing users
+  if PageID = Page_CreateShortcutsForExistingUsers.ID then
+  begin
+    if (SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting) then
+      Result := False
+    else
+      Result := True;
+  end;
+
+  // Show Shortcut Settings page when creating shortcuts (any method) or editing shortcuts
+  if PageID = Page_ShortcutSettings.ID then
+  begin
+    if ((SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts) or
+       (SelectedInstallMode = installModeEditShortcuts) then
+      Result := False
+    else
+      Result := True;
+  end;
+
 end;
 
 function IsVCRedistInstalled: Boolean;
@@ -1946,6 +2883,17 @@ var
   Minor: Cardinal;
   Bld: Cardinal;
 begin
+  if SimulateNoVCRedist then
+  begin
+    if not SimLogNoVCRedistShown then
+    begin
+      LogSimulationScenario('System doesnt have VC++');
+      SimLogNoVCRedistShown := True;
+    end;
+    Result := False;
+    exit;
+  end;
+
   // Check for VC++ 2015-2022 Redistributable (x64)
   // The registry key stores the version information
   Result := RegQueryDWordValue(HKLM, REG_VCREDIST, 'Major', Major) and
@@ -1970,38 +2918,245 @@ function EncryptPasswordToFile(const Password, UserName: string): string;
 var
   ResultCode: Integer;
   EncPath: string;
+  Cmd: string;
 begin
   EncPath := TempFile('enc_' + UserName + '.txt');
-  // Encrypt the password and save to EncPath (without BOM or extra whitespace)
-  Exec(EXE_POWERSHELL, BuildPowerShellArgs(
-       '$pw = ''' + Password + ''' | ConvertTo-SecureString -AsPlainText -Force; ' +
-       '$encPw = ConvertFrom-SecureString $pw; ' +
-       '[System.IO.File]::WriteAllText(''' + EncPath + ''', $encPw)', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Result := EncPath;
+
+  // Use inline PowerShell command (no temporary .ps1 file) to avoid script-file stalls.
+  Cmd :=
+    '$pw = ''' + PSSingleQuote(Password) + ''' | ConvertTo-SecureString -AsPlainText -Force; ' +
+    '$encPw = ConvertFrom-SecureString $pw; ' +
+    '[System.IO.File]::WriteAllText(''' + PSSingleQuote(EncPath) + ''', $encPw)';
+
+  ResultCode := -1;
+  Exec(EXE_POWERSHELL, BuildPowerShellArgs(Cmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if (ResultCode = 0) and FileExists(EncPath) then
+  begin
+    Result := EncPath;
+  end
+  else
+  begin
+    if FileExists(EncPath) then
+      DeleteFile(EncPath);
+    WriteInstallerLog('WARNING: EncryptPasswordToFile failed for user ' + UserName + ', proceeding without embedded password');
+    Result := '';
+  end;
+end;
+
+function WriteRDPFileDirect(const UserName, RDPPath, EncPath: string): Boolean;
+var
+  ScreenModeId: Integer;
+  DesktopWidth: Integer;
+  DesktopHeight: Integer;
+  UseMultiMon: Integer;
+  AudioMode: Integer;
+  RedirectClipboard: Integer;
+  ResStr: string;
+  XPos: Integer;
+  SL: TStringList;
+  EncTextRaw: AnsiString;
+  EncText: string;
+  HasEnc: Boolean;
+begin
+  Result := False;
+  EncText := '';
+  HasEnc := False;
+
+  if (EncPath <> '') and FileExists(EncPath) then
+  begin
+    if LoadStringFromFile(EncPath, EncTextRaw) then
+    begin
+      EncText := Trim(String(EncTextRaw));
+      HasEnc := EncText <> '';
+    end;
+  end;
+
+  if Assigned(chkFullScreen) and chkFullScreen.Checked then
+    ScreenModeId := 2
+  else
+    ScreenModeId := 1;
+
+  DesktopWidth := 1366;
+  DesktopHeight := 768;
+  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
+  begin
+    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
+    begin
+      if Assigned(edtCustomWidth) then DesktopWidth := StrToIntDef(Trim(edtCustomWidth.Text), 1366);
+      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
+    end
+    else
+    begin
+      ResStr := cboResolution.Items[cboResolution.ItemIndex];
+      XPos := Pos(' x ', ResStr);
+      if XPos > 0 then
+      begin
+        DesktopWidth := StrToIntDef(Trim(Copy(ResStr, 1, XPos - 1)), 1366);
+        DesktopHeight := StrToIntDef(Trim(Copy(ResStr, XPos + 3, Length(ResStr))), 768);
+      end;
+    end;
+  end;
+
+  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then
+    UseMultiMon := 1
+  else
+    UseMultiMon := 0;
+
+  if Assigned(chkSound) and chkSound.Checked then
+    AudioMode := 0
+  else
+    AudioMode := 2;
+
+  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then
+    RedirectClipboard := 1
+  else
+    RedirectClipboard := 0;
+
+  SL := TStringList.Create;
+  try
+    SL.Add('full address:s:127.0.0.2');
+    SL.Add('username:s:' + UserName);
+    SL.Add('screen mode id:i:' + IntToStr(ScreenModeId));
+    SL.Add('desktopwidth:i:' + IntToStr(DesktopWidth));
+    SL.Add('desktopheight:i:' + IntToStr(DesktopHeight));
+    SL.Add('use multimon:i:' + IntToStr(UseMultiMon));
+    SL.Add('session bpp:i:32');
+    SL.Add('smart sizing:i:1');
+    SL.Add('dynamic resolution:i:1');
+    SL.Add('autoreconnection enabled:i:1');
+    SL.Add('compression:i:1');
+    SL.Add('keyboardhook:i:1');
+    SL.Add('audiocapturemode:i:0');
+    SL.Add('audiomode:i:' + IntToStr(AudioMode));
+    SL.Add('redirectclipboard:i:' + IntToStr(RedirectClipboard));
+    SL.Add('redirectdrives:i:0');
+    SL.Add('redirectprinters:i:0');
+    SL.Add('videoplaybackmode:i:1');
+    SL.Add('connection type:i:7');
+    SL.Add('displayconnectionbar:i:1');
+    SL.Add('disable wallpaper:i:1');
+    SL.Add('allow font smoothing:i:1');
+    SL.Add('allow desktop composition:i:1');
+    SL.Add('disable full window drag:i:0');
+    SL.Add('disable menu anims:i:0');
+    SL.Add('disable themes:i:0');
+    SL.Add('bitmapcachepersistenable:i:1');
+    SL.Add('authentication level:i:0');
+    if HasEnc then
+      SL.Add('prompt for credentials:i:0')
+    else
+      SL.Add('prompt for credentials:i:1');
+    SL.Add('negotiate security layer:i:1');
+    SL.Add('enablecredsspsupport:i:1');
+    SL.Add('remoteapplicationmode:i:0');
+    SL.Add('drivestoredirect:s:');
+    SL.Add('alternate shell:s:');
+    SL.Add('shell working directory:s:');
+    SL.Add('gatewayhostname:s:');
+    SL.Add('gatewayusagemethod:i:0');
+    SL.Add('gatewaycredentialssource:i:0');
+    SL.Add('gatewayprofileusagemethod:i:0');
+    SL.Add('promptcredentialonce:i:0');
+    SL.Add('use redirection server name:i:0');
+    if HasEnc then
+      SL.Add('password 51:b:' + EncText);
+    SL.Add('disableconnectionsharing:i:0');
+    SL.SaveToFile(RDPPath);
+    Result := FileExists(RDPPath);
+  finally
+    SL.Free;
+  end;
 end;
 
 function GenerateRDPPowerShellScript(const UserName, RDPPath, EncPath: string): string;
+var
+  ScreenModeId: Integer;
+  DesktopWidth: Integer;
+  DesktopHeight: Integer;
+  UseMultiMon: Integer;
+  AudioMode: Integer;
+  RedirectClipboard: Integer;
+  ResStr: string;
+  XPos: Integer;
 begin
+  // Determine screen mode: 2 = full screen, 1 = windowed
+  if Assigned(chkFullScreen) and chkFullScreen.Checked then
+    ScreenModeId := 2
+  else
+    ScreenModeId := 1;
+
+  // Parse resolution — use custom W/H boxes if "Custom" is selected
+  DesktopWidth := 1366;
+  DesktopHeight := 768;
+  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
+  begin
+    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
+    begin
+      if Assigned(edtCustomWidth)  then DesktopWidth  := StrToIntDef(Trim(edtCustomWidth.Text),  1366);
+      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
+    end
+    else
+    begin
+      ResStr := cboResolution.Items[cboResolution.ItemIndex];
+      XPos := Pos(' x ', ResStr);
+      if XPos > 0 then
+      begin
+        DesktopWidth := StrToInt(Trim(Copy(ResStr, 1, XPos - 1)));
+        DesktopHeight := StrToInt(Trim(Copy(ResStr, XPos + 3, Length(ResStr))));
+      end;
+    end;
+  end;
+
+  // Use all monitors
+  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then
+    UseMultiMon := 1
+  else
+    UseMultiMon := 0;
+
+  // Audio: 0 = play on this PC, 2 = disabled
+  if Assigned(chkSound) and chkSound.Checked then
+    AudioMode := 0
+  else
+    AudioMode := 2;
+
+  // Clipboard redirection
+  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then
+    RedirectClipboard := 1
+  else
+    RedirectClipboard := 0;
+
   Result :=
-    'param($EncPath)' + #13#10 +
+    'param([string]$EncPath = '''')' + #13#10 +
     'try {' + #13#10 +
     '  Write-Host "Starting RDP file creation..."' + #13#10 +
-    '  $encPassLines = @(Get-Content "$EncPath")' + #13#10 +
-    '  $encPass = ($encPassLines -join "").Trim()' + #13#10 +
-    '  Write-Host "Encrypted password loaded"' + #13#10 +
+    '  $hasEnc = ($EncPath -ne '''') -and (Test-Path $EncPath)' + #13#10 +
+    '  $encPass = ""' + #13#10 +
+    '  if ($hasEnc) {' + #13#10 +
+    '    $encPassLines = @(Get-Content "$EncPath")' + #13#10 +
+    '    $encPass = ($encPassLines -join "").Trim()' + #13#10 +
+    '    Write-Host "Encrypted password loaded"' + #13#10 +
+    '  } else {' + #13#10 +
+    '    Write-Host "No encrypted password available; shortcut will prompt for password"' + #13#10 +
+    '  }' + #13#10 +
     '  $rdp = @()' + #13#10 +
     '  $rdp += "full address:s:127.0.0.2"' + #13#10 +
     '  $rdp += "username:s:' + UserName + '"' + #13#10 +
-    '  $rdp += "screen mode id:i:1"' + #13#10 +
-    '  $rdp += "desktopwidth:i:1366"' + #13#10 +
-    '  $rdp += "desktopheight:i:768"' + #13#10 +
-    '  $rdp += "use multimon:i:0"' + #13#10 +
+    '  $rdp += "screen mode id:i:' + IntToStr(ScreenModeId) + '"' + #13#10 +
+    '  $rdp += "desktopwidth:i:' + IntToStr(DesktopWidth) + '"' + #13#10 +
+    '  $rdp += "desktopheight:i:' + IntToStr(DesktopHeight) + '"' + #13#10 +
+    '  $rdp += "use multimon:i:' + IntToStr(UseMultiMon) + '"' + #13#10 +
     '  $rdp += "session bpp:i:32"' + #13#10 +
     '  $rdp += "smart sizing:i:1"' + #13#10 +
+    '  $rdp += "dynamic resolution:i:1"' + #13#10 +
+    '  $rdp += "autoreconnection enabled:i:1"' + #13#10 +
     '  $rdp += "compression:i:1"' + #13#10 +
     '  $rdp += "keyboardhook:i:1"' + #13#10 +
     '  $rdp += "audiocapturemode:i:0"' + #13#10 +
-    '  $rdp += "audiomode:i:2"' + #13#10 +
+    '  $rdp += "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
+    '  $rdp += "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
+    '  $rdp += "redirectdrives:i:0"' + #13#10 +
+    '  $rdp += "redirectprinters:i:0"' + #13#10 +
     '  $rdp += "videoplaybackmode:i:1"' + #13#10 +
     '  $rdp += "connection type:i:7"' + #13#10 +
     '  $rdp += "displayconnectionbar:i:1"' + #13#10 +
@@ -2013,7 +3168,7 @@ begin
     '  $rdp += "disable themes:i:0"' + #13#10 +
     '  $rdp += "bitmapcachepersistenable:i:1"' + #13#10 +
     '  $rdp += "authentication level:i:0"' + #13#10 +
-    '  $rdp += "prompt for credentials:i:0"' + #13#10 +
+    '  if ($hasEnc) { $rdp += "prompt for credentials:i:0" } else { $rdp += "prompt for credentials:i:1" }' + #13#10 +
     '  $rdp += "negotiate security layer:i:1"' + #13#10 +
     '  $rdp += "enablecredsspsupport:i:1"' + #13#10 +
     '  $rdp += "remoteapplicationmode:i:0"' + #13#10 +
@@ -2026,7 +3181,7 @@ begin
     '  $rdp += "gatewayprofileusagemethod:i:0"' + #13#10 +
     '  $rdp += "promptcredentialonce:i:0"' + #13#10 +
     '  $rdp += "use redirection server name:i:0"' + #13#10 +
-    '  $rdp += ("password 51:b:" + $encPass)' + #13#10 +
+    '  if ($hasEnc) { $rdp += ("password 51:b:" + $encPass) }' + #13#10 +
     '  $rdp += "disableconnectionsharing:i:0"' + #13#10 +
     '  [System.IO.File]::WriteAllLines("' + RDPPath + '", $rdp)' + #13#10 +
     '  Start-Sleep -Milliseconds 500' + #13#10 +
@@ -2043,16 +3198,26 @@ begin
     '}';
 end;
 
-procedure CreateRDPShortcut(const UserName, Password: string);
+procedure CreateRDPShortcut(const UserName, Password, CreationSource: string);
 var
   ResultCode: Integer;
   RDPPath: string;
   EncPath: string;
   ScriptPath: string;
+  RunnerPath: string;
+  RunnerScript: string;
   PowerShellScript: string;
 begin
   RDPPath := ExpandConstant('{userdesktop}\' + UserName + '.rdp');
   ScriptPath := TempFile('create_rdp_' + UserName + '.ps1');
+
+  if PASSWORD_PIPELINE_DIAG <> 0 then
+  begin
+    LogSectionHeader('PASSWORD PIPELINE DEBUG');
+    LogKeyValue('User', UserName);
+    LogKeyValue('Creation Source', CreationSource);
+    LogPasswordPipeline('SHORTCUT_INPUT', UserName, Password);
+  end;
 
   WriteInstallerLog('CreateRDPShortcut: Creating RDP file at ' + RDPPath);
 
@@ -2066,7 +3231,19 @@ begin
   // Encrypt the password
   WriteInstallerLog('CreateRDPShortcut: Encrypting password for user ' + UserName);
   EncPath := EncryptPasswordToFile(Password, UserName);
-  WriteInstallerLog('CreateRDPShortcut: Password encrypted to ' + EncPath);
+  if EncPath <> '' then
+    LogEncryptedFileSummary('AFTER_ENCRYPT', EncPath);
+
+  // Direct write path avoids PowerShell hangs in shortcut generation.
+  if WriteRDPFileDirect(UserName, RDPPath, EncPath) then
+  begin
+    SecureCleanupTempFiles(UserName);
+    exit;
+  end
+  else
+  begin
+    WriteInstallerLog('CreateRDPShortcut: Direct write failed, falling back to PowerShell script path');
+  end;
 
   // Generate and execute PowerShell script
   WriteInstallerLog('CreateRDPShortcut: Generating RDP PowerShell script');
@@ -2074,9 +3251,38 @@ begin
   SaveStringToFile(ScriptPath, PowerShellScript, False);
   WriteInstallerLog('CreateRDPShortcut: Script saved to ' + ScriptPath);
   
-  WriteInstallerLog('CreateRDPShortcut: Executing PowerShell script');
-  Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '-EncPath "' + EncPath + '"', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  WriteInstallerLog('CreateRDPShortcut: PowerShell script exit code=' + IntToStr(ResultCode));
+  // Wrap script execution in a timed job to avoid installer hangs
+  RunnerPath := TempFile('run_create_rdp_' + UserName + '.ps1');
+  RunnerScript :=
+    'param([string]$TargetScript, [string]$EncPath, [int]$TimeoutSec)' + #13#10 +
+    'try {' + #13#10 +
+    '  $sb = {' + #13#10 +
+    '    param([string]$TS, [string]$EP)' + #13#10 +
+    '    & $TS -EncPath $EP' + #13#10 +
+    '  }' + #13#10 +
+    '  $job = Start-Job -ScriptBlock $sb -ArgumentList $TargetScript, $EncPath' + #13#10 +
+    '  if (Wait-Job -Job $job -Timeout $TimeoutSec) {' + #13#10 +
+    '    Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null' + #13#10 +
+    '    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null' + #13#10 +
+    '    exit 0' + #13#10 +
+    '  } else {' + #13#10 +
+    '    Stop-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null' + #13#10 +
+    '    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null' + #13#10 +
+    '    exit 124' + #13#10 +
+    '  }' + #13#10 +
+    '} catch {' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+  SaveStringToFile(RunnerPath, RunnerScript, False);
+  WriteInstallerLog('CreateRDPShortcut: Executing PowerShell script with timeout wrapper');
+  Exec(EXE_POWERSHELL,
+    BuildPowerShellFileArgs(
+      RunnerPath,
+      BuildPSNamedParam('TargetScript', ScriptPath) + ' ' + BuildPSNamedParam('EncPath', EncPath) + ' -TimeoutSec 30',
+      True),
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WriteInstallerLog('CreateRDPShortcut: Wrapped PowerShell script exit code=' + IntToStr(ResultCode));
+  DeleteFile(RunnerPath);
   
   if ResultCode <> 0 then
   begin
@@ -2112,9 +3318,19 @@ var
   StartTick: Cardinal;
   UserStartTick: Cardinal;
   OutPath: string;
-  PSCmd: string;
+  ScriptPath: string;
+  PSScript: string;
+  PSParams: string;
   SL: TStringList;
   j: Integer;
+  GroupExists: Boolean;
+  GroupCheckStatus: Integer; // 0=unknown, 1=exists, 2=missing
+  NetRc: Integer;
+  ExecOk: Boolean;
+  UserCreateOutputAlreadyLogged: Boolean;
+  UserCreatePath: string;
+  CredentialMatchesEnteredPassword: Boolean;
+  ValidationError: string;
 begin
   // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
   if GroupAdministratorsName = 'Administrators' then
@@ -2139,45 +3355,134 @@ begin
     UserInfo := UsersList[i];
     ParseUserEntry(UserInfo, UserName, Password);
 
+    ValidationError := IsValidUsername(UserName);
+    if ValidationError <> '' then
+    begin
+      WriteInstallerLog('ERROR: Skipping user due to invalid username input: ' + ValidationError + ' | User=' + UserName);
+      continue;
+    end;
+    ValidationError := IsValidPassword(Password);
+    if ValidationError <> '' then
+    begin
+      WriteInstallerLog('ERROR: Skipping user due to invalid password input: ' + ValidationError + ' | User=' + UserName);
+      continue;
+    end;
+
     WizardForm.StatusLabel.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
     WriteInstallerLog('Creating user: ' + UserName);
+    UserCreateOutputAlreadyLogged := False;
+    UserCreatePath := 'NET';
+    LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
 
-    // Create the Windows user account using native PowerShell (New-LocalUser)
+    // Create the user with NET USER first, then PowerShell fallback.
     OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
-    PSCmd := '$pw = ConvertTo-SecureString -String ''' + Password + ''' -AsPlainText -Force; '
-          + 'try { New-LocalUser -Name ''' + UserName + ''' -Password $pw -FullName ''' + UserName + ''' -PasswordNeverExpires -ErrorAction Stop; Write-Output ''NEWLOCALUSER_OK'' } '
-          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
-    // Log sanitized action (do not log plaintext passwords)
-    WriteInstallerLog('DEBUG: Creating user via PowerShell: New-LocalUser -Name ' + UserName + ' -Password <hidden>');
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never');
+    ResultCode := NetRc;
+
+    if ResultCode <> 0 then
+    begin
+      UserCreatePath := 'POWERSHELL';
+      WriteInstallerLog('WARNING: NET user creation failed for ' + UserName + ', falling back to PowerShell New-LocalUser path');
+      PSScript :=
+        'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
+        '$ErrorActionPreference = ''Stop''' + #13#10 +
+        'try {' + #13#10 +
+        '  $outDir = [System.IO.Path]::GetDirectoryName($OutPath)' + #13#10 +
+        '  if (-not [string]::IsNullOrWhiteSpace($outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }' + #13#10 +
+        '  $pw = ConvertTo-SecureString -String $Password -AsPlainText -Force' + #13#10 +
+        '  $existing = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue' + #13#10 +
+        '  if ($null -ne $existing) {' + #13#10 +
+        '    Set-LocalUser -Name $UserName -Password $pw -ErrorAction Stop' + #13#10 +
+        '    @(''SETLOCALUSER_PASSWORD_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+        '    exit 0' + #13#10 +
+        '  }' + #13#10 +
+        '  New-LocalUser -Name $UserName -Password $pw -FullName $UserName -PasswordNeverExpires -ErrorAction Stop | Out-Null' + #13#10 +
+        '  @(''NEWLOCALUSER_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+        '  exit 0' + #13#10 +
+        '} catch {' + #13#10 +
+        '  @(' + #13#10 +
+        '    ''NEWLOCALUSER_FAIL'',' + #13#10 +
+        '    ''User='' + $UserName,' + #13#10 +
+        '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
+        '    ''Message='' + $_.Exception.Message,' + #13#10 +
+        '    ''HResult='' + $_.Exception.HResult,' + #13#10 +
+        '    ''CategoryInfo='' + $_.CategoryInfo.ToString(),' + #13#10 +
+        '    ''FullyQualifiedErrorId='' + $_.FullyQualifiedErrorId,' + #13#10 +
+        '    ''StackTrace:'',' + #13#10 +
+        '    ($_ | Out-String)' + #13#10 +
+        '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+        '  exit 1' + #13#10 +
+        '}';
+      ScriptPath := TempFile('create_local_user_script_' + SanitizeFileName(UserName) + '.ps1');
+      SaveStringToFile(ScriptPath, PSScript, False);
+      PSParams :=
+        BuildPSNamedParam('UserName', UserName) + ' ' +
+        BuildPSNamedParam('Password', Password) + ' ' +
+        BuildPSNamedParam('OutPath', OutPath);
+      WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
+      ExecOk := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      if not ExecOk then
+        WriteInstallerLog('ERROR: Failed to launch PowerShell for user creation: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+      WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+      DeleteFile(ScriptPath);
+      if not FileExists(OutPath) then
+      begin
+        WriteInstallerLog('WARNING: Missing user-create output file after PowerShell for ' + UserName + ': ' + OutPath);
+        SaveStringToFile(OutPath,
+          'NO_USER_CREATE_OUTPUT_FILE' + #13#10 +
+          'Method=' + UserCreatePath + #13#10 +
+          'ResultCode=' + IntToStr(ResultCode) + #13#10 +
+          'User=' + UserName + #13#10,
+          False);
+      end;
+    end;
+
+    CredentialMatchesEnteredPassword := ValidateLocalCredential(UserName, Password);
+    WriteInstallerLog('PASSWORD_DIAG [POST_CREATE_CREDENTIAL_TEST] user=' + UserName +
+      ' | method=' + UserCreatePath +
+      ' | enteredPasswordValid=' + BoolToStr(CredentialMatchesEnteredPassword));
+    if not CredentialMatchesEnteredPassword then
+      WriteInstallerLog('ERROR: Credential validation failed immediately after user creation for ' + UserName + ' (method=' + UserCreatePath + ')');
+
     // If any output produced, dump it to the installer log for diagnostics
     if FileExists(OutPath) then
     begin
-      SL := TStringList.Create;
-      try
+      if not UserCreateOutputAlreadyLogged then
+      begin
+        SL := TStringList.Create;
         try
-          SL.LoadFromFile(OutPath);
-          WriteInstallerLog('DEBUG: New-LocalUser output for ' + UserName + ':');
-          for j := 0 to SL.Count - 1 do
-            WriteInstallerLog('DEBUG: ' + SL[j]);
-        except
-          // ignore logging errors
+          try
+            SL.LoadFromFile(OutPath);
+            WriteInstallerLog('DEBUG: User-creation output for ' + UserName + ':');
+            for j := 0 to SL.Count - 1 do
+              WriteInstallerLog('DEBUG: ' + SL[j]);
+          except
+            // ignore logging errors
+          end;
+        finally
+          SL.Free;
         end;
-      finally
-        SL.Free;
-        DeleteFile(OutPath);
       end;
+      DeleteFile(OutPath);
     end;
     Sleep(SLEEP_SHORT);
 
-    // Add to Administrators group using Add-LocalGroupMember
+    // Add to Administrators group (prefer net localgroup)
     OutPath := TempFile('user_add_admin_' + SanitizeFileName(UserName) + '.log');
-    PSCmd := 'try { Add-LocalGroupMember -Group ''' + GroupAdministratorsName + ''' -Member ''' + UserName + ''' -ErrorAction Stop; Write-Output ''ADD_ADMIN_OK'' } '
-          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
-    WriteInstallerLog('DEBUG: Adding user to Administrators via PowerShell: Add-LocalGroupMember -Group ' + GroupAdministratorsName + ' -Member ' + UserName);
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    WriteInstallerLog('add to Administrators exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupAdministratorsName) + ' ' + QuoteExeArg(UserName) + ' /add');
+    ResultCode := NetRc;
+    if ResultCode <> 0 then
+    begin
+      PSScript := BuildAddGroupMemberPowerShellScript(GroupAdministratorsName, UserName, OutPath, 'ADD_ADMIN_OK');
+      WriteInstallerLog('DEBUG: Fallback: Adding user to Administrators via PowerShell: Add-LocalGroupMember -Group ' + GroupAdministratorsName + ' -Member ' + UserName);
+      PSParams :=
+        BuildPSNamedParam('GroupName', GroupAdministratorsName) + ' ' +
+        BuildPSNamedParam('UserName', UserName) + ' ' +
+        BuildPSNamedParam('OutPath', OutPath) + ' ' +
+        BuildPSNamedParam('SuccessTag', 'ADD_ADMIN_OK');
+      ExecSavedPowerShellDebugScriptParams('add_admin_member', UserName, PSScript, PSParams, True, ResultCode);
+      WriteInstallerLog('PowerShell add to Administrators exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    end;
     if FileExists(OutPath) then
     begin
       SL := TStringList.Create;
@@ -2195,32 +3500,77 @@ begin
       end;
     end;
 
-    // Add to Remote Desktop Users group using Add-LocalGroupMember
-    OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
-    PSCmd := 'try { Add-LocalGroupMember -Group ''' + GroupRDPUsersName + ''' -Member ''' + UserName + ''' -ErrorAction Stop; Write-Output ''ADD_RDP_OK'' } '
-          + 'catch { $_ | Out-String | Out-File -FilePath ''' + OutPath + ''' -Encoding UTF8; exit 1 }';
-    WriteInstallerLog('DEBUG: Adding user to Remote Desktop Users via PowerShell: Add-LocalGroupMember -Group ' + GroupRDPUsersName + ' -Member ' + UserName);
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    WriteInstallerLog('add to Remote Desktop Users exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-    if FileExists(OutPath) then
+    // Check if Remote Desktop Users group exists before adding
+    // Fast check via net localgroup first (avoids hangs in some PowerShell hosts)
+    NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupRDPUsersName));
+    if NetRc = 0 then
+      ResultCode := 0
+    else
     begin
-      SL := TStringList.Create;
-      try
-        try
-          SL.LoadFromFile(OutPath);
-          WriteInstallerLog('DEBUG: Add-LocalGroupMember (Remote Desktop Users) output for ' + UserName + ':');
-          for j := 0 to SL.Count - 1 do
-            WriteInstallerLog('DEBUG: ' + SL[j]);
-        except
-        end;
-      finally
-        SL.Free;
-        DeleteFile(OutPath);
+      PSScript :=
+        'param([string]$GroupName)' + #13#10 +
+        '$exists = $false' + #13#10 +
+        'try { $null = Get-LocalGroup -SID ''S-1-5-32-555'' -ErrorAction Stop; $exists = $true } catch { }' + #13#10 +
+        'if (-not $exists) { try { $null = Get-LocalGroup -Name $GroupName -ErrorAction Stop; $exists = $true } catch { } }' + #13#10 +
+        'if ($exists) { exit 0 } else { exit 2 }';
+      PSParams := BuildPSNamedParam('GroupName', GroupRDPUsersName);
+      ExecPowerShellScriptContent('check_rdp_group.ps1', PSScript, PSParams, True, ResultCode);
+    end;
+    GroupExists := False;
+    GroupCheckStatus := 0;
+    if ResultCode = 0 then
+      GroupCheckStatus := 1
+    else if ResultCode = 2 then
+      GroupCheckStatus := 2;
+    GroupExists := (GroupCheckStatus = 1);
+
+    if GroupExists or (GroupCheckStatus = 0) then
+    begin
+      OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
+      NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupRDPUsersName) + ' ' + QuoteExeArg(UserName) + ' /add');
+      ResultCode := NetRc;
+      if ResultCode <> 0 then
+      begin
+        PSScript := BuildAddGroupMemberPowerShellScript(GroupRDPUsersName, UserName, OutPath, 'ADD_RDP_OK');
+        WriteInstallerLog('DEBUG: Fallback: Adding user to Remote Desktop Users via PowerShell: Add-LocalGroupMember -Group ' + GroupRDPUsersName + ' -Member ' + UserName);
+        PSParams :=
+          BuildPSNamedParam('GroupName', GroupRDPUsersName) + ' ' +
+          BuildPSNamedParam('UserName', UserName) + ' ' +
+          BuildPSNamedParam('OutPath', OutPath) + ' ' +
+          BuildPSNamedParam('SuccessTag', 'ADD_RDP_OK');
+        ExecSavedPowerShellDebugScriptParams('add_rdp_member', UserName, PSScript, PSParams, True, ResultCode);
+        WriteInstallerLog('PowerShell add to Remote Desktop Users exit=' + IntToStr(ResultCode) + ' for ' + UserName);
       end;
+
+      if FileExists(OutPath) then
+      begin
+        SL := TStringList.Create;
+        try
+          try
+            SL.LoadFromFile(OutPath);
+            WriteInstallerLog('DEBUG: Add to Remote Desktop Users output for ' + UserName + ':');
+            for j := 0 to SL.Count - 1 do
+              WriteInstallerLog('DEBUG: ' + SL[j]);
+          except
+          end;
+        finally
+          SL.Free;
+          DeleteFile(OutPath);
+        end;
+      end;
+
+      if ValidateGroupMembership(GroupRDPUsersName, UserName) then
+        WriteInstallerLog('GROUP_DIAG [POST_ADD_VALIDATE] group=' + GroupRDPUsersName + ' user=' + UserName + ' | member=True')
+      else
+        WriteInstallerLog('ERROR: GROUP_DIAG [POST_ADD_VALIDATE] group=' + GroupRDPUsersName + ' user=' + UserName + ' | member=False');
+    end
+    else
+    begin
+      WriteInstallerLog('INFO: Remote Desktop Users group does not exist on this system. Skipping group membership for ' + UserName);
     end;
 
     // Create RDP shortcut using helper function
-    CreateRDPShortcut(UserName, Password);
+    CreateRDPShortcut(UserName, Password, UserCreatePath);
     WriteInstallerLog('Created shortcut for ' + UserName);
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
@@ -2254,7 +3604,7 @@ begin
     WizardForm.StatusLabel.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
 
     // Create RDP shortcut using helper function
-    CreateRDPShortcut(UserName, Password);
+    CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
     WriteInstallerLog('Created shortcut for ' + UserName);
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
@@ -2358,10 +3708,308 @@ begin
   Log('[PrepareToInstall] Skipping service operations (will be done in ssInstall step)');
 end;
 
+procedure ReadShortcutSettingsFromRdpFile(const RdpPath: string);
+// Reads display/audio settings from an existing .rdp file and populates the
+// shortcut settings controls.  Uses PowerShell to handle both UTF-8 and
+// UTF-16 LE encodings (mstsc writes UTF-16; this installer writes UTF-8).
+var
+  OutPath, PSScript, ScriptPath: string;
+  Lines: TStringList;
+  i, EqPos: Integer;
+  Key, Val, Line: string;
+  ScreenMode, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  ResIndex, ResultCode: Integer;
+begin
+  if not FileExists(RdpPath) then exit;
+
+  // Use PowerShell to read the file regardless of encoding (UTF-16 LE or UTF-8)
+  // and emit key=value pairs for the settings we care about.
+  OutPath := TempFile('rdp_read_settings.txt');
+  PSScript :=
+    '$p = ''' + RdpPath + ''';' +
+    '$bytes = [System.IO.File]::ReadAllBytes($p);' +
+    'if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE)' +
+    '  { $lines = Get-Content -Encoding Unicode $p }' +
+    'else' +
+    '  { $lines = Get-Content $p };' +
+    '$out = @();' +
+    'foreach ($l in $lines) {' +
+    '  if ($l -match "^screen mode id:i:(.+)$")   { $out += "screen_mode_id="    + $Matches[1] };' +
+    '  if ($l -match "^desktopwidth:i:(.+)$")      { $out += "desktopwidth="      + $Matches[1] };' +
+    '  if ($l -match "^desktopheight:i:(.+)$")     { $out += "desktopheight="     + $Matches[1] };' +
+    '  if ($l -match "^use multimon:i:(.+)$")      { $out += "use_multimon="      + $Matches[1] };' +
+    '  if ($l -match "^audiomode:i:(.+)$")         { $out += "audiomode="         + $Matches[1] };' +
+    '  if ($l -match "^redirectclipboard:i:(.+)$") { $out += "redirectclipboard=" + $Matches[1] };' +
+    '};' +
+    '[System.IO.File]::WriteAllText(''' + OutPath + ''', ($out -join "`n"))';
+
+  ScriptPath := TempFile('read_rdp_settings.ps1');
+  SaveStringToFile(ScriptPath, PSScript, False);
+  Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WriteInstallerLog('ReadShortcutSettingsFromRdpFile: PS exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
+
+  if not FileExists(OutPath) then exit;
+
+  // Defaults (match BuildShortcutSettingsBlock initial state)
+  ScreenMode := 1; DesktopWidth := 1366; DesktopHeight := 768;
+  UseMultiMon := 0; AudioMode := 0; RedirectClipboard := 1;
+
+  Lines := TStringList.Create;
+  try
+    Lines.LoadFromFile(OutPath);
+    for i := 0 to Lines.Count - 1 do
+    begin
+      Line := Trim(Lines[i]);
+      EqPos := Pos('=', Line);
+      if EqPos = 0 then continue;
+      Key := Copy(Line, 1, EqPos - 1);
+      Val := Trim(Copy(Line, EqPos + 1, Length(Line)));
+      if      Key = 'screen_mode_id'    then ScreenMode       := StrToIntDef(Val, 1)
+      else if Key = 'desktopwidth'      then DesktopWidth     := StrToIntDef(Val, 1366)
+      else if Key = 'desktopheight'     then DesktopHeight    := StrToIntDef(Val, 768)
+      else if Key = 'use_multimon'      then UseMultiMon      := StrToIntDef(Val, 0)
+      else if Key = 'audiomode'         then AudioMode        := StrToIntDef(Val, 0)
+      else if Key = 'redirectclipboard' then RedirectClipboard := StrToIntDef(Val, 1);
+    end;
+  finally
+    Lines.Free;
+    DeleteFile(OutPath);
+  end;
+
+  // Apply to controls — Full Screen drives whether cboResolution is enabled
+  if Assigned(chkFullScreen) then chkFullScreen.Checked := (ScreenMode = 2);
+
+  ResIndex := -1;  // -1 = no preset match yet
+  if      (DesktopWidth = 1280) and (DesktopHeight = 720)  then ResIndex := 0
+  else if (DesktopWidth = 1366) and (DesktopHeight = 768)  then ResIndex := 1
+  else if (DesktopWidth = 1600) and (DesktopHeight = 900)  then ResIndex := 2
+  else if (DesktopWidth = 1920) and (DesktopHeight = 1080) then ResIndex := 3
+  else if (DesktopWidth = 2560) and (DesktopHeight = 1440) then ResIndex := 4
+  else if (DesktopWidth = 3840) and (DesktopHeight = 2160) then ResIndex := 5;
+
+  if ResIndex = -1 then
+  begin
+    // Unknown resolution — select Custom and pre-fill the W/H boxes
+    ResIndex := 6;
+    if Assigned(edtCustomWidth)  then edtCustomWidth.Text  := IntToStr(DesktopWidth);
+    if Assigned(edtCustomHeight) then edtCustomHeight.Text := IntToStr(DesktopHeight);
+  end;
+
+  if Assigned(cboResolution) then
+  begin
+    cboResolution.ItemIndex := ResIndex;
+    cboResolution.Enabled := (ScreenMode <> 2);
+    // Show/hide W/H row to match the selection
+    OnResolutionChange(nil);
+  end;
+
+  if Assigned(chkUseAllMonitors) then chkUseAllMonitors.Checked := (UseMultiMon = 1);
+  if Assigned(chkSound)          then chkSound.Checked          := (AudioMode = 0);  // 0 = play on this PC
+  if Assigned(chkCopyPaste)      then chkCopyPaste.Checked      := (RedirectClipboard = 1);
+end;
+
+procedure WriteShortcutSettingsToRdpFile(const RdpPath: string);
+// Reads the existing .rdp file and updates the display/audio settings from the
+// current shortcut settings UI controls, then writes the file back in-place.
+var
+  ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  ResStr: string;
+  XPos, ResultCode: Integer;
+  PSScript, ScriptPath: string;
+begin
+  // Collect values from UI controls
+  if Assigned(chkFullScreen) and chkFullScreen.Checked then ScreenModeId := 2 else ScreenModeId := 1;
+
+  DesktopWidth := 1366; DesktopHeight := 768;
+  if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
+  begin
+    if cboResolution.Items[cboResolution.ItemIndex] = 'Custom' then
+    begin
+      if Assigned(edtCustomWidth)  then DesktopWidth  := StrToIntDef(Trim(edtCustomWidth.Text),  1366);
+      if Assigned(edtCustomHeight) then DesktopHeight := StrToIntDef(Trim(edtCustomHeight.Text), 768);
+    end
+    else
+    begin
+      ResStr := cboResolution.Items[cboResolution.ItemIndex];
+      XPos := Pos(' x ', ResStr);
+      if XPos > 0 then
+      begin
+        DesktopWidth := StrToInt(Trim(Copy(ResStr, 1, XPos - 1)));
+        DesktopHeight := StrToInt(Trim(Copy(ResStr, XPos + 3, Length(ResStr))));
+      end;
+    end;
+  end;
+
+  if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then UseMultiMon := 1 else UseMultiMon := 0;
+  if Assigned(chkSound) and chkSound.Checked then AudioMode := 0 else AudioMode := 2;
+  if Assigned(chkCopyPaste) and chkCopyPaste.Checked then RedirectClipboard := 1 else RedirectClipboard := 0;
+
+  // PowerShell: update specific keys in the .rdp file without touching the rest (e.g. password hash)
+  PSScript :=
+    '$path = ''' + RdpPath + '''' + #13#10 +
+    '$lines = if (Test-Path $path) { [System.IO.File]::ReadAllLines($path) } else { @() }' + #13#10 +
+    'function Set-RdpKey($lines, $prefix, $val) {' + #13#10 +
+    '  $found = $false' + #13#10 +
+    '  for ($i = 0; $i -lt $lines.Count; $i++) {' + #13#10 +
+    '    if ($lines[$i] -match ("^" + [regex]::Escape($prefix) + ":")) { $lines[$i] = $val; $found = $true }' + #13#10 +
+    '  }' + #13#10 +
+    '  if (-not $found) { $lines += $val }' + #13#10 +
+    '  return ,$lines' + #13#10 +
+    '}' + #13#10 +
+    '$lines = Set-RdpKey $lines "screen mode id" "screen mode id:i:' + IntToStr(ScreenModeId) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "desktopwidth" "desktopwidth:i:' + IntToStr(DesktopWidth) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "desktopheight" "desktopheight:i:' + IntToStr(DesktopHeight) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "use multimon" "use multimon:i:' + IntToStr(UseMultiMon) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "audiomode" "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "redirectclipboard" "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
+    '[System.IO.File]::WriteAllLines($path, $lines)';
+
+  ScriptPath := TempFile('update_rdp_settings.ps1');
+  SaveStringToFile(ScriptPath, PSScript, False);
+  Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WriteInstallerLog('WriteShortcutSettingsToRdpFile: exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
+end;
+
+procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
+begin
+
+  // Section separator label
+  lblShortcutSection := TLabel.Create(ParentSurface);
+  lblShortcutSection.Parent := ParentSurface;
+  lblShortcutSection.Top := StartTop;
+  lblShortcutSection.Caption := 'Basic Shortcut Settings';
+  lblShortcutSection.Font.Color := clGray;
+  lblShortcutSection.Font.Style := [fsBold];
+  lblShortcutSection.AutoSize := True;
+
+    // Row 1 — Copy & Paste
+  chkCopyPaste := TCheckBox.Create(ParentSurface);
+  chkCopyPaste.Parent := ParentSurface;
+  chkCopyPaste.Left := ScaleX(10);
+  chkCopyPaste.Top := lblShortcutSection.Top + ScaleY(24);
+  chkCopyPaste.Width := ScaleX(130);
+  chkCopyPaste.Caption := 'Allow Copy && Paste';
+  chkCopyPaste.Checked := True;
+
+  // Row 1 — Sound
+  chkSound := TCheckBox.Create(ParentSurface);
+  chkSound.Parent := ParentSurface;
+  chkSound.Left := chkCopyPaste.Left + ScaleX(140);
+  chkSound.Top := chkCopyPaste.Top;
+  chkSound.Width := ScaleX(100);
+  chkSound.Caption := 'Allow Sound';
+  chkSound.Checked := True;
+
+  // Row 2 — Screen Size label
+  lblScreenSize := TLabel.Create(ParentSurface);
+  lblScreenSize.Parent := ParentSurface;
+  lblScreenSize.Left := ScaleX(10);
+  lblScreenSize.Top := chkSound.Top + ScaleY(26);
+  lblScreenSize.Caption := 'Window Size:';
+  lblScreenSize.AutoSize := True;
+
+  // Row 2 — Resolution drop-down
+  cboResolution := TComboBox.Create(ParentSurface);
+  cboResolution.Parent := ParentSurface;
+  cboResolution.Left := lblScreenSize.Left + ScaleX(72);
+  cboResolution.Top := lblScreenSize.Top - ScaleY(3);
+  cboResolution.Width := ScaleX(120);
+  cboResolution.Style := csDropDownList;
+  cboResolution.Items.Add('1280 x 720');
+  cboResolution.Items.Add('1366 x 768');
+  cboResolution.Items.Add('1600 x 900');
+  cboResolution.Items.Add('1920 x 1080');
+  cboResolution.Items.Add('2560 x 1440');
+  cboResolution.Items.Add('3840 x 2160');
+  cboResolution.Items.Add('Custom');
+  cboResolution.ItemIndex := 1;  // default: 1366 x 768
+  cboResolution.OnChange := @OnResolutionChange;
+
+  // Row 2 — Full Screen checkbox
+  chkFullScreen := TCheckBox.Create(ParentSurface);
+  chkFullScreen.Parent := ParentSurface;
+  chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
+  chkFullScreen.Top := lblScreenSize.Top - ScaleY(1);
+  chkFullScreen.Width := ScaleX(80);
+  chkFullScreen.Caption := 'Full Screen';
+  chkFullScreen.Checked := False;
+  chkFullScreen.OnClick := @OnFullScreenClick;
+  cboResolution.Enabled := True;
+
+  // Row 2 — Use All Monitors
+  chkUseAllMonitors := TCheckBox.Create(ParentSurface);
+  chkUseAllMonitors.Parent := ParentSurface;
+  chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
+  chkUseAllMonitors.Top := lblScreenSize.Top - ScaleY(1);
+  chkUseAllMonitors.Width := ScaleX(110);
+  chkUseAllMonitors.Caption := 'Use All Monitors';
+  chkUseAllMonitors.Checked := False;
+
+  // Row 2b — Custom resolution W/H inputs (hidden until "Custom" is selected)
+  lblCustomWidth := TLabel.Create(ParentSurface);
+  lblCustomWidth.Parent := ParentSurface;
+  lblCustomWidth.Left := cboResolution.Left;
+  lblCustomWidth.Top := lblScreenSize.Top + ScaleY(26);
+  lblCustomWidth.Caption := 'W:';
+  lblCustomWidth.AutoSize := True;
+  lblCustomWidth.Visible := False;
+
+  edtCustomWidth := TEdit.Create(ParentSurface);
+  edtCustomWidth.Parent := ParentSurface;
+  edtCustomWidth.Left := lblCustomWidth.Left + ScaleX(18);
+  edtCustomWidth.Top := lblCustomWidth.Top - ScaleY(3);
+  edtCustomWidth.Width := ScaleX(45);
+  edtCustomWidth.Text := '1920';
+  edtCustomWidth.Visible := False;
+
+  lblCustomHeight := TLabel.Create(ParentSurface);
+  lblCustomHeight.Parent := ParentSurface;
+  lblCustomHeight.Left := edtCustomWidth.Left + edtCustomWidth.Width + ScaleX(10);
+  lblCustomHeight.Top := lblCustomWidth.Top;
+  lblCustomHeight.Caption := 'H:';
+  lblCustomHeight.AutoSize := True;
+  lblCustomHeight.Visible := False;
+
+  edtCustomHeight := TEdit.Create(ParentSurface);
+  edtCustomHeight.Parent := ParentSurface;
+  edtCustomHeight.Left := lblCustomHeight.Left + ScaleX(18);
+  edtCustomHeight.Top := edtCustomWidth.Top;
+  edtCustomHeight.Width := ScaleX(45);
+  edtCustomHeight.Text := '1080';
+  edtCustomHeight.Visible := False;
+
+  // Row 3 — Tips for editing more settings
+  lblShortcutTips := TLabel.Create(ParentSurface);
+  lblShortcutTips.Parent := ParentSurface;
+  lblShortcutTips.Left := ScaleX(10);
+  lblShortcutTips.Top := lblScreenSize.Top + ScaleY(26);
+  lblShortcutTips.Caption := 'For more settings, run this app again and choose "Edit existing shortcut settings"';
+  lblShortcutTips.Font.Style := [fsItalic];
+  lblShortcutTips.AutoSize := True;
+
+  // Row 4 — Multi-user note (shown when 2+ shortcuts will be created, hidden otherwise)
+  lblMultiShortcutEditingNote := TLabel.Create(ParentSurface);
+  lblMultiShortcutEditingNote.Parent := ParentSurface;
+  lblMultiShortcutEditingNote.Left := ScaleX(10);
+  lblMultiShortcutEditingNote.Top := lblShortcutTips.Top + ScaleY(26);
+  lblMultiShortcutEditingNote.Font.Style := [fsBold];
+  lblMultiShortcutEditingNote.AutoSize := True;
+  lblMultiShortcutEditingNote.Visible := False;
+
+  // Row 4 — "Open advanced shortcut options" checkbox (shown only in Edit Shortcuts mode)
+  chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
+  chkShowMoreShortcutOptions.Parent := ParentSurface;
+  chkShowMoreShortcutOptions.Left := ScaleX(260);
+  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(126);
+  chkShowMoreShortcutOptions.Width := ScaleX(260);
+  chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
+  chkShowMoreShortcutOptions.Checked := False;
+  chkShowMoreShortcutOptions.Visible := False;
+end;
+
 procedure InitializeWizard;
 var
   leftPos, topPos, widthVal: Integer;
-  extraGap: Integer;
   childIndent, childLeft, valueLeft: Integer;
   // Runtime values used to populate System Status
   DisplayVersion: string;
@@ -2403,6 +4051,37 @@ var
 begin
   // Initialize installer log file
   InitInstallerLog;
+  WriteInstallerLog('BUILD_FINGERPRINT=' + BUILD_FINGERPRINT);
+  WriteInstallerLog('PRESERVE_USER_CREATE_DEBUG_LOGS=' + BoolToStr(PRESERVE_USER_CREATE_DEBUG_LOGS <> 0));
+  WriteInstallerLog('PASSWORD_PIPELINE_DIAG=' + BoolToStr(PASSWORD_PIPELINE_DIAG <> 0));
+
+  SimLogNoMstscShown := False;
+  SimLogNoVCRedistShown := False;
+  SimLogNetPsShown := False;
+  LastLoggedPageId := -1;
+  LastLoggedPageTick := 0;
+  LastSuppressedPageLogs := 0;
+  PendingDebugCleanupFiles := TStringList.Create;
+
+  if SimulateNoMstsc then
+  begin
+    LogSimulationScenario('System doesnt have mstsc');
+    SimLogNoMstscShown := True;
+  end;
+  if SimulateNoVCRedist then
+  begin
+    LogSimulationScenario('System doesnt have VC++');
+    SimLogNoVCRedistShown := True;
+  end;
+  if SimulateNetFailPowerShell then
+  begin
+    LogSimulationScenario('System fails on net.exe commands and uses PowerShell fallback');
+    SimLogNetPsShown := True;
+  end;
+
+  if (Ord(SimulateNoMstsc) + Ord(SimulateNoVCRedist) + Ord(SimulateNetFailPowerShell)) > 1 then
+    WriteInstallerLog('Simulation warning: multiple scenarios are enabled; run one scenario at a time for deterministic test results.');
+
   // Detect Smart App Control (VerifiedAndReputablePolicyState == 1)
   SmartAppControlIsOn := False;
   if RegQueryDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Control\CI\Policy', 'VerifiedAndReputablePolicyState', regVal) then
@@ -2434,8 +4113,7 @@ begin
   // Ensure enough horizontal space and dynamic resizing in modern wizard styles
   WelcomeExpLabel.AutoSize := False;
   WelcomeExpLabel.Width := WelcomePage.SurfaceWidth - ScaleX(30);
-  WelcomeExpLabel.Caption := 'RDPWrapKit sets up local RDP access, allowing you to run multiple users on your computer via Remote Desktop Protocol (RDP).' + #13#10#13#10 +
-                           'You can choose to install TermWrap, create/manage user accounts, and create RDP shortcuts on your desktop for easy access.';
+  WelcomeExpLabel.Caption := 'RDPWrapKit sets up local RDP access, allowing you to run multiple users on your computer via Remote Desktop Protocol (RDP).';
   WelcomeExpLabel.WordWrap := True;
   WelcomeExpLabel.Alignment := taLeftJustify;
   WelcomeExpLabel.Font.Size := WelcomeExpLabel.Font.Size + 2;
@@ -2472,17 +4150,17 @@ begin
     'Select what you would like to do:'
   );
 
-  // Create top-level radio buttons: Typical, Edit Shortcut, Uninstall
-  rbTypicalSetup := TRadioButton.Create(Page_InstallOptions);
-  rbTypicalSetup.Parent := Page_InstallOptions.Surface;
-  rbTypicalSetup.Left := ScaleX(10);
-  rbTypicalSetup.Top := ScaleY(10);
-  rbTypicalSetup.Width := ScaleX(420);
-  rbTypicalSetup.Caption := 'Typical Setup';
-  rbTypicalSetup.Checked := True;
-  rbTypicalSetup.OnClick := @OnInstallModeChange;
+  // Create top-level radio buttons: Install, Edit Shortcut, Uninstall
+  rbInstall := TRadioButton.Create(Page_InstallOptions);
+  rbInstall.Parent := Page_InstallOptions.Surface;
+  rbInstall.Left := ScaleX(10);
+  rbInstall.Top := ScaleY(10);
+  rbInstall.Width := ScaleX(420);
+  rbInstall.Caption := 'Install';
+  rbInstall.Checked := True;
+  rbInstall.OnClick := @OnInstallModeChange;
 
-  // Under Typical, add checkboxes and nested radios (always visible, only enabled for Typical)
+  // Under Install, add checkboxes and nested radios (always visible, only enabled for Install)
   chkInstallTermWrap := TCheckBox.Create(Page_InstallOptions);
   chkInstallTermWrap.Parent := Page_InstallOptions.Surface;
   chkInstallTermWrap.Left := ScaleX(30);
@@ -2499,57 +4177,57 @@ begin
     chkInstallTermWrap.Checked := True;
   end;
 
-  chkManageUsers := TCheckBox.Create(Page_InstallOptions);
-  chkManageUsers.Parent := Page_InstallOptions.Surface;
-  chkManageUsers.Left := ScaleX(30);
-  chkManageUsers.Top := ScaleY(60);
-  chkManageUsers.Width := ScaleX(380);
-  chkManageUsers.Caption := 'Manage users and shortcuts';
-  chkManageUsers.Checked := True;
-  chkManageUsers.OnClick := @OnManageUsersClick;
+  chkCreateRdpShortcuts := TCheckBox.Create(Page_InstallOptions);
+  chkCreateRdpShortcuts.Parent := Page_InstallOptions.Surface;
+  chkCreateRdpShortcuts.Left := ScaleX(30);
+  chkCreateRdpShortcuts.Top := ScaleY(60);
+  chkCreateRdpShortcuts.Width := ScaleX(380);
+  chkCreateRdpShortcuts.Caption := 'Create RDP shortcuts';
+  chkCreateRdpShortcuts.Checked := True;
+  chkCreateRdpShortcuts.OnClick := @OnCreateRdpShortcutsClick;
 
-  ManageUsersGroup := TPanel.Create(Page_InstallOptions);
-  ManageUsersGroup.Parent := Page_InstallOptions.Surface;
-  ManageUsersGroup.Left := ScaleX(40);
-  ManageUsersGroup.Top := ScaleY(84);
-  ManageUsersGroup.Width := ScaleX(360);
-  ManageUsersGroup.Height := ScaleY(88);
-  ManageUsersGroup.BorderStyle := bsNone;
-  ManageUsersGroup.Color := Page_InstallOptions.Surface.Color;
-  ManageUsersGroup.BevelInner := bvNone;
-  ManageUsersGroup.BevelOuter := bvNone;
-  ManageUsersGroup.BevelWidth := 0;
+  CreateRdpShortcutsGroup := TPanel.Create(Page_InstallOptions);
+  CreateRdpShortcutsGroup.Parent := Page_InstallOptions.Surface;
+  CreateRdpShortcutsGroup.Left := ScaleX(40);
+  CreateRdpShortcutsGroup.Top := ScaleY(84);
+  CreateRdpShortcutsGroup.Width := ScaleX(360);
+  CreateRdpShortcutsGroup.Height := ScaleY(88);
+  CreateRdpShortcutsGroup.BorderStyle := bsNone;
+  CreateRdpShortcutsGroup.Color := Page_InstallOptions.Surface.Color;
+  CreateRdpShortcutsGroup.BevelInner := bvNone;
+  CreateRdpShortcutsGroup.BevelOuter := bvNone;
+  CreateRdpShortcutsGroup.BevelWidth := 0;
 
-  rbCreateUsers := TRadioButton.Create(ManageUsersGroup);
-  rbCreateUsers.Parent := ManageUsersGroup;
+  rbCreateUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
+  rbCreateUsers.Parent := CreateRdpShortcutsGroup;
   rbCreateUsers.Left := ScaleX(10);
   rbCreateUsers.Top := ScaleY(8);
   rbCreateUsers.Width := ScaleX(340);
-  rbCreateUsers.Caption := 'Create new users / create shortcuts';
+  rbCreateUsers.Caption := 'Create new users';
   rbCreateUsers.Checked := True;
-  rbCreateUsers.OnClick := @OnManageUsersClick;
+  rbCreateUsers.OnClick := @OnCreateRdpShortcutsClick;
 
-  rbUseExistingUsers := TRadioButton.Create(ManageUsersGroup);
-  rbUseExistingUsers.Parent := ManageUsersGroup;
+  rbUseExistingUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
+  rbUseExistingUsers.Parent := CreateRdpShortcutsGroup;
   rbUseExistingUsers.Left := ScaleX(10);
   rbUseExistingUsers.Top := ScaleY(32);
   rbUseExistingUsers.Width := ScaleX(340);
-  rbUseExistingUsers.Caption := 'Use existing users / create shortcuts';
+  rbUseExistingUsers.Caption := 'Use existing users';
   rbUseExistingUsers.Checked := False;
-  rbUseExistingUsers.OnClick := @OnManageUsersClick;
+  rbUseExistingUsers.OnClick := @OnCreateRdpShortcutsClick;
 
-  // Edit Shortcut radio placed halfway between Typical and Uninstall
+  // Edit Shortcut radio placed halfway between Install and Uninstall
 
-  // Set initial enabled state based on ManageUsers checkbox
-  rbCreateUsers.Enabled := chkManageUsers.Checked;
-  rbUseExistingUsers.Enabled := chkManageUsers.Checked;
+  // Set initial enabled state based on Create RDP shortcuts checkbox
+  rbCreateUsers.Enabled := chkCreateRdpShortcuts.Checked;
+  rbUseExistingUsers.Enabled := chkCreateRdpShortcuts.Checked;
 
 
 
   // --- Compact, even radio button spacing ---
-  // Start at a base Y position just below the ManageUsersGroup
+  // Start at a base Y position just below the CreateRdpShortcutsGroup
   // Move the bottom three radio buttons up by about two lines (ScaleY(32))
-  radioTopBase := ManageUsersGroup.Top + ManageUsersGroup.Height - ScaleY(20); // was + ScaleY(12), now - ScaleY(20) to move up ~2 lines
+  radioTopBase := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height - ScaleY(20); // was + ScaleY(12), now - ScaleY(20) to move up ~2 lines
   radioSpacing := ScaleY(28); // Restore original spacing
 
   rbEditShortcutSettings := TRadioButton.Create(Page_InstallOptions);
@@ -2575,7 +4253,7 @@ begin
   rbUninstall.Left := ScaleX(10);
   rbUninstall.Top := radioTopBase + radioSpacing * 2;
   rbUninstall.Width := ScaleX(420);
-  rbUninstall.Caption := 'Uninstall TermWrap';
+  rbUninstall.Caption := 'Uninstall (keeps users)';
   rbUninstall.Checked := False;
   rbUninstall.OnClick := @OnInstallModeChange;
 
@@ -2583,6 +4261,7 @@ begin
   CreditsText := TRichEditViewer.Create(WelcomePage);
   CreditsText.Parent := WelcomePage.Surface;
   CreditsText.Left := ScaleX(10);
+  CreditsText.Top := ScaleY(10);
   CreditsText.Width := WelcomePage.SurfaceWidth - ScaleX(20);
   CreditsText.Height := ScaleY(120);
   CreditsText.ScrollBars := ssNone;
@@ -2601,8 +4280,8 @@ begin
   lblCreditsHeader := TLabel.Create(WelcomePage);
   lblCreditsHeader.Parent := WelcomePage.Surface;
   lblCreditsHeader.Left := CreditsText.Left;
-  lblCreditsHeader.Top := CreditsText.Top;
-  lblCreditsHeader.Caption := 'RDPWrapKit is assembled from the great work below:';
+  lblCreditsHeader.Top := CreditsText.Top + ScaleY(18);
+  lblCreditsHeader.Caption := 'Credits:';
   lblCreditsHeader.Font.Style := [fsBold];
   lblCreditsHeader.Font.Size := CreditsText.Font.Size + 1;
   lblCreditsHeader.Font.Color := CreditsText.Font.Color;
@@ -2639,7 +4318,7 @@ begin
   lblTermSuffix.Parent := WelcomePage.Surface;
   lblTermSuffix.Left := lblTermName.Left + lblTermName.Width + ScaleX(4);
   lblTermSuffix.Top := topPos;
-  lblTermSuffix.Caption := ' - (MIT License)';
+  lblTermSuffix.Caption := '(it''s fantastic!)';
   lblTermSuffix.Font.Color := CreditsText.Font.Color;
   lblTermSuffix.Transparent := True;
   lblTermSuffix.AutoSize := True;
@@ -2651,7 +4330,7 @@ begin
   lblBullet5.Parent := WelcomePage.Surface;
   lblBullet5.Left := CreditsText.Left;
   lblBullet5.Top := topPos;
-  lblBullet5.Caption := '• Special thanks to Bee Swarm Simulator communities: ';
+  lblBullet5.Caption := '• Special thanks to Bee Swarm Sim communities: ';
   lblBullet5.Font.Color := CreditsText.Font.Color;
   lblBullet5.Transparent := True;
   lblBullet5.AutoSize := True;
@@ -2690,7 +4369,6 @@ begin
   lblBSSName.AutoSize := True;
 
   topPos := topPos + ScaleY(18);
-  topPos := topPos + ScaleY(18);
 
   // Line 4: Assembled by cpdx4. Project Home:
   lblBullet4 := TLabel.Create(WelcomePage);
@@ -2717,7 +4395,7 @@ begin
 
   // Position the block near the bottom of the welcome page area
   topPos := topPos + ScaleY(24);
-  DesiredBottom := WelcomePage.SurfaceHeight - ScaleY(10);
+  DesiredBottom := WelcomePage.SurfaceHeight;
   BlockTop := DesiredBottom - (topPos - CreditsText.Top);
   if BlockTop < CreditsText.Top then
     BlockTop := CreditsText.Top;
@@ -2739,8 +4417,11 @@ begin
 
   // Initialize derived flags to reflect defaults so page skipping works immediately
   DoInstallTermWrap := chkInstallTermWrap.Checked;
-  DoManageUsers := chkManageUsers.Checked;
-  NeedCreateUsers := DoManageUsers and rbCreateUsers.Checked;
+  DoCreateRdpShortcuts := chkCreateRdpShortcuts.Checked;
+  if DoCreateRdpShortcuts and rbCreateUsers.Checked then
+    CreateUserMode := createUserModeNew
+  else
+    CreateUserMode := createUserModeExisting;
   
   // Create User Page (after InstallTypePage)
   UserPage := CreateInputQueryPage(
@@ -2751,7 +4432,26 @@ begin
   );
   UserPage.Add('Username:', False);
   UserPage.Add('Password:', True);  // masked input
-  
+  // Move Username and Password controls up slightly to improve layout
+  try
+    // Shift the edit controls and their labels (username/password)
+    UserPage.Edits[0].Top := UserPage.Edits[0].Top - ScaleY(10);
+    UserPage.Edits[1].Top := UserPage.Edits[1].Top - ScaleY(20);
+    UserPage.PromptLabels[0].Top := UserPage.PromptLabels[0].Top - ScaleY(10);
+    UserPage.PromptLabels[1].Top := UserPage.PromptLabels[1].Top - ScaleY(20);
+  except
+  end;
+
+  // Shortcut Settings page — reachable from Create Users, Existing Users, and Edit Shortcuts.
+  // Anchored to UserPage.ID so it physically follows UserPage (and therefore ExistingUsers/
+  // EditShortcuts, which are all before UserPage in traversal order).
+  Page_ShortcutSettings := CreateCustomPage(
+    UserPage.ID,
+    'Shortcut Settings',
+    'Configure the settings for your RDP desktop shortcuts.'
+  );
+  BuildShortcutSettingsBlock(Page_ShortcutSettings.Surface, ScaleY(10));
+
   // Create Edit System-wide Settings page as a custom page.
   // Using a custom page avoids InputOptionPage's built-in checklist control,
   // which can obscure non-windowed labels in some wizard themes.
@@ -2847,24 +4547,24 @@ begin
     lblWinRDPVer.Transparent := True;
     topPos := topPos + ScaleY(18);
 
-    // TermWrap Version (name / value)
-    lblTermWrapVerName := TLabel.Create(EditSystemwideSettingsPage);
-    lblTermWrapVerName.Parent := EditSystemwideSettingsPage.Surface;
-    lblTermWrapVerName.Left := childLeft;
-    lblTermWrapVerName.Top := topPos;
-    lblTermWrapVerName.Caption := 'TermWrap version:';
-    lblTermWrapVerName.ParentFont := False;
-    lblTermWrapVerName.Font.Color := LabelColor;
-    lblTermWrapVerName.Transparent := True;
+    // Wrapper File and Version (name / value)
+    lblWrapperVerName := TLabel.Create(EditSystemwideSettingsPage);
+    lblWrapperVerName.Parent := EditSystemwideSettingsPage.Surface;
+    lblWrapperVerName.Left := childLeft;
+    lblWrapperVerName.Top := topPos;
+    lblWrapperVerName.Caption := 'Wrapper file info:';
+    lblWrapperVerName.ParentFont := False;
+    lblWrapperVerName.Font.Color := LabelColor;
+    lblWrapperVerName.Transparent := True;
 
-    lblTermWrapVer := TLabel.Create(EditSystemwideSettingsPage);
-    lblTermWrapVer.Parent := EditSystemwideSettingsPage.Surface;
-    lblTermWrapVer.Left := valueLeft;
-    lblTermWrapVer.Top := topPos;
-    lblTermWrapVer.Caption := 'x.x.x.x';
-    lblTermWrapVer.ParentFont := False;
-    lblTermWrapVer.Font.Color := LabelColor;
-    lblTermWrapVer.Transparent := True;
+    lblWrapperVer := TLabel.Create(EditSystemwideSettingsPage);
+    lblWrapperVer.Parent := EditSystemwideSettingsPage.Surface;
+    lblWrapperVer.Left := valueLeft;
+    lblWrapperVer.Top := topPos;
+    lblWrapperVer.Caption := 'x.x.x.x';
+    lblWrapperVer.ParentFont := False;
+    lblWrapperVer.Font.Color := LabelColor;
+    lblWrapperVer.Transparent := True;
     topPos := topPos + ScaleY(26);
 
     // General Settings
@@ -2989,15 +4689,17 @@ begin
     else
       lblWinRDPVer.Caption := TermsrvVer;
 
-    // TermWrap version (installed app path)
+    // Determines which wrapper method is installed (if any)
+    // Options: (1) TermWrap (2) RDPWrap (3) None
+    // Detects the version of each wrapper if possible or "Unknown" if detection fails
     TermWrapVer := 'Not installed';
     ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
     if FileExists(ServiceDllPath) then
       TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
     if TermWrapVer = '' then
-      lblTermWrapVer.Caption := 'Unknown'
+      lblWrapperVer.Caption := 'Unknown'
     else
-      lblTermWrapVer.Caption := TermWrapVer;
+      lblWrapperVer.Caption := TermWrapVer;
 
 
     // Enable Remote Desktop (fDenyTSConnections = 0 means enabled)
@@ -3035,11 +4737,10 @@ begin
 
   EditShortcutPage := CreateCustomPage(
     Page_InstallOptions.ID,
-    'Edit Shortcut Settings',
+    'Edit existing shortcut settings',
     'Select one Desktop .rdp shortcut to edit.'
   );
   
-  // Note: only the Create Shortcuts page is used; legacy AdvancedPage removed
   
   // Initialize lists for tracking
   LocalUsersList := TStringList.Create;  // Will be populated when Create Shortcuts page is shown
@@ -3055,34 +4756,33 @@ begin
   EditShortcutControlsBuilt := False;
   ShortcutsList := TStringList.Create;
   
+
   // Add label for options section
   OptionsLabel := TLabel.Create(UserPage);
   OptionsLabel.Parent := UserPage.Surface;
-  OptionsLabel.Left := ScaleX(10);
-  OptionsLabel.Top := ScaleY(200);
+  OptionsLabel.Left := ScaleX(260);
+  OptionsLabel.Top := ScaleY(246);
   OptionsLabel.Caption := 'What would you like to do next?';
   OptionsLabel.Font.Style := [fsBold];
-  
+
   // Add "Create more users" radio button
   AddMoreRadio := TRadioButton.Create(UserPage);
-  AddMoreRadio.Parent := UserPage.Surface; 
-  AddMoreRadio.Left := ScaleX(20);
-  AddMoreRadio.Top := OptionsLabel.Top + ScaleY(25);
+  AddMoreRadio.Parent := UserPage.Surface;
+  AddMoreRadio.Left := ScaleX(270);
+  AddMoreRadio.Top := OptionsLabel.Top + ScaleY(20);
   AddMoreRadio.Width := ScaleX(400);
   AddMoreRadio.Caption := 'I want to create another user';
   AddMoreRadio.Checked := False;
-  
+
   // Add "Done creating users" radio button
   DoneRadio := TRadioButton.Create(UserPage);
   DoneRadio.Parent := UserPage.Surface;
-  DoneRadio.Left := ScaleX(20);
-  DoneRadio.Top := AddMoreRadio.Top + ScaleY(25);
+  DoneRadio.Left := ScaleX(270);
+  DoneRadio.Top := AddMoreRadio.Top + ScaleY(22);
   DoneRadio.Width := ScaleX(400);
   DoneRadio.Caption := 'I''m done creating users, continue setup';
   DoneRadio.Checked := True;  // Default selection
-
-  // (Removed subtle opt-out checkbox; users can unselect options on the main dialog)
-  
+   
   // Initialize UsersList
   UsersList := TStringList.Create;
   CreatedUsersList := TStringList.Create;
@@ -3166,7 +4866,7 @@ begin
   FinishedExampleImage := TBitmapImage.Create(WizardForm.FinishedLabel.Parent);
   FinishedExampleImage.Parent := WizardForm.FinishedLabel.Parent;
   FinishedExampleImage.Left := WizardForm.FinishedLabel.Left;
-  FinishedExampleImage.Top := FinishedText.Top + ScaleY(110);
+  FinishedExampleImage.Top := FinishedText.Top + ScaleY(70);
   FinishedExampleImage.Width := ScaleX(210);
   FinishedExampleImage.Height := ScaleY(220);
   FinishedExampleImage.Stretch := False;
@@ -3190,36 +4890,49 @@ var
   i: Integer;
   SelectedCount: Integer;
   HasErrors: Boolean;
+  RdpPortValue: Integer;
+  PortError: string;
 begin
   Result := True;
+
+  if CurPageID = wpFinished then
+  begin
+    CleanupPendingDebugFiles;
+    Result := True;
+    exit;
+  end;
   
   if CurPageID = Page_InstallOptions.ID then
   begin
-    // Derive install type and flags from new welcome/options controls
-    // Default flags
+    // Derive install mode and flags from the options page controls
     DoInstallTermWrap := False;
-    DoManageUsers := False;
-    NeedCreateUsers := False;
+    DoCreateRdpShortcuts := False;
+    CreateUserMode := createUserModeNew;
     DoEditSystemWideSettings := False;
 
     if rbUninstall.Checked then
     begin
-      SelectedInstallMode := itUninstall; // Uninstall Everything
+      SelectedInstallMode := installModeUninstall;
     end
     else if (Assigned(rbEditSystemwideSettings) and rbEditSystemwideSettings.Checked) then
     begin
-      SelectedInstallMode := itEditSystemwideSettings; // Edit system-wide settings
-      DoEditSystemWideSettings := rbEditSystemwideSettings.Checked;
-      // Ensure Edit System-wide Settings does not auto-select Create Shortcuts
+      SelectedInstallMode := installModeEditSystemwideSettings;
+      DoEditSystemWideSettings := True;
     end
     else if rbEditShortcutSettings.Checked then
     begin
-      // Top-level Edit Shortcut flow
-      SelectedInstallMode := itEditShortcuts; // Edit Shortcut Settings
-      NeedCreateUsers := False;
+      SelectedInstallMode := installModeEditShortcuts;
       if Assigned(DesktopRdpFiles) then
         DesktopRdpFiles.Free;
       DesktopRdpFiles := GetDesktopRdpFiles;
+      // Hide old controls before clearing references
+      if Assigned(ShortcutHeaderLabel) then ShortcutHeaderLabel.Visible := False;
+      if Assigned(ShortcutEmptyLabel)  then ShortcutEmptyLabel.Visible  := False;
+      if Assigned(ShortcutPrevButton)  then ShortcutPrevButton.Visible  := False;
+      if Assigned(ShortcutNextButton)  then ShortcutNextButton.Visible  := False;
+      if Assigned(ShortcutPageLabel)   then ShortcutPageLabel.Visible   := False;
+      for i := 0 to Length(ShortcutRadioButtons) - 1 do
+        if Assigned(ShortcutRadioButtons[i]) then ShortcutRadioButtons[i].Visible := False;
       EditShortcutControlsBuilt := False;
       SetLength(ShortcutRadioButtons, 0);
       SelectedShortcutIndex := -1;
@@ -3227,65 +4940,37 @@ begin
       Result := True;
       exit;
     end
-    else // Typical selected
+    else // Install selected
     begin
-      DoInstallTermWrap := chkInstallTermWrap.Checked;
-      DoManageUsers := chkManageUsers.Checked;
+      SelectedInstallMode := installModeInstall;
+      DoInstallTermWrap    := chkInstallTermWrap.Checked;
+      DoCreateRdpShortcuts := chkCreateRdpShortcuts.Checked;
 
-      if DoManageUsers and rbCreateUsers.Checked then
+      if DoCreateRdpShortcuts then
       begin
-        NeedCreateUsers := True;
-      end
-      else
-        NeedCreateUsers := False;
+        if rbCreateUsers.Checked then
+          CreateUserMode := createUserModeNew
+        else
+          CreateUserMode := createUserModeExisting;
+      end;
 
-      // Require at least one action under Typical
-      if (not DoInstallTermWrap) and (not DoManageUsers) then
+      // Require at least one action under Install
+      if (not DoInstallTermWrap) and (not DoCreateRdpShortcuts) then
       begin
-        MsgBox('Please select at least one option under Typical Setup', mbError, MB_OK);
+        MsgBox('Please select at least one option under Install', mbError, MB_OK);
         Result := False;
         exit;
       end;
 
-      // Map to existing InstallType semantics for downstream logic
-      if DoInstallTermWrap then
+      // Pre-populate the existing-users page when taking that path
+      if DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting) then
       begin
-        // If we're installing wrapper, treat as Full Install (0)
-        SelectedInstallMode := itInstallTermWrap;
-      end
-      else if DoManageUsers and rbCreateUsers.Checked then
-      begin
-        // Create users only (no files)
-        SelectedInstallMode := itCreateNewUsers;
-      end
-      else if DoManageUsers and rbUseExistingUsers.Checked then
-      begin
-        // Use existing users: if not installing TermWrap, run create-shortcuts-for-existing-users flow
-        if not DoInstallTermWrap then
-          SelectedInstallMode := itCreateShortcutsForExistingUsers
-        else
-          SelectedInstallMode := itInstallTermWrap; // will install then create shortcuts
-      end
-      else
-      begin
-        // Fallback to Install TermWrap
-        SelectedInstallMode := itInstallTermWrap;
-      end;
-    // Track whether the user asked specifically to edit system-wide settings
-    if Assigned(rbEditSystemwideSettings) then
-      DoEditSystemWideSettings := rbEditSystemwideSettings.Checked
-    else
-      DoEditSystemWideSettings := False;
-      // If user chose Use existing users from Typical, jump directly to Create Shortcuts page
-      if DoManageUsers and rbUseExistingUsers.Checked then
-      begin
-        // Prepare Create Shortcuts page controls so the next page shows selections
         LocalUsersList := GetLocalUsers;
         SetLength(UserCheckBoxes, LocalUsersList.Count);
         SetLength(UserPasswordEdits, LocalUsersList.Count);
         SetLength(UserPasswordStatus, LocalUsersList.Count);
         BuildCreateShortcutsControls;
-      end
+      end;
     end;
   end
   else if CurPageID = EditShortcutPage.ID then
@@ -3309,10 +4994,27 @@ begin
     // all external launches inside the install flow.
     SelectedShortcutPath := DesktopRdpFiles[SelectedShortcutIndex];
   end
+  else if CurPageID = Page_ShortcutSettings.ID then
+  begin
+    if SelectedInstallMode = installModeEditShortcuts then
+    begin
+      // Remember whether the user wants to open the advanced mstsc editor
+      DoShowMstscEdit := Assigned(chkShowMoreShortcutOptions) and chkShowMoreShortcutOptions.Checked;
+      // Apply the simple settings from this page to the selected .rdp file now,
+      // before the installing step (mstsc /edit can then further edit it)
+      if SelectedShortcutPath <> '' then
+        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+    end;
+  end
   else if CurPageID = EditSystemwideSettingsPage.ID then
   begin
-    // Edit System-wide Settings: do not automatically jump to Create Shortcuts.
-    // Preserve DoEditSystemWideSettings state and let the user navigate explicitly.
+    if not ValidateRdpPortInput(edtRdpPort.Text, RdpPortValue, PortError) then
+    begin
+      MsgBox(PortError, mbError, MB_OK);
+      Result := False;
+      exit;
+    end;
+    edtRdpPort.Text := IntToStr(RdpPortValue);
   end
   else if CurPageID = Page_CreateShortcutsForExistingUsers.ID then
   begin
@@ -3389,7 +5091,7 @@ begin
   else if CurPageID = UserPage.ID then
   begin
     // Skip user page for uninstall and system-edit types
-    if (SelectedInstallMode = itEditSystemwideSettings) or (SelectedInstallMode = itEditShortcuts) or (SelectedInstallMode = itUninstall) then
+    if SelectedInstallMode <> installModeInstall then
     begin
       Result := True;
       exit;
@@ -3459,8 +5161,7 @@ begin
         exit;
       end;
 
-      // For both Full Install and Add Users Only, proceed to install phase
-      // (file copying will be skipped for Add Users Only via the Check parameter)
+      // Proceed to install phase; file copying is gated by ShouldInstallFiles (DoInstallTermWrap flag)
       Result := True;
       exit;
     end;
@@ -3565,6 +5266,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   VCRedistPath: string;
+  MstscPath: string;
   i: Integer;
   UserInfo: string;
   UserName: string;
@@ -3572,12 +5274,17 @@ var
 begin
   if CurStep = ssInstall then
   begin
+    LogSectionHeader('STEP TRANSITION: ssInstall');
+    LogKeyValue('SelectedInstallMode', IntToStr(SelectedInstallMode));
+    LogKeyValue('DoInstallTermWrap', BoolToStr(DoInstallTermWrap));
+    LogKeyValue('DoCreateRdpShortcuts', BoolToStr(DoCreateRdpShortcuts));
+    LogKeyValue('CreateUserMode', IntToStr(CreateUserMode));
     // Hide cancel button during installation to prevent confusion
     WizardForm.CancelButton.Visible := False;
     
     // Initialize and show relevant steps (pending state) with contiguous layout
     BeginStepLayout;
-    if SelectedInstallMode = itUninstall then
+    if SelectedInstallMode = installModeUninstall then
     begin
       StepsHeaderLabel.Caption := 'Uninstall Steps:';
       AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
@@ -3585,7 +5292,7 @@ begin
       AddStepPendingLabel(StepRemoveFolder, TXT_RemoveFolder);
       AddStepPendingLabel(StepStartSvc, TXT_RestartSvc);
     end
-    else if (SelectedInstallMode = itEditSystemwideSettings) and DoEditSystemWideSettings then
+    else if (SelectedInstallMode = installModeEditSystemwideSettings) and DoEditSystemWideSettings then
     begin
       StepsHeaderLabel.Caption := 'System changes:';
       if Assigned(chkEnableRDP) and (chkEnableRDP.Checked <> OrigEnableRDP) then
@@ -3599,50 +5306,49 @@ begin
       if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
         AddStepPendingLabel(StepRestartRDP, 'Restart Remote Desktop Services');
     end
-    else if SelectedInstallMode = itEditSystemwideSettings then
+    else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
       StepsHeaderLabel.Caption := 'Create Shortcuts:';
       AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
     end
-    else if SelectedInstallMode = itInstallTermWrap then
+    else if SelectedInstallMode = installModeInstall then
     begin
       StepsHeaderLabel.Caption := 'Install Steps:';
-      AddStepPendingLabel(StepCheckMSTSC, TXT_CheckMSTSC);
-      AddStepPendingLabel(StepInstallMSTSC, TXT_InstallMSTSC);
-      AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
-      AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
-      AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
-      AddStepPendingLabel(StepInstallTermWrap, TXT_InstallTermWrap);
-      AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
-      if UsersList.Count > 0 then
+      if DoInstallTermWrap then
+      begin
+        AddStepPendingLabel(StepCheckMSTSC, TXT_CheckMSTSC);
+        AddStepPendingLabel(StepInstallMSTSC, TXT_InstallMSTSC);
+        AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
+        AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
+        AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
+        AddStepPendingLabel(StepInstallTermWrap, TXT_InstallTermWrap);
+        AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
+      end;
+      if DoCreateRdpShortcuts and (CreateUserMode = createUserModeNew) and (UsersList.Count > 0) then
         AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
-      if ShortcutsList.Count > 0 then
+      if DoCreateRdpShortcuts and (ShortcutsList.Count > 0) then
         AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
-      AddStepPendingLabel(StepStartSvc, TXT_StartSvc);
-      AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
-      AddStepPendingLabel(StepCheckRDP, TXT_CheckRDP);
+      if DoInstallTermWrap then
+      begin
+        AddStepPendingLabel(StepStartSvc, TXT_StartSvc);
+        AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
+        AddStepPendingLabel(StepCheckRDP, TXT_CheckRDP);
+      end
+      else
+        AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
     end
-    else if SelectedInstallMode = itCreateNewUsers then
-    begin
-      StepsHeaderLabel.Caption := 'Install Steps:';
-      if UsersList.Count > 0 then
-        AddStepPendingLabel(StepCreateUsers, TXT_CreateUsers);
-      if ShortcutsList.Count > 0 then
-        AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
-      AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
-    end
-    else // SelectedInstallMode = itEditShortcuts (Edit Shortcut Settings)
+    else // SelectedInstallMode = installModeEditShortcuts (Edit Shortcut Settings)
     begin
       StepsHeaderLabel.Caption := 'Shortcut Settings:';
       AddStepPendingLabel(StepCreateShortcuts, 'Open selected .rdp in editor');
     end;
 
-    if SelectedInstallMode = itInstallTermWrap then
+    if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
       CheckAndInstallMSTSC;
 
     // Handle uninstall cleanup
-    if SelectedInstallMode = itUninstall then
+    if SelectedInstallMode = installModeUninstall then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing uninstallation...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
@@ -3675,20 +5381,20 @@ begin
       StartTermService;
       SetStepDone(StepStartSvc, TXT_RestartSvc);
     end
-    // Skip installation for Create Shortcuts mode (handled in ssPostInstall)
-    else if SelectedInstallMode = itEditSystemwideSettings then
+    // Edit System-wide settings: deferred to ssPostInstall
+    else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing Create Shortcuts...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
     end
-    else if SelectedInstallMode = itEditShortcuts then
+    else if SelectedInstallMode = installModeEditShortcuts then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing shortcut editor completion...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
       SetStepDone(StepCreateShortcuts, 'Open selected .rdp in editor');
     end
-    // Only stop TermService for Install TermWrap (not for Add Users Only)
-    else if SelectedInstallMode = itInstallTermWrap then
+    // Only stop TermService when installing TermWrap
+    else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing installation...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
@@ -3709,13 +5415,14 @@ begin
   
   if CurStep = ssPostInstall then
   begin
+    LogSectionHeader('STEP TRANSITION: ssPostInstall');
     // Handle uninstall completion
-    if SelectedInstallMode = itUninstall then
+    if SelectedInstallMode = installModeUninstall then
     begin
       WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap has been removed.';
     end
     // Edit System-wide settings flow (apply queued registry/service changes)
-    else if (SelectedInstallMode = itEditSystemwideSettings) and DoEditSystemWideSettings then
+    else if (SelectedInstallMode = installModeEditSystemwideSettings) and DoEditSystemWideSettings then
     begin
       // Apply changes in logical order
       // Enable/Disable Remote Desktop
@@ -3803,8 +5510,8 @@ begin
 
       WizardForm.StatusLabel.Caption := 'System changes applied.';
     end
-    // Create Shortcuts mode: tools and utilities
-    else if SelectedInstallMode = itEditSystemwideSettings then
+    // Edit System-wide settings fallback (no changes queued): create shortcuts for existing users
+    else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
       SetStepInProgress(StepCreateShortcuts, TXT_CreateShortcuts);
       WizardForm.StatusLabel.Caption := 'Creating RDP shortcuts...';
@@ -3818,40 +5525,52 @@ begin
       ClearPasswordsFromMemory;
       WizardForm.StatusLabel.Caption := 'Create Shortcuts executed.';
     end
-    else if SelectedInstallMode = itEditShortcuts then
+    else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      // Launch the selected .rdp in the Remote Desktop editor as part of
-      // the Installing step so external processes are started from the
-      // same controlled sequence.
+      // Apply settings to the .rdp file and optionally open mstsc /edit
       SetStepInProgress(StepCreateShortcuts, 'Open selected .rdp in editor');
-      WizardForm.StatusLabel.Caption := 'Opening selected .rdp in editor...';
-      if SelectedShortcutPath = '' then
+      if DoShowMstscEdit then
       begin
-        WriteInstallerLog('Edit Shortcut: no SelectedShortcutPath set');
+        WizardForm.StatusLabel.Caption := 'Opening selected .rdp in editor...';
+        if SelectedShortcutPath = '' then
+        begin
+          WriteInstallerLog('Edit Shortcut: no SelectedShortcutPath set');
+        end
+        else
+        begin
+          // Try to launch mstsc to edit the selected shortcut
+          MstscPath := GetMstscPath;
+          if (MstscPath = '') or (not Exec(MstscPath, '/edit "' + SelectedShortcutPath + '"', '', SW_SHOW, ewNoWait, ResultCode)) then
+          begin
+            MsgBox('Failed to launch Remote Desktop editor. Verify mstsc is available and try again.', mbError, MB_OK);
+            WriteInstallerLog('Edit Shortcut: Exec(mstsc) failed exit=' + IntToStr(ResultCode));
+          end;
+        end;
       end
       else
       begin
-        // Try to launch mstsc to edit the selected shortcut
-        if not Exec(FILE_MSTSC, '/edit "' + SelectedShortcutPath + '"', '', SW_SHOW, ewNoWait, ResultCode) then
-        begin
-          MsgBox('Failed to launch Remote Desktop editor. Verify mstsc is available and try again.', mbError, MB_OK);
-          WriteInstallerLog('Edit Shortcut: Exec(mstsc) failed exit=' + IntToStr(ResultCode));
-        end;
+        WizardForm.StatusLabel.Caption := 'Shortcut settings applied.';
+        WriteInstallerLog('Edit Shortcut: mstsc editor skipped by user choice');
       end;
       SetStepDone(StepCreateShortcuts, 'Open selected .rdp in editor');
     end
     // Install TermWrap: Download VC++, apply registry, start service
-    else if SelectedInstallMode = itInstallTermWrap then
+    else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       SetStepInProgress(StepEnsureVC, TXT_EnsureVC);
       // Check if VC++ Redistributable is already installed (unless debug mode)
       if DebugMode or (not IsVCRedistInstalled) then
       begin
+        LogSectionHeader('VC++ REDIST CHECK/INSTALL');
+        LogKeyValue('DebugMode', BoolToStr(DebugMode));
+        LogKeyValue('SimulateNoVCRedist', BoolToStr(SimulateNoVCRedist));
+        LogKeyValue('Download URL', URL_VCREDIST_X64);
         WizardForm.StatusLabel.Caption := 'Downloading VC++ Redistributable from Microsoft...';
         WizardForm.ProgressGauge.Style := npbstMarquee;
         
         // Download VC++ Redistributable from Microsoft
         VCRedistPath := TempFile('vc_redist.x64.exe');
+        LogKeyValue('Installer temp path', VCRedistPath);
         
         // Start download process
            Exec(EXE_POWERSHELL, BuildPowerShellArgs(
@@ -3865,16 +5584,32 @@ begin
              '} catch { ' +
              '  exit 1; ' +
              '}', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        LogKeyValue('Download exit code', IntToStr(ResultCode));
+        LogKeyValue('Installer file exists after download', BoolToStr(FileExists(VCRedistPath)));
         
         WizardForm.StatusLabel.Caption := 'Installing VC++ Redistributable (this may take a minute)...';
         WizardForm.Update;
         
-        // Install VC++ Redist silently
-        if FileExists(VCRedistPath) then
+        // Validate publisher before running downloaded installer
+        if FileExists(VCRedistPath) and IsSignedByMicrosoftCorporation(VCRedistPath) then
+        begin
           Exec(VCRedistPath, '/install /quiet /norestart', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+          LogKeyValue('Installer execution exit code', IntToStr(ResultCode));
+          if ResultCode <> 0 then
+            PromptManualDownload('VC++ Redistributable (2015-2022 x64)', URL_VCREDIST_X64, 'Installer execution failed (exit code ' + IntToStr(ResultCode) + ')');
+        end
+        else
+        begin
+          Log('ERROR: VC++ download/signature validation failed.');
+          PromptManualDownload('VC++ Redistributable (2015-2022 x64)', URL_VCREDIST_X64, 'Download or signature validation failed (exit code ' + IntToStr(ResultCode) + ')');
+        end;
+        if FileExists(VCRedistPath) then
+          DeleteFile(VCRedistPath);
       end
       else
       begin
+        LogSectionHeader('VC++ REDIST CHECK/INSTALL');
+        Log('VC++ Redistributable detected. Skipping download/install.');
         WizardForm.StatusLabel.Caption := 'VC++ Redistributable already installed, skipping...';
       end;
       // VC++ ensured (installed or skipped)
@@ -3890,20 +5625,45 @@ begin
       SetStepInProgress(StepConfigureService, TXT_ConfigureService);
       WizardForm.StatusLabel.Caption := 'Configuring TermWrap service...';
       
-      // Set ServiceDll registry value directly in code
-      RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', AppBin(FILE_TERMWRAP));
-      
-      // Allow multiple concurrent sessions per user (0 = allow multiple, 1 = single session only)
-      RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 0);
-      
+      // Set ServiceDll to TermWrap
+      LogSectionHeader('REGISTRY: TermWrap service configuration');
+      if RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', AppBin(FILE_TERMWRAP)) then
+        WriteInstallerLog('Registry: Set TermService ServiceDll=' + AppBin(FILE_TERMWRAP))
+      else
+        WriteInstallerLog('Registry: FAILED to set TermService ServiceDll');
+
+      // Enable RDP connections
+      if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0) then
+        WriteInstallerLog('Registry: Set fDenyTSConnections=0 (RDP enabled)')
+      else
+        WriteInstallerLog('Registry: FAILED to set fDenyTSConnections');
+
+      // Require single session per user (prevents multiple concurrent RDP sessions for same account)
+      if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1) then
+        WriteInstallerLog('Registry: Set fSingleSessionPerUser=1 (single session per user)')
+      else
+        WriteInstallerLog('Registry: FAILED to set fSingleSessionPerUser');
+
+      // Allow RDP client to remain connected when minimized
+      if RegWriteDWordValue(HKLM, 'Software\Microsoft\Terminal Server Client', 'RemoteDesktop_SuppressWhenMinimized', 2) then
+        WriteInstallerLog('Registry: Set RemoteDesktop_SuppressWhenMinimized=2 (allow minimized RDP)')
+      else
+        WriteInstallerLog('Registry: FAILED to set RemoteDesktop_SuppressWhenMinimized');
+
+      // Ensure TermService runs under the expected service account.
+      EnsureTermServiceRunsAsNetworkService;
+
+      // Ensure UmRdpService is set to automatic startup
+      EnsureUmRdpServiceAutomatic;
+
       // Don't start the service yet - wait until all users are created
       SetStepDone(StepConfigureService, TXT_ConfigureService);
     end;
     
     // Create all user accounts and RDP files (skip for uninstall and Create Shortcuts)
-    if (SelectedInstallMode <> itEditShortcuts) and (SelectedInstallMode <> itEditSystemwideSettings) then
+    if SelectedInstallMode = installModeInstall then
     begin
-      // No Defender exclusion required for Create Users only (InstallType = 1)
+      // Create user accounts and RDP shortcuts
       
       if UsersList.Count > 0 then
       begin
@@ -3941,8 +5701,8 @@ begin
       end;
     end;
     
-    // Start TermService first (only for Full Install) - this creates the SSL certificate
-    if SelectedInstallMode = itInstallTermWrap then
+    // Start TermService (only when TermWrap was installed) - this creates the SSL certificate
+    if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       SetStepInProgress(StepStartSvc, TXT_StartSvc);
       WizardForm.StatusLabel.Caption := 'Starting Remote Desktop Services...';
@@ -3961,8 +5721,8 @@ begin
       end;
     end;
     
-    // Pre-trust for current user in Full Install and Add Users Only (AFTER service starts)
-    if (SelectedInstallMode = itInstallTermWrap) or (SelectedInstallMode = itCreateNewUsers) then
+    // Pre-trust for current user in all Install sub-flows (AFTER service starts if applicable)
+    if SelectedInstallMode = installModeInstall then
     begin
       SetStepInProgress(StepPreTrust, TXT_PreTrust);
       WizardForm.StatusLabel.Caption := 'Pre-trusting Remote Desktop certificate...';
@@ -3971,8 +5731,8 @@ begin
       SetStepDone(StepPreTrust, TXT_PreTrust);
     end;
 
-    // Verify RDP is listening (only for Full Install)
-    if SelectedInstallMode = itInstallTermWrap then
+    // Verify RDP is listening (only when TermWrap was installed)
+    if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       SetStepInProgress(StepCheckRDP, TXT_CheckRDP);
       WizardForm.StatusLabel.Caption := 'Verifying RDP service...';
@@ -4015,7 +5775,29 @@ var
   Entry: string;
   UserName: string;
   Password: string;
+  NowTick: Cardinal;
+  IsDuplicatePageEvent: Boolean;
+  DeltaMs: Cardinal;
 begin
+  NowTick := GetTickCount;
+  IsDuplicatePageEvent := (CurPageID = LastLoggedPageId) and ((NowTick - LastLoggedPageTick) <= PAGE_LOG_DEDUPE_MS);
+
+  if IsDuplicatePageEvent then
+  begin
+    Inc(LastSuppressedPageLogs);
+    DeltaMs := (NowTick - LastLoggedPageTick);
+    WriteInstallerLog('PAGE REFRESH (deduped): ' + GetPageNameById(CurPageID) +
+      ' | delta=' + IntToStr(DeltaMs) + 'ms | repeat=' + IntToStr(LastSuppressedPageLogs));
+  end
+  else
+  begin
+    LastSuppressedPageLogs := 0;
+    LogSectionHeader('PAGE SHOWN');
+    LogPageContext(CurPageID);
+    LastLoggedPageId := CurPageID;
+    LastLoggedPageTick := NowTick;
+  end;
+
   // Show the Save Install Log button only on the Finished page
   if Assigned(ViewLogButton) then
     ViewLogButton.Visible := (CurPageID = wpFinished);
@@ -4030,7 +5812,60 @@ begin
     if not EditShortcutControlsBuilt then
       BuildShortcutEditorControls
     else
+    begin
+      CurrentShortcutPage := 0;
       UpdateShortcutPageDisplay;
+    end;
+  end;
+
+  // Configure shortcut settings page based on which flow is entering it
+  if CurPageID = Page_ShortcutSettings.ID then
+  begin
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
+    WizardForm.ActiveControl := WizardForm.NextButton;  // prevent cboResolution from receiving initial focus
+
+    if SelectedInstallMode = installModeEditShortcuts then
+    begin
+      // EditShortcuts path: hide multi-note and tips, show "more options" checkbox
+      if Assigned(lblMultiShortcutEditingNote) then lblMultiShortcutEditingNote.Visible := False;
+      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
+      if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := True;
+      // Pre-populate controls with the current settings from the selected .rdp file
+      if SelectedShortcutPath <> '' then
+        ReadShortcutSettingsFromRdpFile(SelectedShortcutPath);
+    end
+    else if (SelectedInstallMode = installModeInstall) and (CreateUserMode = createUserModeNew) then
+    begin
+      // CreateUsers path: show tips, show multi-note only when 2+ users queued
+      if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
+      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := True;
+      if Assigned(lblMultiShortcutEditingNote) then
+      begin
+        if UsersList.Count > 1 then
+        begin
+          lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
+          lblMultiShortcutEditingNote.Visible := True;
+        end
+        else
+          lblMultiShortcutEditingNote.Visible := False;
+      end;
+    end
+    else
+    begin
+      // ExistingUsers path: hide tips, show multi-note only when 2+ shortcuts selected
+      if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
+      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
+      if Assigned(lblMultiShortcutEditingNote) then
+      begin
+        if ShortcutsList.Count > 1 then
+        begin
+          lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
+          lblMultiShortcutEditingNote.Visible := True;
+        end
+        else
+          lblMultiShortcutEditingNote.Visible := False;
+      end;
+    end;
   end;
 
   // Lazy-load user list only when Create Shortcuts page is first shown
@@ -4072,42 +5907,53 @@ begin
     if Assigned(FinishedExampleLabel) then FinishedExampleLabel.Visible := False;
 
     WriteInstallerLog('CurPageChanged: Finish page shown');
-    if SelectedInstallMode = itUninstall then
+    if SelectedInstallMode = installModeUninstall then
     begin
       // Uninstall completion message
       WizardForm.FinishedHeadingLabel.Caption := 'Uninstallation Complete';
       CompletionText := 'TermWrap has been successfully removed.';
       WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
     end
-    else if SelectedInstallMode = itEditShortcuts then
+    else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Editor Complete';
-      CompletionText :=
-        'The shortcut was opened in the Remote Desktop Connection app. Make your changes there.' + #13#10#13#10 +
-        'Important: Always click [Save] on the General tab.';
-      WriteInstallerLog('CurPageChanged: Showing shortcut editor completion message');
-
-      if Assigned(FinishedExampleImage) and Assigned(FinishedExampleLabel) then
+      if DoShowMstscEdit then
       begin
-        FinishedExampleImage.Top := FinishedText.Top + ScaleY(100);
-        FinishedExampleImage.Width := ScaleX(210);
-        FinishedExampleImage.Height := ScaleY(220);
-        FinishedExampleImage.Stretch := False;
-        // Load the rdp_edit_save.bmp image from temp
-        try
-          ExtractTemporaryFile(FILE_RDPEDITSAVE_BMP);
-          FinishedExampleImage.Bitmap.LoadFromFile(ExpandConstant(TEMP_RDPEDITSAVE_BMP));
-        except
-          // If image fails to load, hide the control
-          FinishedExampleImage.Visible := False;
+        WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Editor Complete';
+        CompletionText :=
+          'The shortcut was opened in the Remote Desktop Connection app. Make your changes there.' + #13#10#13#10 +
+          'Important: Always click [Save] on the General tab.';
+        WriteInstallerLog('CurPageChanged: Showing shortcut editor completion message');
+
+        if Assigned(FinishedExampleImage) and Assigned(FinishedExampleLabel) then
+        begin
+          FinishedExampleImage.Top := FinishedText.Top + ScaleY(40);
+          FinishedExampleImage.Width := ScaleX(210);
+          FinishedExampleImage.Height := ScaleY(220);
+          FinishedExampleImage.Stretch := False;
+          // Load the rdp_edit_save.bmp image from temp
+          try
+            ExtractTemporaryFile(FILE_RDPEDITSAVE_BMP);
+            FinishedExampleImage.Bitmap.LoadFromFile(ExpandConstant(TEMP_RDPEDITSAVE_BMP));
+          except
+            // If image fails to load, hide the control
+            FinishedExampleImage.Visible := False;
+          end;
+          FinishedExampleImage.Visible := True;
+          FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
+          FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
+          FinishedExampleLabel.AutoSize := False;
+          FinishedExampleLabel.WordWrap := True;
+          FinishedExampleLabel.Caption := '';
+          FinishedExampleLabel.Visible := True;
         end;
-        FinishedExampleImage.Visible := True;
-        FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
-        FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
-        FinishedExampleLabel.AutoSize := False;
-        FinishedExampleLabel.WordWrap := True;
-        FinishedExampleLabel.Caption := '';
-        FinishedExampleLabel.Visible := True;
+      end
+      else
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Settings Updated';
+        CompletionText := 'Your shortcut settings have been saved to the .rdp file.';
+        WriteInstallerLog('CurPageChanged: Showing shortcut settings saved message (no mstsc edit)');
+        if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
+        if Assigned(FinishedExampleLabel) then FinishedExampleLabel.Visible := False;
       end;
     end
     else
@@ -4149,7 +5995,7 @@ begin
       // Fallback message when nothing relevant was done
       if (not DoInstallTermWrap) and (CreatedUsersList.Count = 0) and (ShortcutsList.Count = 0) then
       begin
-        if SelectedInstallMode = itEditSystemwideSettings then
+        if SelectedInstallMode = installModeEditSystemwideSettings then
         begin
           CompletionText := 'System-wide RDP settings were updated successfully.';
           WriteInstallerLog('CurPageChanged: System-wide settings updated');
@@ -4223,33 +6069,69 @@ procedure CheckAndInstallMSTSC;
 var
   ResultCode: Integer;
   MSTSCExists: Boolean;
+  MstscPath: string;
+  InstallerPath: string;
 begin
+  LogSectionHeader('MSTSC CHECK/INSTALL');
   // Check if mstsc.exe exists
   SetStepInProgress(StepCheckMSTSC, TXT_CheckMSTSC);
-  MSTSCExists := FileExists(FILE_MSTSC);
+  if SimulateNoMstsc then
+  begin
+    if not SimLogNoMstscShown then
+    begin
+      LogSimulationScenario('System doesnt have mstsc');
+      SimLogNoMstscShown := True;
+    end;
+    MstscPath := '';
+    MSTSCExists := False;
+  end
+  else
+  begin
+    MstscPath := GetMstscPath;
+    MSTSCExists := (MstscPath <> '');
+  end;
   if MSTSCExists then
   begin
     Log('DEBUG: mstsc.exe found.');
+    LogKeyValue('mstsc path', MstscPath);
     SetStepDone(StepCheckMSTSC, TXT_CheckMSTSC);
     SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC); // skipped
   end
   else
   begin
     Log('DEBUG: mstsc.exe missing. Initiating installation.');
+    LogKeyValue('Download URL', URL_RDP_INSTALLER);
     SetStepDone(StepCheckMSTSC, TXT_CheckMSTSC);
     SetStepInProgress(StepInstallMSTSC, TXT_InstallMSTSC);
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs('$out = Join-Path $env:TEMP ''mstsc_installer.exe''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing; Start-Process -FilePath $out -Wait', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    if ResultCode = 0 then
+    InstallerPath := TempFile('mstsc_installer.exe');
+    LogKeyValue('Installer temp path', InstallerPath);
+    Exec(EXE_POWERSHELL, BuildPowerShellArgs('$out = ''' + InstallerPath + '''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    LogKeyValue('Download exit code', IntToStr(ResultCode));
+    LogKeyValue('Installer file exists after download', BoolToStr(FileExists(InstallerPath)));
+    if (ResultCode = 0) and FileExists(InstallerPath) and IsSignedByMicrosoftCorporation(InstallerPath) then
     begin
-      Log('DEBUG: Remote Desktop Connection installed successfully.');
-      SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
+      Exec(InstallerPath, '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      LogKeyValue('Installer execution exit code', IntToStr(ResultCode));
+      if ResultCode = 0 then
+      begin
+        Log('DEBUG: Remote Desktop Connection installed successfully.');
+        SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
+      end
+      else
+      begin
+        Log('ERROR: mstsc installer execution failed. Exit code: ' + IntToStr(ResultCode));
+        PromptManualDownload('Remote Desktop Connection (mstsc)', URL_RDP_INSTALLER, 'Installer execution failed (exit code ' + IntToStr(ResultCode) + ')');
+        SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
+      end;
     end
     else
     begin
-      Log('ERROR: Failed to install Remote Desktop Connection. Exit code: ' + IntToStr(ResultCode));
-      MsgBox('Failed to install Remote Desktop Connection. Please install it manually.', mbError, MB_OK);
+      Log('ERROR: Failed to download or validate Remote Desktop Connection installer. Exit code: ' + IntToStr(ResultCode));
+      PromptManualDownload('Remote Desktop Connection (mstsc)', URL_RDP_INSTALLER, 'Download or signature validation failed (exit code ' + IntToStr(ResultCode) + ')');
       SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC); // mark as done even on failure?
       // Perhaps leave it pending or something, but for now, done.
     end;
+    if FileExists(InstallerPath) then
+      DeleteFile(InstallerPath);
   end;
 end;
