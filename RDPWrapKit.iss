@@ -91,6 +91,7 @@ procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
 procedure OnInstallModeChange(Sender: TObject); forward;
 procedure OnFullScreenClick(Sender: TObject); forward;
+procedure OnUseAllMonitorsClick(Sender: TObject); forward;
 procedure OnResolutionChange(Sender: TObject); forward;
 function IsTermWrapInstalled(): Boolean; forward;
 function BoolToStr(Value: Boolean): string; forward;
@@ -107,7 +108,8 @@ var
   // AdvancedPage removed - single create-shortcuts page retained
   EditSystemwideSettingsPage: TWizardPage;  // Main Edit System-wide settings page
   Page_CreateShortcutsForExistingUsers: TWizardPage;  // Create RDP desktop shortcuts
-  LocalUsersList: TStringList;
+  LocalUsersList: TStringList;        // login usernames
+  LocalUserDisplayList: TStringList;  // display labels (email if online account, else same as username)
   CreateShortcutsControlsBuilt: Boolean;
   UserCheckBoxes: array of TCheckBox;
   UserPasswordEdits: array of TEdit;
@@ -852,25 +854,57 @@ end;
 
 function ValidateGroupMembership(const GroupName, UserName: string): Boolean;
 var
-  PSScript: string;
-  PSParams: string;
+  OutPath: string;
   ResultCode: Integer;
+  Lines: TStringList;
+  i: Integer;
+  Line: string;
+  BackslashPos: Integer;
+  MemberName: string;
+  InList: Boolean;
 begin
-  PSScript :=
-    'param([string]$GroupName, [string]$UserName)' + #13#10 +
-    '$ErrorActionPreference = ''SilentlyContinue''' + #13#10 +
-    '$ok = $false' + #13#10 +
-    'try {' + #13#10 +
-    '  $members = Get-LocalGroupMember -Group $GroupName -ErrorAction Stop' + #13#10 +
-    '  foreach ($m in $members) {' + #13#10 +
-    '    if (($m.Name -eq $UserName) -or ($m.Name -like ''*\'' + $UserName)) { $ok = $true; break }' + #13#10 +
-    '  }' + #13#10 +
-    '} catch { }' + #13#10 +
-    'if ($ok) { exit 0 } else { exit 1 }';
+  Result := False;
+  OutPath := TempFile('grp_members_' + SanitizeFileName(GroupName) + '.txt');
 
-  PSParams := BuildPSNamedParam('GroupName', GroupName) + ' ' + BuildPSNamedParam('UserName', UserName);
-  ExecSavedPowerShellDebugScriptParams('check_group_member_' + SanitizeFileName(GroupName), UserName, PSScript, PSParams, True, ResultCode);
-  Result := (ResultCode = 0);
+  // net localgroup lists members one per line after a "---" separator line.
+  // Members may appear as DOMAIN\username or bare username.
+  Exec('cmd.exe', '/c net localgroup ' + QuoteExeArg(GroupName) + ' > ' + QuoteExeArg(OutPath) + ' 2>&1',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if not FileExists(OutPath) then
+    exit;
+
+  Lines := TStringList.Create;
+  try
+    Lines.LoadFromFile(OutPath);
+    InList := False;
+    for i := 0 to Lines.Count - 1 do
+    begin
+      Line := Trim(Lines[i]);
+      if not InList then
+      begin
+        if (Length(Line) > 0) and (Line[1] = '-') then
+          InList := True;
+        continue;
+      end;
+      if Line = '' then
+        continue;
+      // Strip domain prefix if present (DOMAIN\username -> username)
+      BackslashPos := Pos('\', Line);
+      if BackslashPos > 0 then
+        MemberName := Copy(Line, BackslashPos + 1, MaxInt)
+      else
+        MemberName := Line;
+      if CompareText(MemberName, UserName) = 0 then
+      begin
+        Result := True;
+        break;
+      end;
+    end;
+  finally
+    Lines.Free;
+    DeleteFile(OutPath);
+  end;
 end;
 
 // Verify file is authenticode-signed by Microsoft Corporation
@@ -1863,38 +1897,82 @@ begin
     (CompareText(UserName, 'WDAGUtilityAccount') = 0);
 end;
 
-function GetLocalUsers: TStringList;
+// Populates UsersList (login names) and DisplayList (email if online account,
+// else same as login name). Filters to enabled true-local accounts only by
+// comparing each account's SID domain portion against the local machine SID.
+procedure GetLocalUsers(UsersList: TStringList; DisplayList: TStringList);
 var
-  UsersList: TStringList;
   PSPath: string;
   ResultCode: Integer;
   i: Integer;
   Line: string;
+  Parts: TStringList;
+  UserName: string;
+  DisplayName: string;
   PSCommand: string;
 begin
-  UsersList := TStringList.Create;
   PSPath := ExpandConstant(TEMP_LOCAL_USERS);
 
+  // Get-LocalUser is available on all Win11 Home/Pro editions. It is the only
+  // reliable way to filter ghost/orphaned accounts via PrincipalSource.
+  // For Microsoft-linked accounts, the connected email is read from the
+  // IdentityStore registry cache. Inlined via -Command; single-quotes used
+  // throughout to avoid conflicts with the outer double-quote wrapper.
   PSCommand :=
-    'try { Get-LocalUser | Where-Object { $_.Enabled -eq $true -and $_.PrincipalSource -eq ''Local'' } | Select-Object -ExpandProperty Name | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; exit 0 } ' +
-    'catch { exit 1 }';
+    'try {' +
+    ' $out=@();' +
+    ' $sq=[char]39;' +
+    ' foreach($u in (Get-LocalUser | Where-Object {$_.Enabled -and $_.Name[0] -ne $sq})) {' +
+    '  $n=$u.Name; $detail=$null;' +
+    '  if($u.FullName -match ''@'') { $detail=$u.FullName }' +
+    '  elseif($u.FullName -and $u.FullName.Trim() -ne '''') { $detail=$u.FullName.Trim() }' +
+    '  if(-not $detail) { try {' +
+    '   $s=$u.SID.Value;' +
+    '   $r=''HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\''+$s+''\IdentityCache\''+$s;' +
+    '   $e=(Get-ItemProperty -Path $r -Name UserName -ErrorAction Stop).UserName;' +
+    '   if($e -and $e.Trim() -ne '''') {$detail=$e.Trim()}' +
+    '  } catch {} }' +
+    '  if($detail -and $detail -ne $n) { $d=$n+'' (''+$detail+'')'' } else { $d=$n }' +
+    '  $out+=($n+''|''+$d)' +
+    ' }' +
+    ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
+    ' exit 0' +
+    '} catch { exit 1 }';
   Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  if FileExists(PSPath) then
-  begin
-    UsersList.LoadFromFile(PSPath);
-    for i := UsersList.Count - 1 downto 0 do
+  if not FileExists(PSPath) then
+    exit;
+
+  Parts := TStringList.Create;
+  try
+    Parts.LoadFromFile(PSPath);
+    for i := 0 to Parts.Count - 1 do
     begin
-      Line := Trim(UsersList[i]);
-      if (Line = '') or IsExcludedUser(Line) then
-        UsersList.Delete(i)
+      Line := Trim(Parts[i]);
+      if Line = '' then
+        continue;
+      // Split "username|displayname"
+      if Pos('|', Line) > 0 then
+      begin
+        UserName := Copy(Line, 1, Pos('|', Line) - 1);
+        DisplayName := Copy(Line, Pos('|', Line) + 1, MaxInt);
+      end
       else
-        UsersList[i] := Line;
+      begin
+        UserName := Line;
+        DisplayName := Line;
+      end;
+      UserName := Trim(UserName);
+      DisplayName := Trim(DisplayName);
+      if (UserName = '') or IsExcludedUser(UserName) then
+        continue;
+      UsersList.Add(UserName);
+      DisplayList.Add(DisplayName);
     end;
+  finally
+    Parts.Free;
     DeleteFile(PSPath);
   end;
-
-  Result := UsersList;
 end;
 
 function GetDesktopRdpFiles: TStringList;
@@ -2171,6 +2249,21 @@ begin
   if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := Assigned(rbInstall) and rbInstall.Checked and chkCreateRdpShortcuts.Checked;
 end;
 
+procedure OnUseAllMonitorsClick(Sender: TObject);
+begin
+  if Assigned(chkFullScreen) then
+  begin
+    if chkUseAllMonitors.Checked then
+    begin
+      chkFullScreen.Checked := True;
+      chkFullScreen.Enabled := False;
+      OnFullScreenClick(nil);
+    end
+    else
+      chkFullScreen.Enabled := True;
+  end;
+end;
+
 procedure OnFullScreenClick(Sender: TObject);
 begin
   if Assigned(cboResolution) then
@@ -2298,7 +2391,7 @@ begin
     UserCheckBoxes[i].Parent := Page_CreateShortcutsForExistingUsers.Surface;
     UserCheckBoxes[i].Left := ScaleX(20);
     UserCheckBoxes[i].Width := ScaleX(180);
-    UserCheckBoxes[i].Caption := LocalUsersList[i];
+    UserCheckBoxes[i].Caption := LocalUserDisplayList[i];
     UserCheckBoxes[i].OnClick := @OnUserCheckBoxClick;
     UserCheckBoxes[i].Tag := i;
 
@@ -2477,7 +2570,7 @@ begin
       begin
         if Assigned(UserPasswordStatus[i]) then
         begin
-          UserPasswordStatus[i].Caption := 'Password required';
+          UserPasswordStatus[i].Caption := 'Can''t be blank';
           UserPasswordStatus[i].Visible := True;
         end;
         HasErrors := True;
@@ -2506,6 +2599,15 @@ begin
         continue;
       end;
 
+      if Assigned(UserPasswordStatus[i]) then
+      begin
+        UserPasswordStatus[i].Caption := '';
+        UserPasswordStatus[i].Visible := False;
+      end;
+    end
+    else
+    begin
+      // User was unchecked — clear any stale validation message
       if Assigned(UserPasswordStatus[i]) then
       begin
         UserPasswordStatus[i].Caption := '';
@@ -3523,11 +3625,17 @@ begin
   begin
     cboResolution.ItemIndex := ResIndex;
     cboResolution.Enabled := (ScreenMode <> 2);
-    // Show/hide W/H row to match the selection
+    // Show/hide W/H row to match the selection, then let full screen override
     OnResolutionChange(nil);
+    if Assigned(chkFullScreen) and chkFullScreen.Checked then
+      OnFullScreenClick(nil);
   end;
 
-  if Assigned(chkUseAllMonitors) then chkUseAllMonitors.Checked := (UseMultiMon = 1);
+  if Assigned(chkUseAllMonitors) then
+  begin
+    chkUseAllMonitors.Checked := (UseMultiMon = 1);
+    OnUseAllMonitorsClick(nil);
+  end;
   if Assigned(chkSound)          then chkSound.Checked          := (AudioMode = 0);  // 0 = play on this PC
   if Assigned(chkCopyPaste)      then chkCopyPaste.Checked      := (RedirectClipboard = 1);
 end;
@@ -3643,6 +3751,7 @@ begin
   chkUseAllMonitors.Width := ScaleX(110);
   chkUseAllMonitors.Caption := 'Use All Monitors';
   chkUseAllMonitors.Checked := False;
+  chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
 
   // Row 2b — Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
@@ -3731,8 +3840,6 @@ var
   TermsrvVer: string;
   TermWrapVer: string;
   PortNumber: Cardinal;
-  DenyVal: Cardinal;
-  SingleSessVal: Cardinal;
   WelcomeExpLabel: TLabel;
   WelcomeIcon: TBitmapImage;
   // Credits labels (non-selectable) and link labels
@@ -4401,16 +4508,30 @@ begin
       lblWinRDPVer.Caption := TermsrvVer;
 
     // Determines which wrapper method is installed (if any)
-    // Options: (1) TermWrap (2) RDPWrap (3) None
-    // Detects the version of each wrapper if possible or "Unknown" if detection fails
-    TermWrapVer := 'Not installed';
+    // Priority: (1) TermWrap (2) RDPWrap (3) None (Windows default)
     ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
     if FileExists(ServiceDllPath) then
+    begin
       TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
-    if TermWrapVer = '' then
-      lblWrapperVer.Caption := 'Unknown'
+      if TermWrapVer = '' then
+        lblWrapperVer.Caption := 'TermWrap (unknown version)'
+      else
+        lblWrapperVer.Caption := 'TermWrap ' + TermWrapVer;
+    end
     else
-      lblWrapperVer.Caption := TermWrapVer;
+    begin
+      ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
+      if FileExists(ServiceDllPath) then
+      begin
+        TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
+        if TermWrapVer = '' then
+          lblWrapperVer.Caption := 'RDPWrap (unknown version)'
+        else
+          lblWrapperVer.Caption := 'RDPWrap ' + TermWrapVer;
+      end
+      else
+        lblWrapperVer.Caption := 'None (Windows default)';
+    end;
 
 
     // Enable Remote Desktop (fDenyTSConnections = 0 means enabled)
@@ -4445,7 +4566,8 @@ begin
   
   
   // Initialize lists for tracking
-  LocalUsersList := TStringList.Create;  // Will be populated when Create Shortcuts page is shown
+  LocalUsersList := TStringList.Create;        // Will be populated when Create Shortcuts page is shown
+  LocalUserDisplayList := TStringList.Create;  // Parallel display labels (email for online accounts)
   DesktopRdpFiles := TStringList.Create;
   SetLength(UserCheckBoxes, 0);
   SetLength(UserPasswordEdits, 0);
@@ -4667,7 +4789,9 @@ begin
       // Pre-populate the existing-users page when taking that path
       if DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting) then
       begin
-        LocalUsersList := GetLocalUsers;
+        LocalUsersList.Clear;
+        LocalUserDisplayList.Clear;
+        GetLocalUsers(LocalUsersList, LocalUserDisplayList);
         SetLength(UserCheckBoxes, LocalUsersList.Count);
         SetLength(UserPasswordEdits, LocalUsersList.Count);
         SetLength(UserPasswordStatus, LocalUsersList.Count);
@@ -4741,7 +4865,7 @@ begin
           Password := UserPasswordEdits[i].Text;
           if Password = '' then
           begin
-            UserPasswordStatus[i].Caption := 'Password required';
+            UserPasswordStatus[i].Caption := 'Can''t be blank';
             UserPasswordStatus[i].Visible := True;
             HasErrors := True;
             continue;
@@ -5590,7 +5714,9 @@ begin
   // Lazy-load user list only when Create Shortcuts page is first shown
   if (CurPageID = EditSystemwideSettingsPage.ID) and (LocalUsersList.Count = 0) then
   begin
-    LocalUsersList := GetLocalUsers;
+    LocalUsersList.Clear;
+    LocalUserDisplayList.Clear;
+    GetLocalUsers(LocalUsersList, LocalUserDisplayList);
     SetLength(UserCheckBoxes, LocalUsersList.Count);
     SetLength(UserPasswordEdits, LocalUsersList.Count);
     SetLength(UserPasswordStatus, LocalUsersList.Count);
