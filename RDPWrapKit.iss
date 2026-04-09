@@ -28,8 +28,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.1"
-#define APP_VERSION_FILEINFO "0.5.1.0"
+#define APP_VERSION_STRING "0.5.2"
+#define APP_VERSION_FILEINFO "0.5.2.0"
 
 [Setup]
 AppName=RDPWrapKit
@@ -41,7 +41,7 @@ AppSupportURL=https://github.com/cpdx4/RDPWrapKit/issues
 AppUpdatesURL=https://github.com/cpdx4/RDPWrapKit/releases
 AppCopyright=Copyright (C) 2024-2026 RDPWrapKit Project
 DefaultDirName={commonpf64}\RDPWrapKit
-OutputBaseFilename=RDPWrapKit-Setup_v{#APP_VERSION_STRING}
+OutputBaseFilename=RDPWrapKit-Setup
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -127,7 +127,13 @@ var
   // New welcome/options controls
   rbInstall: TRadioButton;
   rbEditSystemwideSettings: TRadioButton;
+  rbShowRDPInfo: TRadioButton;
   rbUninstall: TRadioButton;
+  Page_ShowRDPInfo: TWizardPage;
+  // Show RDP Info page controls
+  cmbGPCompression: TComboBox;
+  cmbGPImageQuality: TComboBox;
+  StepShowRDPInfo: TLabel;
   chkInstallTermWrap: TCheckBox;
   chkCreateRdpShortcuts: TCheckBox;
   rbCreateUsers: TRadioButton;
@@ -245,12 +251,20 @@ var
   chkCopyPaste: TCheckBox;
   chkSound: TCheckBox;
   lblShortcutTips: TLabel;
+  lblShortcutEditingFile: TLabel;
   lblMultiShortcutEditingNote: TLabel;
   chkShowMoreShortcutOptions: TCheckBox;
   lblCustomWidth: TLabel;
   edtCustomWidth: TEdit;
   lblCustomHeight: TLabel;
   edtCustomHeight: TEdit;
+  // Experience / performance checkboxes on Shortcut Settings page
+  chkExpWallpaper: TCheckBox;
+  chkExpFontSmooth: TCheckBox;
+  chkExpComposition: TCheckBox;
+  chkExpDragContents: TCheckBox;
+  chkExpMenuAnim: TCheckBox;
+  chkExpVisualStyles: TCheckBox;
 
 const
   // -------------------------------------------------------------------------
@@ -280,6 +294,7 @@ const
   TXT_InstallMSTSC = 'Install Remote Desktop Connection (if missing)';
   TXT_RemoveFolder = 'Remove TermWrap folder';
   TXT_UninstallTermWrap = 'Uninstall TermWrap';
+  TXT_ShowRDPInfo = 'Apply RDP settings';
   
   // -------------------------------------------------------------------------
   // REGISTRY PATHS
@@ -294,6 +309,7 @@ const
   REG_VCREDIST = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
   REG_SHOW_USERS = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System';
   REG_RDP_TCP = 'SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp';
+  REG_TS_POLICIES = 'SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services';
   // Loopback alias used by TermWrap for local RDP sessions
   RDP_LOOPBACK_IP = '127.0.0.2';
   // Default RDP window resolution written into generated .rdp shortcut files
@@ -374,6 +390,7 @@ const
   installModeEditShortcuts = 1;                  // Edit existing shortcut settings
   installModeEditSystemwideSettings = 2;         // Edit system-wide RDP settings
   installModeUninstall = 3;                      // Uninstall everything
+  installModeShowRDPInfo = 4;               // Show RDP Info + configure RemoteFX/startup settings
 
   // CREATE USER MODE CONSTANTS (only relevant when DoCreateRdpShortcuts = True)
   createUserModeNew = 0;                         // Create new local user accounts
@@ -434,6 +451,9 @@ type
 
 function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
   external 'GetSystemTime@kernel32.dll stdcall';
+
+function GetSysColor(nIndex: DWORD): DWORD;
+  external 'GetSysColor@user32.dll stdcall';
 
 // Compares two dotted version strings (e.g. "0.4.9" vs "0.4.10").
 // Returns 1 if A > B, -1 if A < B, 0 if equal.
@@ -1239,9 +1259,11 @@ begin
     installModeEditShortcuts:
       Result := 'Edit Shortcut Settings';
     installModeEditSystemwideSettings:
-      Result := 'Edit System-wide Settings';
+      Result := 'Edit System-wide RDP Settings';
     installModeUninstall:
       Result := 'Uninstall';
+    installModeShowRDPInfo:
+      Result := 'Show RDP Info';
   else
     Result := 'Unknown(' + IntToStr(SelectedInstallMode) + ')';
   end;
@@ -1269,7 +1291,8 @@ begin
   else if Assigned(Page_ShortcutSettings) and (PageID = Page_ShortcutSettings.ID) then Result := 'Custom: Shortcut Settings'
   else if Assigned(Page_CreateShortcutsForExistingUsers) and (PageID = Page_CreateShortcutsForExistingUsers.ID) then Result := 'Custom: Create Shortcuts for Existing Users'
   else if Assigned(EditShortcutPage) and (PageID = EditShortcutPage.ID) then Result := 'Custom: Edit Existing Shortcut'
-  else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide Settings'
+  else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide RDP Settings'
+  else if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) then Result := 'Custom: Show RDP Info'
   else
     Result := 'Custom/Unknown';
 end;
@@ -1287,7 +1310,9 @@ begin
   else if Assigned(rbEditShortcutSettings) and rbEditShortcutSettings.Checked then
     ChosenAction := 'Edit Shortcut Settings'
   else if Assigned(rbEditSystemwideSettings) and rbEditSystemwideSettings.Checked then
-    ChosenAction := 'Edit System-wide Settings'
+    ChosenAction := 'Edit System-wide RDP Settings'
+  else if Assigned(rbShowRDPInfo) and rbShowRDPInfo.Checked then
+    ChosenAction := 'Tune System Performance'
   else if Assigned(rbUninstall) and rbUninstall.Checked then
     ChosenAction := 'Uninstall'
   else
@@ -1630,9 +1655,21 @@ begin
   Result := (B shl 16) or (G shl 8) or R;
 end;
 
+// Resolve a TColor to an actual RGB value.
+// System color constants (clBtnFace, clWindow, etc.) have bit 31 set (negative when
+// treated as a signed Longint).  GetSysColor converts the index to a real BGR value.
+function ResolveColor(C: Longint): Longint;
+begin
+  if C < 0 then
+    Result := GetSysColor(C and $FF)
+  else
+    Result := C;
+end;
+
 function IsDarkColor(C: Longint): Boolean;
 var R, G, B, bright: Integer;
 begin
+  C := ResolveColor(C);
   R := C and $FF;
   G := (C shr 8) and $FF;
   B := (C shr 16) and $FF;
@@ -2788,8 +2825,12 @@ begin
   if PageID = wpReady then
     Result := True;
 
-  // Show Edit System-wide settings page only in that mode
+  // Show Edit System-wide RDP settings page only in that mode
   if (PageID = EditSystemwideSettingsPage.ID) and (SelectedInstallMode <> installModeEditSystemwideSettings) then
+    Result := True;
+
+  // Show Page_ShowRDPInfo only in that mode
+  if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) and (SelectedInstallMode <> installModeShowRDPInfo) then
     Result := True;
 
   // Show Create Shortcuts for Existing Users page only when:
@@ -2860,6 +2901,24 @@ begin
   end;
 end;
 
+// Read experience / performance checkboxes into RDP key integer values.
+// disable wallpaper: 0=show, 1=disable  — checkbox means "allow" so invert for disable key
+// allow font smoothing: 1=allow  — checkbox value maps directly
+// allow desktop composition: 1=allow
+// disable full window drag: 0=show contents, 1=hide  — inverted
+// disable menu anims: 0=show, 1=hide  — inverted
+// disable themes: 0=use themes, 1=disable  — inverted
+procedure GetExperienceSettings(var DisableWallpaper, AllowFontSmooth, AllowComposition,
+  DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer);
+begin
+  if Assigned(chkExpWallpaper)    then begin if chkExpWallpaper.Checked    then DisableWallpaper      := 0 else DisableWallpaper      := 1; end else DisableWallpaper      := 1;
+  if Assigned(chkExpFontSmooth)   then begin if chkExpFontSmooth.Checked   then AllowFontSmooth       := 1 else AllowFontSmooth       := 0; end else AllowFontSmooth       := 1;
+  if Assigned(chkExpComposition)  then begin if chkExpComposition.Checked  then AllowComposition      := 1 else AllowComposition      := 0; end else AllowComposition      := 1;
+  if Assigned(chkExpDragContents) then begin if chkExpDragContents.Checked then DisableFullWindowDrag := 0 else DisableFullWindowDrag := 1; end else DisableFullWindowDrag := 0;
+  if Assigned(chkExpMenuAnim)     then begin if chkExpMenuAnim.Checked     then DisableMenuAnims      := 0 else DisableMenuAnims      := 1; end else DisableMenuAnims      := 0;
+  if Assigned(chkExpVisualStyles) then begin if chkExpVisualStyles.Checked then DisableThemes         := 0 else DisableThemes         := 1; end else DisableThemes         := 0;
+end;
+
 // Read shortcut display settings from UI controls into output vars.
 // Shared by WriteRDPFileDirect, GenerateRDPPowerShellScript, and WriteShortcutSettingsToRdpFile.
 procedure GetShortcutDisplaySettings(var ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer);
@@ -2906,6 +2965,8 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
+  DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
+  DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   SL: TStringList;
   EncTextRaw: AnsiString;
   EncText: string;
@@ -2925,6 +2986,7 @@ begin
   end;
 
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   SL := TStringList.Create;
   try
@@ -2948,12 +3010,12 @@ begin
     SL.Add('videoplaybackmode:i:1');
     SL.Add('connection type:i:7');
     SL.Add('displayconnectionbar:i:1');
-    SL.Add('disable wallpaper:i:1');
-    SL.Add('allow font smoothing:i:1');
-    SL.Add('allow desktop composition:i:1');
-    SL.Add('disable full window drag:i:0');
-    SL.Add('disable menu anims:i:0');
-    SL.Add('disable themes:i:0');
+    SL.Add('disable wallpaper:i:' + IntToStr(DisableWallpaper));
+    SL.Add('allow font smoothing:i:' + IntToStr(AllowFontSmooth));
+    SL.Add('allow desktop composition:i:' + IntToStr(AllowComposition));
+    SL.Add('disable full window drag:i:' + IntToStr(DisableFullWindowDrag));
+    SL.Add('disable menu anims:i:' + IntToStr(DisableMenuAnims));
+    SL.Add('disable themes:i:' + IntToStr(DisableThemes));
     SL.Add('bitmapcachepersistenable:i:1');
     SL.Add('authentication level:i:0');
     if HasEnc then
@@ -2990,8 +3052,11 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
+  DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
+  DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
 begin
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   Result :=
     'param([string]$EncPath = '''')' + #13#10 +
@@ -3027,12 +3092,12 @@ begin
     '  $rdp += "videoplaybackmode:i:1"' + #13#10 +
     '  $rdp += "connection type:i:7"' + #13#10 +
     '  $rdp += "displayconnectionbar:i:1"' + #13#10 +
-    '  $rdp += "disable wallpaper:i:1"' + #13#10 +
-    '  $rdp += "allow font smoothing:i:1"' + #13#10 +
-    '  $rdp += "allow desktop composition:i:1"' + #13#10 +
-    '  $rdp += "disable full window drag:i:0"' + #13#10 +
-    '  $rdp += "disable menu anims:i:0"' + #13#10 +
-    '  $rdp += "disable themes:i:0"' + #13#10 +
+    '  $rdp += "disable wallpaper:i:' + IntToStr(DisableWallpaper) + '"' + #13#10 +
+    '  $rdp += "allow font smoothing:i:' + IntToStr(AllowFontSmooth) + '"' + #13#10 +
+    '  $rdp += "allow desktop composition:i:' + IntToStr(AllowComposition) + '"' + #13#10 +
+    '  $rdp += "disable full window drag:i:' + IntToStr(DisableFullWindowDrag) + '"' + #13#10 +
+    '  $rdp += "disable menu anims:i:' + IntToStr(DisableMenuAnims) + '"' + #13#10 +
+    '  $rdp += "disable themes:i:' + IntToStr(DisableThemes) + '"' + #13#10 +
     '  $rdp += "bitmapcachepersistenable:i:1"' + #13#10 +
     '  $rdp += "authentication level:i:0"' + #13#10 +
     '  if ($hasEnc) { $rdp += "prompt for credentials:i:0" } else { $rdp += "prompt for credentials:i:1" }' + #13#10 +
@@ -3488,7 +3553,10 @@ begin
   if Assigned(L) then
   begin
     L.Caption := '• ' + Text;
-    L.Font.Color := clBlack;
+    if IsDarkColor(WizardForm.Color) then
+      L.Font.Color := clWhite
+    else
+      L.Font.Color := clBlack;
     L.Font.Style := [fsBold];
     L.Visible := True;
   end;
@@ -3499,7 +3567,10 @@ begin
   if Assigned(L) then
   begin
     L.Caption := '✓ ' + Text;
-    L.Font.Color := clGreen;
+    if IsDarkColor(WizardForm.Color) then
+      L.Font.Color := RGBToColor(0, 200, 0)   // brighter green for dark backgrounds
+    else
+      L.Font.Color := RGBToColor(0, 128, 0);  // standard green for light backgrounds
     L.Font.Style := [];
     L.Visible := True;
   end;
@@ -3536,6 +3607,7 @@ begin
   if Assigned(StepCheckRDP) then StepCheckRDP.Visible := False;
   if Assigned(StepUninstallTermWrap) then StepUninstallTermWrap.Visible := False;
   if Assigned(StepRemoveFolder) then StepRemoveFolder.Visible := False;
+  if Assigned(StepShowRDPInfo) then StepShowRDPInfo.Visible := False;
 end;
 
 // Begin a fresh layout pass for the steps list
@@ -3576,6 +3648,8 @@ var
   i, EqPos: Integer;
   Key, Val, Line: string;
   ScreenMode, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
+  DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResIndex, ResultCode: Integer;
 begin
   if not FileExists(RdpPath) then exit;
@@ -3596,8 +3670,14 @@ begin
     '  if ($l -match "^desktopwidth:i:(.+)$")      { $out += "desktopwidth="      + $Matches[1] };' +
     '  if ($l -match "^desktopheight:i:(.+)$")     { $out += "desktopheight="     + $Matches[1] };' +
     '  if ($l -match "^use multimon:i:(.+)$")      { $out += "use_multimon="      + $Matches[1] };' +
-    '  if ($l -match "^audiomode:i:(.+)$")         { $out += "audiomode="         + $Matches[1] };' +
-    '  if ($l -match "^redirectclipboard:i:(.+)$") { $out += "redirectclipboard=" + $Matches[1] };' +
+    '  if ($l -match "^audiomode:i:(.+)$")                  { $out += "audiomode="              + $Matches[1] };' +
+    '  if ($l -match "^redirectclipboard:i:(.+)$")         { $out += "redirectclipboard="       + $Matches[1] };' +
+    '  if ($l -match "^disable wallpaper:i:(.+)$")         { $out += "disable_wallpaper="       + $Matches[1] };' +
+    '  if ($l -match "^allow font smoothing:i:(.+)$")      { $out += "allow_font_smoothing="    + $Matches[1] };' +
+    '  if ($l -match "^allow desktop composition:i:(.+)$") { $out += "allow_composition="       + $Matches[1] };' +
+    '  if ($l -match "^disable full window drag:i:(.+)$")  { $out += "disable_drag_contents="   + $Matches[1] };' +
+    '  if ($l -match "^disable menu anims:i:(.+)$")        { $out += "disable_menu_anims="      + $Matches[1] };' +
+    '  if ($l -match "^disable themes:i:(.+)$")            { $out += "disable_themes="          + $Matches[1] };' +
     '};' +
     '[System.IO.File]::WriteAllText(''' + OutPath + ''', ($out -join "`n"))';
 
@@ -3611,6 +3691,8 @@ begin
   // Defaults (match BuildShortcutSettingsBlock initial state)
   ScreenMode := 1; DesktopWidth := DEFAULT_RDP_WIDTH; DesktopHeight := DEFAULT_RDP_HEIGHT;
   UseMultiMon := 0; AudioMode := 0; RedirectClipboard := 1;
+  DisableWallpaper := 1; AllowFontSmooth := 1; AllowComposition := 1;
+  DisableFullWindowDrag := 0; DisableMenuAnims := 0; DisableThemes := 0;
 
   Lines := TStringList.Create;
   try
@@ -3627,7 +3709,13 @@ begin
       else if Key = 'desktopheight'     then DesktopHeight    := StrToIntDef(Val, DEFAULT_RDP_HEIGHT)
       else if Key = 'use_multimon'      then UseMultiMon      := StrToIntDef(Val, 0)
       else if Key = 'audiomode'         then AudioMode        := StrToIntDef(Val, 0)
-      else if Key = 'redirectclipboard' then RedirectClipboard := StrToIntDef(Val, 1);
+      else if Key = 'redirectclipboard'    then RedirectClipboard    := StrToIntDef(Val, 1)
+      else if Key = 'disable_wallpaper'    then DisableWallpaper     := StrToIntDef(Val, 1)
+      else if Key = 'allow_font_smoothing' then AllowFontSmooth      := StrToIntDef(Val, 1)
+      else if Key = 'allow_composition'    then AllowComposition     := StrToIntDef(Val, 1)
+      else if Key = 'disable_drag_contents' then DisableFullWindowDrag := StrToIntDef(Val, 0)
+      else if Key = 'disable_menu_anims'   then DisableMenuAnims     := StrToIntDef(Val, 0)
+      else if Key = 'disable_themes'       then DisableThemes        := StrToIntDef(Val, 0);
     end;
   finally
     Lines.Free;
@@ -3670,18 +3758,28 @@ begin
   end;
   if Assigned(chkSound)          then chkSound.Checked          := (AudioMode = 0);  // 0 = play on this PC
   if Assigned(chkCopyPaste)      then chkCopyPaste.Checked      := (RedirectClipboard = 1);
+  // Experience checkboxes — invert disable keys, pass-through allow keys
+  if Assigned(chkExpWallpaper)    then chkExpWallpaper.Checked    := (DisableWallpaper = 0);
+  if Assigned(chkExpFontSmooth)   then chkExpFontSmooth.Checked   := (AllowFontSmooth = 1);
+  if Assigned(chkExpComposition)  then chkExpComposition.Checked  := (AllowComposition = 1);
+  if Assigned(chkExpDragContents) then chkExpDragContents.Checked := (DisableFullWindowDrag = 0);
+  if Assigned(chkExpMenuAnim)     then chkExpMenuAnim.Checked     := (DisableMenuAnims = 0);
+  if Assigned(chkExpVisualStyles) then chkExpVisualStyles.Checked := (DisableThemes = 0);
 end;
 
 procedure WriteShortcutSettingsToRdpFile(const RdpPath: string);
-// Reads the existing .rdp file and updates the display/audio settings from the
+// Reads the existing .rdp file and updates the display/audio/experience settings from the
 // current shortcut settings UI controls, then writes the file back in-place.
 var
   ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
+  DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResultCode: Integer;
   PSScript, ScriptPath: string;
 begin
   // Collect values from UI controls
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   // PowerShell: update specific keys in the .rdp file without touching the rest (e.g. password hash)
   PSScript :=
@@ -3701,6 +3799,12 @@ begin
     '$lines = Set-RdpKey $lines "use multimon" "use multimon:i:' + IntToStr(UseMultiMon) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "audiomode" "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "redirectclipboard" "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "disable wallpaper" "disable wallpaper:i:' + IntToStr(DisableWallpaper) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "allow font smoothing" "allow font smoothing:i:' + IntToStr(AllowFontSmooth) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "allow desktop composition" "allow desktop composition:i:' + IntToStr(AllowComposition) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "disable full window drag" "disable full window drag:i:' + IntToStr(DisableFullWindowDrag) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "disable menu anims" "disable menu anims:i:' + IntToStr(DisableMenuAnims) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "disable themes" "disable themes:i:' + IntToStr(DisableThemes) + '"' + #13#10 +
     '[System.IO.File]::WriteAllLines($path, $lines)';
 
   ScriptPath := TempFile('update_rdp_settings.ps1');
@@ -3709,37 +3813,109 @@ begin
   WriteInstallerLog('WriteShortcutSettingsToRdpFile: exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
 end;
 
-procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
+// Displays help for a setting on the Shortcut Settings page.
+// Tag 1=Copy&Paste, 2=Sound, 3=Monitor settings (Window Size/Full Screen/All Monitors), 4=Performance vs Quality checkboxes
+procedure ShowShortcutHelpInfo(Sender: TObject);
+var
+  HelpText: string;
 begin
+  case TButton(Sender).Tag of
+    1: HelpText :=
+         'Allow Copy && Paste' + #13#10#13#10 +
+         'Enables clipboard sharing between the remote session and the local PC.' + #13#10#13#10 +
+         'When checked, you can copy text, images, and files on one side and paste them on the other. ' +
+         'When unchecked, the clipboard is isolated. Nothing can be transferred between the two sides.';
+    2: HelpText :=
+         'Allow Sound' + #13#10#13#10 +
+         'Controls whether audio from the remote session plays on the local PC.' + #13#10#13#10 +
+         'When checked, sounds (system alerts, media playback, etc.) from the remote session are ' +
+         'redirected to and played through the local PC''s speakers. ';
+    3: HelpText :=
+         'Window Size / Full Screen / Use All Monitors' + #13#10#13#10 +
+         'Window Size: sets the resolution of the remote desktop window.' + #13#10 +
+         '  Choose a preset resolution or "Custom" to enter exact pixel dimensions.' + #13#10#13#10 +
+         'Full Screen: opens the RDP session filling the entire screen at the monitor''s native resolution. ' +
+         'Overrides the Window Size setting.' + #13#10#13#10 +
+         'Use All Monitors: spans the remote session across all connected monitors. ' +
+         'Each monitor''s full resolution is used. Requires Full Screen to be unchecked.';
+    4: HelpText :=
+         'Performance vs Quality' + #13#10#13#10 +
+         'These settings control which visual effects are displayed in the RDP connection. ' +
+         'Disabling effects improves responsiveness and performance.' + #13#10#1310 +
+         'Desktop wallpaper: shows or hides the background image in the session.' + #13#10 +
+         'Smooth text (ClearType): enables font anti-aliasing for sharper text.' + #13#10 +
+         'Transparent windows & effects: enables Aero glass and window animations.' + #13#10 +
+         'Show contents while dragging: renders window contents as you drag them.' + #13#10 +
+         'Animated menus & transitions: enables fade/slide animations on menus.' + #13#10 +
+         'Visual themes: enables Windows visual styling (disabling gives a classic look).';
+  else
+    HelpText := 'No additional information available for this setting.';
+  end;
+  MsgBox(HelpText, mbInformation, MB_OK);
+end;
+
+// Creates a small "[?]" help button on a raw TWinControl surface (e.g. inside BuildShortcutSettingsBlock).
+// Tag identifies which help text to show (see ShowShortcutHelpInfo).
+function MakeShortcutHelpButton(Surface: TWinControl; ATop, ATag: Integer): TButton;
+var
+  Btn: TButton;
+begin
+  Btn := TButton.Create(Surface);
+  Btn.Parent := Surface;
+  Btn.Caption := '?';
+  Btn.Width := ScaleX(20);
+  Btn.Height := ScaleY(20);
+  Btn.Left := Surface.Width - ScaleX(26);
+  Btn.Top := ATop;
+  Btn.Tag := ATag;
+  Btn.OnClick := @ShowShortcutHelpInfo;
+  Result := Btn;
+end;
+
+procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
+var
+  TmpLabel: TLabel;
+begin
+
+  // Current file context (used by Edit Shortcut flow)
+  lblShortcutEditingFile := TLabel.Create(ParentSurface);
+  lblShortcutEditingFile.Parent := ParentSurface;
+  lblShortcutEditingFile.Left := ScaleX(10);
+  lblShortcutEditingFile.Top := StartTop;
+  lblShortcutEditingFile.Caption := 'Editing:';
+  lblShortcutEditingFile.Font.Style := [fsBold];
+  lblShortcutEditingFile.AutoSize := True;
 
   // Section separator label
   lblShortcutSection := TLabel.Create(ParentSurface);
   lblShortcutSection.Parent := ParentSurface;
-  lblShortcutSection.Top := StartTop;
+  lblShortcutSection.Top := lblShortcutEditingFile.Top + ScaleY(22);
   lblShortcutSection.Caption := 'Basic Shortcut Settings';
   lblShortcutSection.Font.Color := clGray;
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
-    // Row 1 — Copy & Paste
+  // Row 1 — Copy & Paste
   chkCopyPaste := TCheckBox.Create(ParentSurface);
   chkCopyPaste.Parent := ParentSurface;
   chkCopyPaste.Left := ScaleX(10);
   chkCopyPaste.Top := lblShortcutSection.Top + ScaleY(24);
-  chkCopyPaste.Width := ScaleX(130);
+  chkCopyPaste.Width := ScaleX(150);
   chkCopyPaste.Caption := 'Allow Copy && Paste';
   chkCopyPaste.Checked := True;
+  MakeShortcutHelpButton(ParentSurface, chkCopyPaste.Top, 1);
 
-  // Row 1 — Sound
+  // Row 2 — Sound (own row)
   chkSound := TCheckBox.Create(ParentSurface);
   chkSound.Parent := ParentSurface;
-  chkSound.Left := chkCopyPaste.Left + ScaleX(140);
-  chkSound.Top := chkCopyPaste.Top;
-  chkSound.Width := ScaleX(100);
+  chkSound.Left := ScaleX(10);
+  chkSound.Top := chkCopyPaste.Top + ScaleY(24);
+  chkSound.Width := ScaleX(150);
   chkSound.Caption := 'Allow Sound';
   chkSound.Checked := True;
+  MakeShortcutHelpButton(ParentSurface, chkSound.Top, 2);
 
-  // Row 2 — Screen Size label
+  // Row 3 — Screen Size label
   lblScreenSize := TLabel.Create(ParentSurface);
   lblScreenSize.Parent := ParentSurface;
   lblScreenSize.Left := ScaleX(10);
@@ -3747,7 +3923,7 @@ begin
   lblScreenSize.Caption := 'Window Size:';
   lblScreenSize.AutoSize := True;
 
-  // Row 2 — Resolution drop-down
+  // Row 3 — Resolution drop-down
   cboResolution := TComboBox.Create(ParentSurface);
   cboResolution.Parent := ParentSurface;
   cboResolution.Left := lblScreenSize.Left + ScaleX(72);
@@ -3764,7 +3940,7 @@ begin
   cboResolution.ItemIndex := 1;  // default: 1366 x 768
   cboResolution.OnChange := @OnResolutionChange;
 
-  // Row 2 — Full Screen checkbox
+  // Row 3 — Full Screen checkbox
   chkFullScreen := TCheckBox.Create(ParentSurface);
   chkFullScreen.Parent := ParentSurface;
   chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
@@ -3775,7 +3951,7 @@ begin
   chkFullScreen.OnClick := @OnFullScreenClick;
   cboResolution.Enabled := True;
 
-  // Row 2 — Use All Monitors
+  // Row 3 — Use All Monitors
   chkUseAllMonitors := TCheckBox.Create(ParentSurface);
   chkUseAllMonitors.Parent := ParentSurface;
   chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
@@ -3784,8 +3960,9 @@ begin
   chkUseAllMonitors.Caption := 'Use All Monitors';
   chkUseAllMonitors.Checked := False;
   chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
+  MakeShortcutHelpButton(ParentSurface, lblScreenSize.Top - ScaleY(1), 3);
 
-  // Row 2b — Custom resolution W/H inputs (hidden until "Custom" is selected)
+  // Row 3b — Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
   lblCustomWidth.Parent := ParentSurface;
   lblCustomWidth.Left := cboResolution.Left;
@@ -3818,16 +3995,81 @@ begin
   edtCustomHeight.Text := '1080';
   edtCustomHeight.Visible := False;
 
-  // Row 3 — Tips for editing more settings
+  // Row 4 — Performance section header (offset by extra row to clear Custom resolution inputs)
+  TmpLabel := TLabel.Create(ParentSurface);
+  TmpLabel.Parent := ParentSurface;
+  TmpLabel.Left := ScaleX(10);
+  TmpLabel.Top := lblScreenSize.Top + ScaleY(52);
+  TmpLabel.Caption := 'Quality vs Performance - (Unchecked = better performance):';
+  TmpLabel.Font.Style := [fsBold];
+  TmpLabel.AutoSize := True;
+  MakeShortcutHelpButton(ParentSurface, TmpLabel.Top, 4);
+
+  // Row 5 — Experience checkboxes (2 columns, 3 rows)
+  // Col 1, Row 1
+  chkExpWallpaper := TCheckBox.Create(ParentSurface);
+  chkExpWallpaper.Parent := ParentSurface;
+  chkExpWallpaper.Left := ScaleX(20);
+  chkExpWallpaper.Top := TmpLabel.Top + ScaleY(20);
+  chkExpWallpaper.Width := ScaleX(180);
+  chkExpWallpaper.Caption := 'Desktop wallpaper';
+  chkExpWallpaper.Checked := False;
+
+  // Col 2, Row 1
+  chkExpFontSmooth := TCheckBox.Create(ParentSurface);
+  chkExpFontSmooth.Parent := ParentSurface;
+  chkExpFontSmooth.Left := ScaleX(210);
+  chkExpFontSmooth.Top := chkExpWallpaper.Top;
+  chkExpFontSmooth.Width := ScaleX(180);
+  chkExpFontSmooth.Caption := 'Smooth text (ClearType)';
+  chkExpFontSmooth.Checked := True;
+
+  // Col 1, Row 2
+  chkExpComposition := TCheckBox.Create(ParentSurface);
+  chkExpComposition.Parent := ParentSurface;
+  chkExpComposition.Left := ScaleX(20);
+  chkExpComposition.Top := chkExpWallpaper.Top + ScaleY(22);
+  chkExpComposition.Width := ScaleX(180);
+  chkExpComposition.Caption := 'Transparent windows && effects';
+  chkExpComposition.Checked := True;
+
+  // Col 2, Row 2
+  chkExpDragContents := TCheckBox.Create(ParentSurface);
+  chkExpDragContents.Parent := ParentSurface;
+  chkExpDragContents.Left := ScaleX(210);
+  chkExpDragContents.Top := chkExpComposition.Top;
+  chkExpDragContents.Width := ScaleX(230);
+  chkExpDragContents.Caption := 'Show window contents while dragging';
+  chkExpDragContents.Checked := True;
+
+  // Col 1, Row 3
+  chkExpMenuAnim := TCheckBox.Create(ParentSurface);
+  chkExpMenuAnim.Parent := ParentSurface;
+  chkExpMenuAnim.Left := ScaleX(20);
+  chkExpMenuAnim.Top := chkExpComposition.Top + ScaleY(22);
+  chkExpMenuAnim.Width := ScaleX(180);
+  chkExpMenuAnim.Caption := 'Animated menus && transitions';
+  chkExpMenuAnim.Checked := True;
+
+  // Col 2, Row 3
+  chkExpVisualStyles := TCheckBox.Create(ParentSurface);
+  chkExpVisualStyles.Parent := ParentSurface;
+  chkExpVisualStyles.Left := ScaleX(210);
+  chkExpVisualStyles.Top := chkExpMenuAnim.Top;
+  chkExpVisualStyles.Width := ScaleX(180);
+  chkExpVisualStyles.Caption := 'Visual themes';
+  chkExpVisualStyles.Checked := True;
+
+  // Row 5 — Tips for editing more settings
   lblShortcutTips := TLabel.Create(ParentSurface);
   lblShortcutTips.Parent := ParentSurface;
   lblShortcutTips.Left := ScaleX(10);
-  lblShortcutTips.Top := lblScreenSize.Top + ScaleY(26);
+  lblShortcutTips.Top := chkExpMenuAnim.Top + ScaleY(28);
   lblShortcutTips.Caption := 'For more settings, run this app again and choose "Edit existing shortcut settings"';
   lblShortcutTips.Font.Style := [fsItalic];
   lblShortcutTips.AutoSize := True;
 
-  // Row 4 — Multi-user note (shown when 2+ shortcuts will be created, hidden otherwise)
+  // Row 6 — Multi-user note (shown when 2+ shortcuts will be created, hidden otherwise)
   lblMultiShortcutEditingNote := TLabel.Create(ParentSurface);
   lblMultiShortcutEditingNote.Parent := ParentSurface;
   lblMultiShortcutEditingNote.Left := ScaleX(10);
@@ -3840,7 +4082,7 @@ begin
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
-  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(126);
+  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(26);
   chkShowMoreShortcutOptions.Width := ScaleX(260);
   chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
   chkShowMoreShortcutOptions.Checked := False;
@@ -3859,19 +4101,111 @@ begin
     Ctrl.Checked := DefaultChecked;
 end;
 
+// Loads a DWORD registry value into a TComboBox.
+// Index 0 in the combo is always "Not Set" (value absent).
+// Subsequent items map to integer values 0,1,2... (i.e. comboIndex = regValue + 1).
+// If the registry value is absent or out of range, selects index 0.
+procedure LoadDWordCombo(Root: Integer; const Key, Name: string; Ctrl: TComboBox);
+var
+  V: Cardinal;
+begin
+  if RegQueryDWordValue(Root, Key, Name, V) then
+  begin
+    if (Integer(V) + 1 < Ctrl.Items.Count) then
+      Ctrl.ItemIndex := Integer(V) + 1
+    else
+      Ctrl.ItemIndex := 0;
+  end
+  else
+    Ctrl.ItemIndex := 0;
+end;
+
+
+// Displays help information for a setting on the Show RDP Info page.
+// Sender.Tag identifies which setting (1-5). Descriptions focus on local session impact.
+// Displays help for a setting on the Edit System-wide RDP Settings page.
+// Tag 1=Enable RDP, 2=Show users, 3=Prevent duplicate, 4=RDP Port, 5=Image quality, 6=Compression, 7=Restart RDP
+procedure ShowGPHelpInfo(Sender: TObject);
+var
+  HelpText: string;
+begin
+  case TButton(Sender).Tag of
+    1: HelpText :=
+         'Enable Remote Desktop' + #13#10#13#10 +
+         'Allows or blocks RDP connections to this PC.' + #13#10#13#10 + #13#10#13#10 +
+         'Note: TermWrap requires RDP to be enabled. Disabling it here will prevent TermWrap from functioning.';
+    2: HelpText :=
+         'Show users on logon screen' + #13#10#13#10 +
+         'Controls whether local user accounts are listed on the Windows login screen.' + #13#10#13#10 +
+         'When enabled, user account names appear as tiles on the lock/login screen. ' +
+         'Disabling can improve security and keep things tidy by not displaying account names on the screen.';
+    3: HelpText :=
+         'Prevent duplicate connections per user' + #13#10#13#10 +
+         'When enabled, a user who already has an active RDP session cannot open a second simultaneous session. ' +
+         'Their new connection takes over the existing one.' + #13#10#13#10 +
+         'When disabled, the same user account can have multiple independent RDP sessions running at the same time. ' +
+         'This is useful in shared-access scenarios where you may need to log in more than once to the same account.';
+    4: HelpText :=
+         'RDP Listening Port' + #13#10#13#10 +
+         'The TCP port that the Remote Desktop service listens on for incoming connections. Default is 3389.' + #13#10#13#10 +
+         'Change this to a non-standard port to reduce exposure to automated port scans and brute-force attempts. ' +
+         'If you change it, you must edit all RDP shortcuts to use the new port (e.g. 127.0.0.2:3390).' + #13#10#13#10 +
+         'Requires a restart of the RDP service to take effect.';
+    5: HelpText :=
+         'RemoteFX Image Quality' + #13#10#13#10 +
+         'Sets the image encoding quality level used by the RemoteFX Adaptive Graphics pipeline.' + #13#10#13#10 +
+         'Options:' + #13#10 +
+         '  Not Set  - Windows chooses automatically' + #13#10 +
+         '  0 - Low      (lowest quality, fewest resources)' + #13#10 +
+         '  1 - Medium   (good balance of quality and CPU)' + #13#10 +
+         '  2 - High     (near-lossless, higher CPU cost)' + #13#10 +
+         '  3 - Lossless (perfect quality, highest CPU/memory)' + #13#10#13#10 +
+         'For local sessions, Medium or High is usually indistinguishable visually.';
+    6: HelpText :=
+         'RemoteFX Compression' + #13#10#13#10 +
+         'Controls the compression algorithm applied to RemoteFX display data before it is sent.' + #13#10#13#10 +
+         'Options:' + #13#10 +
+         '  Not Set  - Windows chooses automatically' + #13#10 +
+         '  0 - No compression      (lowest CPU, highest memory use)' + #13#10 +
+         '  1 - Optimized for memory (reduces RAM during encoding)' + #13#10 +
+         '  2 - Balanced            (recommended for most cases)' + #13#10 +
+         '  3 - Optimized for bandwidth (most CPU, smallest frames)' + #13#10#13#10 +
+         'For a local same-PC session, option 1 or 2 is generally best. Bandwidth is not ' +
+         'a bottleneck, so heavy compression wastes CPU without benefit.';
+    7: HelpText :=
+         'Restart RDP Service' + #13#10#13#10 +
+         'Stops and restarts the Windows Remote Desktop service (TermService) after applying changes.' + #13#10#13#10 +
+         'Some settings (such as the RDP port number) do not take effect until the service is restarted. ' +
+         'Active RDP sessions will be disconnected. Check this box if you changed the port or want to ' +
+         'ensure all settings are fully applied immediately.';
+  else
+    HelpText := 'No additional information available for this setting.';
+  end;
+  MsgBox(HelpText, mbInformation, MB_OK);
+end;
+
+// Creates a small "[?]" help button to the right of a control on a wizard page.
+// Tag identifies which help text to show (see ShowGPHelpInfo).
+function MakeHelpButton(Page: TWizardPage; ATop, ATag: Integer): TButton;
+var
+  Btn: TButton;
+begin
+  Btn := TButton.Create(Page);
+  Btn.Parent := Page.Surface;
+  Btn.Caption := '?';
+  Btn.Width := ScaleX(20);
+  Btn.Height := ScaleY(20);
+  Btn.Left := Page.SurfaceWidth - ScaleX(26);
+  Btn.Top := ATop;
+  Btn.Tag := ATag;
+  Btn.OnClick := @ShowGPHelpInfo;
+  Result := Btn;
+end;
+
 procedure InitializeWizard;
 var
   leftPos, topPos, widthVal: Integer;
   childIndent, childLeft, valueLeft: Integer;
-  // Runtime values used to populate System Status
-  DisplayVersion: string;
-  BuildNumberStr: string;
-  UBRVal: Cardinal;
-  ServiceStatus: string;
-  ServiceDllPath: string;
-  TermsrvVer: string;
-  TermWrapVer: string;
-  PortNumber: Cardinal;
   WelcomeExpLabel: TLabel;
   WelcomeIcon: TBitmapImage;
   // Credits labels (non-selectable) and link labels
@@ -3889,7 +4223,7 @@ var
   lblBSSName: TLabel;
   lblProjectHome: TLabel;
   // Controls for Edit System-wide Settings page (declared in global var block)
-  
+
   LinkColor: TColor;
   LabelColor: TColor;
   DesiredBottom: Integer;
@@ -3898,6 +4232,7 @@ var
     regVal: Cardinal;
     radioTopBase: Integer;
     radioSpacing: Integer;
+    TmpLabel: TLabel;
 begin
   // Initialize installer log file
   InitInstallerLog;
@@ -4094,14 +4429,23 @@ begin
   rbEditSystemwideSettings.Left := ScaleX(10);
   rbEditSystemwideSettings.Top := radioTopBase + radioSpacing;
   rbEditSystemwideSettings.Width := ScaleX(420);
-  rbEditSystemwideSettings.Caption := 'Edit System-wide settings';
+  rbEditSystemwideSettings.Caption := 'Edit System-wide RDP settings';
   rbEditSystemwideSettings.Checked := False;
   rbEditSystemwideSettings.OnClick := @OnInstallModeChange;
+
+  rbShowRDPInfo := TRadioButton.Create(Page_InstallOptions);
+  rbShowRDPInfo.Parent := Page_InstallOptions.Surface;
+  rbShowRDPInfo.Left := ScaleX(10);
+  rbShowRDPInfo.Top := radioTopBase + radioSpacing * 2;
+  rbShowRDPInfo.Width := ScaleX(420);
+  rbShowRDPInfo.Caption := 'Show RDP Info';
+  rbShowRDPInfo.Checked := False;
+  rbShowRDPInfo.OnClick := @OnInstallModeChange;
 
   rbUninstall := TRadioButton.Create(Page_InstallOptions);
   rbUninstall.Parent := Page_InstallOptions.Surface;
   rbUninstall.Left := ScaleX(10);
-  rbUninstall.Top := radioTopBase + radioSpacing * 2;
+  rbUninstall.Top := radioTopBase + radioSpacing * 3;
   rbUninstall.Width := ScaleX(420);
   rbUninstall.Caption := 'Uninstall (keeps users)';
   rbUninstall.Checked := False;
@@ -4280,8 +4624,8 @@ begin
     'Create a new user by entering a username (such as "macro1" or "rdp1") and password below.',
     ''
   );
-  UserPage.Add('Username:', False);
-  UserPage.Add('Password:', True);  // masked input
+  UserPage.Add('Create a Username: (eg. macro1)', False);
+  UserPage.Add('Set a Password:', True);  // masked input
   // Move Username and Password controls up slightly to improve layout
   try
     // Shift the edit controls and their labels (username/password)
@@ -4307,7 +4651,7 @@ begin
   // which can obscure non-windowed labels in some wizard themes.
   EditSystemwideSettingsPage := CreateCustomPage(
     Page_InstallOptions.ID,
-    'Edit System-wide settings',
+    'Edit System-wide RDP settings',
     'Warning: Changes below should only be changed if you know what you are doing'#13#10 +
     'Make changes and then click [Next]'
   );
@@ -4324,98 +4668,6 @@ begin
     childIndent := ScaleX(16);
     childLeft := leftPos + childIndent;
     valueLeft := childLeft + ScaleX(140);
-
-    // System Status header
-    lblSysHeader := TLabel.Create(EditSystemwideSettingsPage);
-    lblSysHeader.Parent := EditSystemwideSettingsPage.Surface;
-    lblSysHeader.Left := leftPos;
-    lblSysHeader.Top := topPos;
-    lblSysHeader.Caption := 'System Status';
-    lblSysHeader.Font.Style := [fsBold];
-    lblSysHeader.ParentFont := False;
-    lblSysHeader.Font.Color := LabelColor;
-    lblSysHeader.Transparent := True;
-    topPos := topPos + ScaleY(20);
-
-    // Windows Version (name / value)
-    lblWinVerName := TLabel.Create(EditSystemwideSettingsPage);
-    lblWinVerName.Parent := EditSystemwideSettingsPage.Surface;
-    lblWinVerName.Left := childLeft;
-    lblWinVerName.Top := topPos;
-    lblWinVerName.Caption := 'Windows Version:';
-    lblWinVerName.ParentFont := False;
-    lblWinVerName.Font.Color := LabelColor;
-    lblWinVerName.Transparent := True;
-
-    lblWinVer := TLabel.Create(EditSystemwideSettingsPage);
-    lblWinVer.Parent := EditSystemwideSettingsPage.Surface;
-    lblWinVer.Left := valueLeft;
-    lblWinVer.Top := topPos;
-    lblWinVer.Caption := 'v25H2 10.0.26200.2222';
-    lblWinVer.ParentFont := False;
-    lblWinVer.Font.Color := LabelColor;
-    lblWinVer.Transparent := True;
-    topPos := topPos + ScaleY(18);
-
-    // RDP Service (name / value)
-    lblRDPServiceName := TLabel.Create(EditSystemwideSettingsPage);
-    lblRDPServiceName.Parent := EditSystemwideSettingsPage.Surface;
-    lblRDPServiceName.Left := childLeft;
-    lblRDPServiceName.Top := topPos;
-    lblRDPServiceName.Caption := 'RDP Service:';
-    lblRDPServiceName.ParentFont := False;
-    lblRDPServiceName.Font.Color := LabelColor;
-    lblRDPServiceName.Transparent := True;
-
-    lblRDPService := TLabel.Create(EditSystemwideSettingsPage);
-    lblRDPService.Parent := EditSystemwideSettingsPage.Surface;
-    lblRDPService.Left := valueLeft;
-    lblRDPService.Top := topPos;
-    lblRDPService.Caption := 'Running';
-    lblRDPService.ParentFont := False;
-    lblRDPService.Font.Color := LabelColor;
-    lblRDPService.Transparent := True;
-    topPos := topPos + ScaleY(18);
-
-    // Windows RDP Version (name / value)
-    lblWinRDPVerName := TLabel.Create(EditSystemwideSettingsPage);
-    lblWinRDPVerName.Parent := EditSystemwideSettingsPage.Surface;
-    lblWinRDPVerName.Left := childLeft;
-    lblWinRDPVerName.Top := topPos;
-    lblWinRDPVerName.Caption := 'RDP DLL Version:';
-    lblWinRDPVerName.ParentFont := False;
-    lblWinRDPVerName.Font.Color := LabelColor;
-    lblWinRDPVerName.Transparent := True;
-
-    lblWinRDPVer := TLabel.Create(EditSystemwideSettingsPage);
-    lblWinRDPVer.Parent := EditSystemwideSettingsPage.Surface;
-    lblWinRDPVer.Left := valueLeft;
-    lblWinRDPVer.Top := topPos;
-    lblWinRDPVer.Caption := '10.0.xxxxx.xxxx';
-    lblWinRDPVer.ParentFont := False;
-    lblWinRDPVer.Font.Color := LabelColor;
-    lblWinRDPVer.Transparent := True;
-    topPos := topPos + ScaleY(18);
-
-    // Wrapper File and Version (name / value)
-    lblWrapperVerName := TLabel.Create(EditSystemwideSettingsPage);
-    lblWrapperVerName.Parent := EditSystemwideSettingsPage.Surface;
-    lblWrapperVerName.Left := childLeft;
-    lblWrapperVerName.Top := topPos;
-    lblWrapperVerName.Caption := 'Wrapper file info:';
-    lblWrapperVerName.ParentFont := False;
-    lblWrapperVerName.Font.Color := LabelColor;
-    lblWrapperVerName.Transparent := True;
-
-    lblWrapperVer := TLabel.Create(EditSystemwideSettingsPage);
-    lblWrapperVer.Parent := EditSystemwideSettingsPage.Surface;
-    lblWrapperVer.Left := valueLeft;
-    lblWrapperVer.Top := topPos;
-    lblWrapperVer.Caption := 'x.x.x.x';
-    lblWrapperVer.ParentFont := False;
-    lblWrapperVer.Font.Color := LabelColor;
-    lblWrapperVer.Transparent := True;
-    topPos := topPos + ScaleY(26);
 
     // General Settings
     lblGenHeader := TLabel.Create(EditSystemwideSettingsPage);
@@ -4438,6 +4690,7 @@ begin
     chkEnableRDP.Checked := True;
     chkEnableRDP.ParentFont := False;
     chkEnableRDP.Font.Color := LabelColor;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 1);
     topPos := topPos + ScaleY(20);
 
     chkShowUsers := TCheckBox.Create(EditSystemwideSettingsPage);
@@ -4449,6 +4702,7 @@ begin
     chkShowUsers.Checked := True;
     chkShowUsers.ParentFont := False;
     chkShowUsers.Font.Color := LabelColor;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 2);
     topPos := topPos + ScaleY(20);
 
     chkPreventDuplicate := TCheckBox.Create(EditSystemwideSettingsPage);
@@ -4460,6 +4714,7 @@ begin
     chkPreventDuplicate.Checked := True;
     chkPreventDuplicate.ParentFont := False;
     chkPreventDuplicate.Font.Color := LabelColor;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 3);
     topPos := topPos + ScaleY(26);
 
     lblRdpPort := TLabel.Create(EditSystemwideSettingsPage);
@@ -4488,7 +4743,66 @@ begin
     lblPortDefault.ParentFont := False;
     lblPortDefault.Font.Color := LabelColor;
     lblPortDefault.Transparent := True;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos - ScaleY(2), 4);
     topPos := topPos + ScaleY(36);
+
+    // Performance
+    TmpLabel := TLabel.Create(EditSystemwideSettingsPage);
+    TmpLabel.Parent := EditSystemwideSettingsPage.Surface;
+    TmpLabel.Left := leftPos;
+    TmpLabel.Top := topPos;
+    TmpLabel.Caption := 'Performance';
+    TmpLabel.Font.Style := [fsBold];
+    TmpLabel.ParentFont := False;
+    TmpLabel.Font.Color := LabelColor;
+    TmpLabel.Transparent := True;
+    topPos := topPos + ScaleY(20);
+
+    TmpLabel := TLabel.Create(EditSystemwideSettingsPage);
+    TmpLabel.Parent := EditSystemwideSettingsPage.Surface;
+    TmpLabel.Left := childLeft;
+    TmpLabel.Top := topPos + ScaleY(3);
+    TmpLabel.Caption := 'RemoteFX image quality:';
+    TmpLabel.ParentFont := False;
+    TmpLabel.Font.Color := LabelColor;
+    TmpLabel.Transparent := True;
+    cmbGPImageQuality := TComboBox.Create(EditSystemwideSettingsPage);
+    cmbGPImageQuality.Parent := EditSystemwideSettingsPage.Surface;
+    cmbGPImageQuality.Left := childLeft + ScaleX(130);
+    cmbGPImageQuality.Top := topPos;
+    cmbGPImageQuality.Width := ScaleX(420) - childIndent - ScaleX(140);
+    cmbGPImageQuality.Style := csDropDownList;
+    cmbGPImageQuality.Items.Add('Not Set (system default)');
+    cmbGPImageQuality.Items.Add('0 - Low');
+    cmbGPImageQuality.Items.Add('1 - Medium');
+    cmbGPImageQuality.Items.Add('2 - High');
+    cmbGPImageQuality.Items.Add('3 - Lossless');
+    cmbGPImageQuality.ItemIndex := 0;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 5);
+    topPos := topPos + ScaleY(24);
+
+    TmpLabel := TLabel.Create(EditSystemwideSettingsPage);
+    TmpLabel.Parent := EditSystemwideSettingsPage.Surface;
+    TmpLabel.Left := childLeft;
+    TmpLabel.Top := topPos + ScaleY(3);
+    TmpLabel.Caption := 'RemoteFX compression:';
+    TmpLabel.ParentFont := False;
+    TmpLabel.Font.Color := LabelColor;
+    TmpLabel.Transparent := True;
+    cmbGPCompression := TComboBox.Create(EditSystemwideSettingsPage);
+    cmbGPCompression.Parent := EditSystemwideSettingsPage.Surface;
+    cmbGPCompression.Left := childLeft + ScaleX(130);
+    cmbGPCompression.Top := topPos;
+    cmbGPCompression.Width := ScaleX(420) - childIndent - ScaleX(140);
+    cmbGPCompression.Style := csDropDownList;
+    cmbGPCompression.Items.Add('Not Set (system default)');
+    cmbGPCompression.Items.Add('0 - No compression');
+    cmbGPCompression.Items.Add('1 - Optimised for memory');
+    cmbGPCompression.Items.Add('2 - Balanced (memory / bandwidth)');
+    cmbGPCompression.Items.Add('3 - Optimised for bandwidth');
+    cmbGPCompression.ItemIndex := 0;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 6);
+    topPos := topPos + ScaleY(28);
 
     // Actions
     lblActionsHeader := TLabel.Create(EditSystemwideSettingsPage);
@@ -4511,77 +4825,116 @@ begin
     chkRestartRDP.Checked := False;
     chkRestartRDP.ParentFont := False;
     chkRestartRDP.Font.Color := LabelColor;
-    // Populate dynamic system values for display
-    // Windows Version (DisplayVersion/ReleaseId + build.UBR)
-    DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
-    if DisplayVersion = '' then
-      DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
-    BuildNumberStr := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuildNumber', '');
-    UBRVal := SafeRegDword(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'UBR', 0);
-    if (DisplayVersion <> '') and (BuildNumberStr <> '') then
-      lblWinVer.Caption := 'v' + DisplayVersion + ' 10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
-    else if (BuildNumberStr <> '') then
-      lblWinVer.Caption := '10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
-    else
-      lblWinVer.Caption := 'Unknown';
-
-    // RDP Service status (TermService)
-    ServiceStatus := GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status');
-    if ServiceStatus = '' then
-      lblRDPService.Caption := 'Not installed'
-    else
-      lblRDPService.Caption := ServiceStatus;
-
-    // termsrv.dll version
-    TermsrvVer := GetPSOutput('(Get-Item -Path (Join-Path $env:windir ''System32\\termsrv.dll'') -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
-    if TermsrvVer = '' then
-      lblWinRDPVer.Caption := 'Unknown'
-    else
-      lblWinRDPVer.Caption := TermsrvVer;
-
-    // Determines which wrapper method is installed (if any)
-    // Priority: (1) TermWrap (2) RDPWrap (3) None (Windows default)
-    ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
-    if FileExists(ServiceDllPath) then
-    begin
-      TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
-      if TermWrapVer = '' then
-        lblWrapperVer.Caption := 'TermWrap (unknown version)'
-      else
-        lblWrapperVer.Caption := 'TermWrap ' + TermWrapVer;
-    end
-    else
-    begin
-      ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
-      if FileExists(ServiceDllPath) then
-      begin
-        TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
-        if TermWrapVer = '' then
-          lblWrapperVer.Caption := 'RDPWrap (unknown version)'
-        else
-          lblWrapperVer.Caption := 'RDPWrap ' + TermWrapVer;
-      end
-      else
-        lblWrapperVer.Caption := 'None (Windows default)';
-    end;
-
-
-    // Enable Remote Desktop (fDenyTSConnections = 0 means enabled)
-    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, chkEnableRDP, False);
-
-    // Show users on logon screen (best-effort: DontDisplayLastUserName = 0 => show)
-    LoadDWordCheckbox(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, chkShowUsers, True);
-
-    // Prevent duplicate connections per user (fSingleSessionPerUser = 1 => single session)
-    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, chkPreventDuplicate, False);
-
-    // RDP listening port
-    if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
-      edtRdpPort.Text := IntToStr(PortNumber)
-    else
-      edtRdpPort.Text := IntToStr(RDP_LISTEN_PORT);
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 7);
   end
-  
+
+  // -------------------------------------------------------------------------
+  // Create "Show RDP Info" page
+  // Shows system status and allows configuring RemoteFX / startup GP settings.
+  // -------------------------------------------------------------------------
+  Page_ShowRDPInfo := CreateCustomPage(
+    Page_InstallOptions.ID,
+    'Show RDP Info',
+    'View system status and configure RDP performance settings.'
+  );
+  begin
+    if IsDarkColor(Page_ShowRDPInfo.Surface.Color) then
+      LabelColor := clWhite
+    else
+      LabelColor := clBlack;
+
+    leftPos := ScaleX(20);
+    topPos := ScaleY(5);
+    childIndent := ScaleX(16);
+    childLeft := leftPos + childIndent;
+    valueLeft := childLeft + ScaleX(140);
+
+    // --- System Status header (moved from Edit System-wide RDP Settings page) ---
+    lblSysHeader := TLabel.Create(Page_ShowRDPInfo);
+    lblSysHeader.Parent := Page_ShowRDPInfo.Surface;
+    lblSysHeader.Left := leftPos;
+    lblSysHeader.Top := topPos;
+    lblSysHeader.Caption := 'System Status';
+    lblSysHeader.Font.Style := [fsBold];
+    lblSysHeader.ParentFont := False;
+    lblSysHeader.Font.Color := LabelColor;
+    lblSysHeader.Transparent := True;
+    topPos := topPos + ScaleY(20);
+
+    lblWinVerName := TLabel.Create(Page_ShowRDPInfo);
+    lblWinVerName.Parent := Page_ShowRDPInfo.Surface;
+    lblWinVerName.Left := childLeft;
+    lblWinVerName.Top := topPos;
+    lblWinVerName.Caption := 'Windows Version:';
+    lblWinVerName.ParentFont := False;
+    lblWinVerName.Font.Color := LabelColor;
+    lblWinVerName.Transparent := True;
+    lblWinVer := TLabel.Create(Page_ShowRDPInfo);
+    lblWinVer.Parent := Page_ShowRDPInfo.Surface;
+    lblWinVer.Left := valueLeft;
+    lblWinVer.Top := topPos;
+    lblWinVer.Caption := '...';
+    lblWinVer.ParentFont := False;
+    lblWinVer.Font.Color := LabelColor;
+    lblWinVer.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    lblRDPServiceName := TLabel.Create(Page_ShowRDPInfo);
+    lblRDPServiceName.Parent := Page_ShowRDPInfo.Surface;
+    lblRDPServiceName.Left := childLeft;
+    lblRDPServiceName.Top := topPos;
+    lblRDPServiceName.Caption := 'RDP Service:';
+    lblRDPServiceName.ParentFont := False;
+    lblRDPServiceName.Font.Color := LabelColor;
+    lblRDPServiceName.Transparent := True;
+    lblRDPService := TLabel.Create(Page_ShowRDPInfo);
+    lblRDPService.Parent := Page_ShowRDPInfo.Surface;
+    lblRDPService.Left := valueLeft;
+    lblRDPService.Top := topPos;
+    lblRDPService.Caption := '...';
+    lblRDPService.ParentFont := False;
+    lblRDPService.Font.Color := LabelColor;
+    lblRDPService.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    lblWinRDPVerName := TLabel.Create(Page_ShowRDPInfo);
+    lblWinRDPVerName.Parent := Page_ShowRDPInfo.Surface;
+    lblWinRDPVerName.Left := childLeft;
+    lblWinRDPVerName.Top := topPos;
+    lblWinRDPVerName.Caption := 'RDP DLL Version:';
+    lblWinRDPVerName.ParentFont := False;
+    lblWinRDPVerName.Font.Color := LabelColor;
+    lblWinRDPVerName.Transparent := True;
+    lblWinRDPVer := TLabel.Create(Page_ShowRDPInfo);
+    lblWinRDPVer.Parent := Page_ShowRDPInfo.Surface;
+    lblWinRDPVer.Left := valueLeft;
+    lblWinRDPVer.Top := topPos;
+    lblWinRDPVer.Caption := '...';
+    lblWinRDPVer.ParentFont := False;
+    lblWinRDPVer.Font.Color := LabelColor;
+    lblWinRDPVer.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    lblWrapperVerName := TLabel.Create(Page_ShowRDPInfo);
+    lblWrapperVerName.Parent := Page_ShowRDPInfo.Surface;
+    lblWrapperVerName.Left := childLeft;
+    lblWrapperVerName.Top := topPos;
+    lblWrapperVerName.Caption := 'Wrapper file info:';
+    lblWrapperVerName.ParentFont := False;
+    lblWrapperVerName.Font.Color := LabelColor;
+    lblWrapperVerName.Transparent := True;
+    lblWrapperVer := TLabel.Create(Page_ShowRDPInfo);
+    lblWrapperVer.Parent := Page_ShowRDPInfo.Surface;
+    lblWrapperVer.Left := valueLeft;
+    lblWrapperVer.Top := topPos;
+    lblWrapperVer.Caption := '...';
+    lblWrapperVer.ParentFont := False;
+    lblWrapperVer.Font.Color := LabelColor;
+    lblWrapperVer.Transparent := True;
+    topPos := topPos + ScaleY(26);
+
+  end;
+
   // Create Tool 1 Page: Create RDP desktop shortcuts for existing local users
   Page_CreateShortcutsForExistingUsers := CreateCustomPage(
     Page_InstallOptions.ID,
@@ -4692,7 +5045,7 @@ begin
   StepPreventDuplicate := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepSetRdpPort := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
   StepRestartRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
-
+  StepShowRDPInfo := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   // Create a label on the Finished page to show completion messages (positioned right below header)
   FinishedText := TLabel.Create(WizardForm.FinishedLabel.Parent);
   FinishedText.Parent := WizardForm.FinishedLabel.Parent;
@@ -4774,6 +5127,10 @@ begin
     begin
       SelectedInstallMode := installModeEditSystemwideSettings;
       DoEditSystemWideSettings := True;
+    end
+    else if (Assigned(rbShowRDPInfo) and rbShowRDPInfo.Checked) then
+    begin
+      SelectedInstallMode := installModeShowRDPInfo;
     end
     else if rbEditShortcutSettings.Checked then
     begin
@@ -5170,6 +5527,11 @@ begin
       AddStepPendingLabel(StepCreateShortcuts, TXT_CreateShortcuts);
       AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
     end
+    else if SelectedInstallMode = installModeShowRDPInfo then
+    begin
+      StepsHeaderLabel.Caption := 'RDP Settings:';
+      AddStepPendingLabel(StepShowRDPInfo, TXT_ShowRDPInfo);
+    end
     else if SelectedInstallMode = installModeInstall then
     begin
       StepsHeaderLabel.Caption := 'Install Steps:';
@@ -5245,6 +5607,12 @@ begin
       WizardForm.StatusLabel.Caption := 'Preparing Create Shortcuts...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
     end
+    // Tune performance: deferred to ssPostInstall
+    else if SelectedInstallMode = installModeShowRDPInfo then
+    begin
+      WizardForm.StatusLabel.Caption := 'Preparing to apply Group Policy settings...';
+      WizardForm.ProgressGauge.Style := npbstMarquee;
+    end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
       WizardForm.StatusLabel.Caption := 'Preparing shortcut editor completion...';
@@ -5278,6 +5646,14 @@ begin
     if SelectedInstallMode = installModeUninstall then
     begin
       WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap has been removed.';
+    end
+    // Show RDP Info: display-only page, no settings to apply
+    else if SelectedInstallMode = installModeShowRDPInfo then
+    begin
+      SetStepInProgress(StepShowRDPInfo, TXT_ShowRDPInfo);
+      SetStepDone(StepShowRDPInfo, TXT_ShowRDPInfo);
+      WizardForm.StatusLabel.Caption := 'Done.';
+      WriteInstallerLog('ShowRDPInfo: no-op step complete.');
     end
     // Edit System-wide settings flow (apply queued registry/service changes)
     else if (SelectedInstallMode = installModeEditSystemwideSettings) and DoEditSystemWideSettings then
@@ -5356,6 +5732,25 @@ begin
           WriteInstallerLog('Failed to write RDP PortNumber');
         SetStepDone(StepSetRdpPort, 'Set RDP listening port');
       end;
+
+      // RemoteFX: image quality drives whether Adaptive Graphics is enabled
+      if Assigned(cmbGPImageQuality) then
+      begin
+        if cmbGPImageQuality.ItemIndex > 0 then
+        begin
+          RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'fEnableRemoteFXAdvancedRemoteApp', 1);
+          RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'ImageQuality', cmbGPImageQuality.ItemIndex - 1);
+        end
+        else
+        begin
+          RegDeleteValue(HKLM, REG_TS_POLICIES, 'fEnableRemoteFXAdvancedRemoteApp');
+          RegDeleteValue(HKLM, REG_TS_POLICIES, 'ImageQuality');
+        end;
+      end;
+      if Assigned(cmbGPCompression) and (cmbGPCompression.ItemIndex > 0) then
+        RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', cmbGPCompression.ItemIndex - 1)
+      else if Assigned(cmbGPCompression) and (cmbGPCompression.ItemIndex = 0) then
+        RegDeleteValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel');
 
       // Restart RDP Service if requested
       if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
@@ -5508,6 +5903,12 @@ begin
       else
         WriteInstallerLog('Registry: FAILED to set RemoteDesktop_SuppressWhenMinimized');
 
+      // Set unlimited max connections (default is 99999999, but some systems might have lower caps)
+      if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxInstanceCount', 999999) then
+        WriteInstallerLog('Registry: Set MaxInstanceCount=999999 (unlimited connections)')
+      else
+        WriteInstallerLog('Registry: FAILED to set MaxInstanceCount');
+
       // Ensure TermService runs under the expected service account.
       EnsureTermServiceRunsAsNetworkService;
 
@@ -5653,6 +6054,14 @@ var
   NowTick: Cardinal;
   IsDuplicatePageEvent: Boolean;
   DeltaMs: Cardinal;
+  DisplayVersion: string;
+  BuildNumberStr: string;
+  UBRVal: Cardinal;
+  ServiceStatus: string;
+  TermsrvVer: string;
+  ServiceDllPath: string;
+  TermWrapVer: string;
+  PortNumber: Cardinal;
 begin
   NowTick := GetTickCount;
   IsDuplicatePageEvent := (CurPageID = LastLoggedPageId) and ((NowTick - LastLoggedPageTick) <= PAGE_LOG_DEDUPE_MS);
@@ -5701,6 +6110,13 @@ begin
 
     if SelectedInstallMode = installModeEditShortcuts then
     begin
+      if Assigned(lblShortcutEditingFile) then
+      begin
+        if SelectedShortcutPath <> '' then
+          lblShortcutEditingFile.Caption := 'Editing:  ' + ExtractFileName(SelectedShortcutPath)
+        else
+          lblShortcutEditingFile.Caption := 'Editing:';
+      end;
       // EditShortcuts path: hide multi-note and tips, show "more options" checkbox
       if Assigned(lblMultiShortcutEditingNote) then lblMultiShortcutEditingNote.Visible := False;
       if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
@@ -5711,6 +6127,8 @@ begin
     end
     else if (SelectedInstallMode = installModeInstall) and (CreateUserMode = createUserModeNew) then
     begin
+      if Assigned(lblShortcutEditingFile) then
+        lblShortcutEditingFile.Caption := 'Editing:  New shortcut(s)';
       // CreateUsers path: show tips, show multi-note only when 2+ users queued
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
       if Assigned(lblShortcutTips) then lblShortcutTips.Visible := True;
@@ -5727,6 +6145,8 @@ begin
     end
     else
     begin
+      if Assigned(lblShortcutEditingFile) then
+        lblShortcutEditingFile.Caption := 'Editing:  Selected shortcut(s)';
       // ExistingUsers path: hide tips, show multi-note only when 2+ shortcuts selected
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
       if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
@@ -5756,9 +6176,69 @@ begin
     BuildCreateShortcutsControls;
   end;
 
-  // Capture original System-wide settings when the Edit System-wide Settings page is shown
+  // Populate Show RDP Info page when shown
+  if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
+  begin
+    // System Status — refresh live values each time the page is shown
+    DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
+    if DisplayVersion = '' then
+      DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
+    BuildNumberStr := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuildNumber', '');
+    UBRVal := SafeRegDword(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'UBR', 0);
+    if (DisplayVersion <> '') and (BuildNumberStr <> '') then
+      lblWinVer.Caption := 'v' + DisplayVersion + ' 10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
+    else if BuildNumberStr <> '' then
+      lblWinVer.Caption := '10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
+    else
+      lblWinVer.Caption := 'Unknown';
+
+    ServiceStatus := GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status');
+    if ServiceStatus = '' then lblRDPService.Caption := 'Not installed'
+    else lblRDPService.Caption := ServiceStatus;
+
+    TermsrvVer := GetPSOutput('(Get-Item -Path (Join-Path $env:windir ''System32\\termsrv.dll'') -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
+    if TermsrvVer = '' then lblWinRDPVer.Caption := 'Unknown'
+    else lblWinRDPVer.Caption := TermsrvVer;
+
+    ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
+    if FileExists(ServiceDllPath) then
+    begin
+      TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
+      if TermWrapVer = '' then lblWrapperVer.Caption := 'TermWrap (unknown version)'
+      else lblWrapperVer.Caption := 'TermWrap ' + TermWrapVer;
+    end
+    else
+    begin
+      ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
+      if FileExists(ServiceDllPath) then
+      begin
+        TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
+        if TermWrapVer = '' then lblWrapperVer.Caption := 'RDPWrap (unknown version)'
+        else lblWrapperVer.Caption := 'RDPWrap ' + TermWrapVer;
+      end
+      else
+        lblWrapperVer.Caption := 'None (Windows default)';
+    end;
+
+  end;
+
+  // Populate and capture original values when the Edit System-wide Settings page is shown
   if CurPageID = EditSystemwideSettingsPage.ID then
   begin
+    // Load live registry values into controls
+    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, chkEnableRDP, False);
+    LoadDWordCheckbox(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, chkShowUsers, True);
+    LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, chkPreventDuplicate, False);
+    if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
+      edtRdpPort.Text := IntToStr(PortNumber)
+    else
+      edtRdpPort.Text := IntToStr(RDP_LISTEN_PORT);
+
+    // RemoteFX settings
+    LoadDWordCombo(HKLM, REG_TS_POLICIES, 'ImageQuality', cmbGPImageQuality);
+    LoadDWordCombo(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', cmbGPCompression);
+
+    // Capture originals for change detection
     if Assigned(chkEnableRDP) then OrigEnableRDP := chkEnableRDP.Checked else OrigEnableRDP := False;
     if Assigned(chkShowUsers) then OrigShowUsers := chkShowUsers.Checked else OrigShowUsers := True;
     if Assigned(chkPreventDuplicate) then OrigPreventDuplicate := chkPreventDuplicate.Checked else OrigPreventDuplicate := False;
@@ -5790,6 +6270,14 @@ begin
       WizardForm.FinishedHeadingLabel.Caption := 'Uninstallation Complete';
       CompletionText := 'TermWrap has been successfully removed.';
       WriteInstallerLog('CurPageChanged: Showing uninstall completion message');
+    end
+    else if SelectedInstallMode = installModeShowRDPInfo then
+    begin
+      WizardForm.FinishedHeadingLabel.Caption := 'RDP Settings Applied';
+      CompletionText :=
+        'RDP settings have been applied.' + #13#10#13#10 +
+        'Some settings take effect immediately; others require a restart of the Remote Desktop service or a new RDP session.';
+      WriteInstallerLog('CurPageChanged: Showing Show RDP Info completion message');
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
