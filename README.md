@@ -18,7 +18,7 @@
 - ☑ Proactively identify and auto-fix common RDP misconfigurations
 - ☑ Creates ready‑to‑use RDP shortcuts on the desktop
 - ☑ Fully transparent (open source) installer script (Inno Setup)
----
+<hr>
 ### How to install it:
 1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
    - Your browser or Antivirus might need to be modified to allow it to download
