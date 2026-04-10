@@ -13,11 +13,11 @@
 - **Solution**: RDPWrapKit bundles the community's best tools into a single installer that _just works_
 
 ### What's in it
-- [x] [TermWrap](https://github.com/llccd/TermWrap) - Seamless updates (eliminating need for "rdpwrap.ini" files to be updated)
-- [x] Optional user creation during setup
-- [x] Proactively identify and auto-fix common RDP misconfigurations
-- [x] Creates ready‑to‑use RDP shortcuts on the desktop
-- [x] Fully transparent (open source) installer script (Inno Setup)
+- ☑ [TermWrap](https://github.com/llccd/TermWrap) - Seamless updates (eliminating need for "rdpwrap.ini" files to be updated)
+- ☑ Optional user creation during setup
+- ☑ Proactively identify and auto-fix common RDP misconfigurations
+- ☑ Creates ready‑to‑use RDP shortcuts on the desktop
+- ☑ Fully transparent (open source) installer script (Inno Setup)
 ---
 ### How to install it:
 1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
