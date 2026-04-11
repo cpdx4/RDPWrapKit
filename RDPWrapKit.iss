@@ -3903,9 +3903,9 @@ begin
   // Section separator label
   lblShortcutSection := TLabel.Create(ParentSurface);
   lblShortcutSection.Parent := ParentSurface;
+  lblShortcutSection.Left := ScaleX(10);
   lblShortcutSection.Top := lblShortcutEditingFile.Top + ScaleY(22);
   lblShortcutSection.Caption := 'Basic Shortcut Settings';
-  lblShortcutSection.Font.Color := clGray;
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
