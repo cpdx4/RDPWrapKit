@@ -28,8 +28,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.2"
-#define APP_VERSION_FILEINFO "0.5.2.0"
+#define APP_VERSION_STRING "0.5.3"
+#define APP_VERSION_FILEINFO "0.5.3.0"
 
 [Setup]
 AppName=RDPWrapKit
@@ -318,6 +318,7 @@ const
   // User groups
   GROUP_ADMINISTRATORS = 'Administrators';
   GROUP_RDP_USERS = 'Remote Desktop Users';
+  NET_USER_TEMP_PASSWORD = 'Tmp1!';     // Short throwaway password for two-step net user /add (avoids 14-char LM prompt)
   
   // -------------------------------------------------------------------------
   // TIMING CONSTANTS
@@ -1590,7 +1591,7 @@ begin
     exit;
   end;
 
-  Result := RunCmdHidden('echo Y | net.exe ' + Params);
+  Result := RunHidden('net.exe', Params);
 end;
 
 // Sleep with UI updates
@@ -3304,9 +3305,22 @@ begin
     UserCreatePath := 'NET';
     LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
 
-    // Create the user with NET USER first, then PowerShell fallback.
+    // Create the user with NET USER (two-step to avoid 14-char LM password prompt),
+    // then PowerShell fallback.
+    // Step 1: create with short throwaway password (no LM prompt)
+    // Step 2: set real password (password change does not trigger the LM prompt)
+    // If either step fails, delete the user and fall through to PowerShell.
     OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
-    NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never');
+    NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never');
+    if NetRc = 0 then
+    begin
+      NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password));
+      if NetRc <> 0 then
+      begin
+        WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + ', deleting partial user');
+        RunNetHidden('user ' + QuoteExeArg(UserName) + ' /delete');
+      end;
+    end;
     ResultCode := NetRc;
 
     if ResultCode <> 0 then
@@ -4642,7 +4656,7 @@ begin
   Page_ShortcutSettings := CreateCustomPage(
     UserPage.ID,
     'Shortcut Settings',
-    'Configure the settings for your RDP desktop shortcuts.'
+    'Configure the settings for your RDP desktop shortcuts. If unsure, just click [Next]'
   );
   BuildShortcutSettingsBlock(Page_ShortcutSettings.Surface, ScaleY(10));
 
@@ -5458,22 +5472,38 @@ begin
       // Get the last user from the list
       LastUserInfo := UsersList[UsersList.Count - 1];
       ParseUserEntry(LastUserInfo, UserName, Password);
-      
+
       // Populate the fields with the previous user's data
       UserPage.Values[0] := UserName;
       UserPage.Values[1] := Password;
-      
+
       // Remove this user from the list (so they can re-enter or modify)
       UsersList.Delete(UsersList.Count - 1);
-      
+
       // Select "add more users" since they're editing
       AddMoreRadio.Checked := True;
       DoneRadio.Checked := False;
-      
+
       // Stay on this page
       Result := False;
     end
     // If no previous users, allow normal Back behavior (goes to InstallTypePage)
+  end
+  // When navigating back from ShortcutSettings to UserPage (new-user path),
+  // restore the last entered user so they can re-enter or modify without a duplicate error
+  else if (CurPageID = Page_ShortcutSettings.ID) and
+          (SelectedInstallMode = installModeInstall) and
+          DoCreateRdpShortcuts and
+          (CreateUserMode = createUserModeNew) and
+          (UsersList.Count > 0) then
+  begin
+    LastUserInfo := UsersList[UsersList.Count - 1];
+    ParseUserEntry(LastUserInfo, UserName, Password);
+    UserPage.Values[0] := UserName;
+    UserPage.Values[1] := Password;
+    UsersList.Delete(UsersList.Count - 1);
+    DoneRadio.Checked := True;
+    AddMoreRadio.Checked := False;
   end;
 end;
 
