@@ -1590,7 +1590,7 @@ begin
     exit;
   end;
 
-  Result := RunHidden('net.exe', Params);
+  Result := RunCmdHidden('echo Y | net.exe ' + Params);
 end;
 
 // Sleep with UI updates
