@@ -29,12 +29,12 @@ Everything bundled into one setup with no manual steps, no headaches.
 
 | Step 1: Setup Options | Step 2: Create RDP User |
 |---|---|
-| <img src="https://github.com/user-attachments/assets/dd504d5f-e680-4ccd-bd06-a9b055509e05" alt="Setup Options" width="300" /> | <img src="https://github.com/user-attachments/assets/c46119dc-b3ab-4f73-b3d5-f1411244efc6" alt="Create RDP User" width="300" /> |
+| <img src="installer-images/Step1.png" alt="Setup Options" width="300" /> | <img src="installer-images/Step2.png" alt="Create RDP User" width="300" /> |
 | Choose the defaults (Install and Create RDP shortcuts) for new installs | Create a dedicated RDP user account during installation |
 
 | Step 3: Shortcut Settings | Step 4: Installation Complete |
 |---|---|
-| <img src="https://github.com/user-attachments/assets/f48c78ed-3322-4751-9861-86f287a6b185" alt="Shortcut Settings" width="300" /> | <img src="https://github.com/user-attachments/assets/67d03799-3aa8-4352-9154-5ac36d368bb8" alt="Installation Complete" width="300" /> |
+| <img src="installer-images/Step3.png" alt="Shortcut Settings" width="300" /> | <img src="installer-images/Step4.png" alt="Installation Complete" width="300" /> |
 | Configure your RDP shortcut settings | Installation is complete. Restart if prompted |
 
 | Step 5: Desktop Shortcuts |
