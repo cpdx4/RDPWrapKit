@@ -39,7 +39,7 @@ Everything bundled into one setup with no manual steps, no headaches.
 
 | Step 5: Desktop Shortcuts |
 |---|
-| <img src="https://github.com/user-attachments/assets/15e7947b-9a11-42b3-b9c7-5f081ce2947f" alt="Desktop Shortcuts" width="300" /> |
+| <img src="installer-images/Step5.png" alt="Desktop Shortcuts" width="300" /> |
 | Ready-to-use RDP shortcuts appear on your desktop after setup |
 
 ---
