@@ -1,65 +1,98 @@
-# RDPWrapKit - The all-in-one installer for local RDP setup
+<div align="center">
 
-### Quick Start
-1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
-2. Run it and choose **Typical Setup**
-3. Open the new RDP shortcut on your desktop
+# RDPWrapKit
 
-  <img width="571" height="346" alt="image" src="https://github.com/user-attachments/assets/bf059039-6677-4105-be13-139f0a536f40" />
+### The all-in-one installer for local RDP setup
 
----
-### Why this exists
-- **Problem**: Local RDP setups are complex, prone to errors, and requires upkeep
-- **Solution**: RDPWrapKit bundles the community's best tools into a single installer that _just works_
+**Problem:** Local RDP setups are complex, prone to errors, and require upkeep.  
+**Solution:** RDPWrapKit bundles the community's best tools into a single installer that just works.
 
-### What's in it
-- ☑ [TermWrap](https://github.com/llccd/TermWrap) - Seamless updates (eliminating need for "rdpwrap.ini" files to be updated)
-- ☑ Optional user creation during setup
-- ☑ Proactively identify and auto-fix common RDP misconfigurations
-- ☑ Creates ready‑to‑use RDP shortcuts on the desktop
-- ☑ Fully transparent (open source) installer script (Inno Setup)
-<hr>
+[![Download RDPWrapKit](https://img.shields.io/badge/Download-RDPWrapKit-blue?style=for-the-badge)](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
 
-### How to install it:
-1. Download [RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
-   - Your browser or Antivirus might need to be modified to allow it to download
-   - It is virus free. If worried, you can inspect the [source code](https://github.com/cpdx4/RDPWrapKit/blob/main/RDPWrapKit.iss) or build it yourself (instructions at bottom)
-
-2. Run the **RDPWrapKit-Setup.exe** app:
-
-  - **For new installs**, use "Typical Setup" ("Install TermWrap" and "Create Users")
-  - If you're already running TermWrap, choose "Use existing users" and skip installation
-    <img width="598" height="464" alt="Installer_SetupOptions" src="https://github.com/user-attachments/assets/5f2e9b9b-2633-44d4-bdaf-2fdd40b8d74d" />
-  
-4. If you chose to "Create Users", you can create a new user/password (such as 'macro1')
-
-      <img width="598" height="464" alt="Installer_CreateRDPUser" src="https://github.com/user-attachments/assets/d82f106e-7f08-4082-83e3-c344274a8d22" />
-  
-
-6. The install takes care of all the typical steps required to setup local RDP. Restart if prompted:
-
-      <img width="571" height="346" alt="image" src="https://github.com/user-attachments/assets/bf059039-6677-4105-be13-139f0a536f40" />
-
-8. Open the new RDP shortcut(s) on the desktop:
-
-     <img width="571" height="346" alt="Installer_DesktopIcon" src="https://github.com/user-attachments/assets/15e7947b-9a11-42b3-b9c7-5f081ce2947f" />
-
+</div>
 
 ---
-### Support / Contact
-- There is no implied warranty and unexpected results might occur
-- Open an [issue](https://github.com/cpdx4/RDPWrapKit/issues) on this repository for questions, bugs, or enhancement requests
 
-# Credits
+## No more Guesswork
+
+Everything bundled into one setup with no manual steps, no headaches.
+
+| | |
+|---|---|
+| ✅ **Local RDP for everyone** — What used to take 60 minutes **now takes 60 seconds** | ✅ **Seamless Updates** — Stays up to date automatically, no file editing needed (even after Windows Updates) · [Powered by TermWrap](https://github.com/llccd/TermWrap) |
+| ✅ **User Creation** — Optionally add user accounts during setup for instant RDP access | ✅ **Fewer Headaches** — Proactively identifies and auto-fixes common RDP misconfigurations |
+| ✅ **Quick Desktop Access** — Creates ready-to-use RDP shortcuts on your desktop automatically | ✅ **Fully Transparent** — Open-source Inno Setup code is public. See exactly what it does |
+
+---
+
+## 60-second installation
+
+| Step 1: Setup Options | Step 2: Create RDP User |
+|---|---|
+| <img src="installer-images/Step1.png" alt="Setup Options" width="300" /> | <img src="installer-images/Step2.png" alt="Create RDP User" width="300" /> |
+| Choose the defaults (Install and Create RDP shortcuts) for new installs | Create a dedicated RDP user account during installation |
+
+| Step 3: Shortcut Settings | Step 4: Installation Complete |
+|---|---|
+| <img src="installer-images/Step3.png" alt="Shortcut Settings" width="300" /> | <img src="installer-images/Step4.png" alt="Installation Complete" width="300" /> |
+| Configure your RDP shortcut settings | Installation is complete. Restart if prompted |
+
+| Step 5: Desktop Shortcuts |
+|---|
+| <img src="https://github.com/user-attachments/assets/15e7947b-9a11-42b3-b9c7-5f081ce2947f" alt="Desktop Shortcuts" width="300" /> |
+| Ready-to-use RDP shortcuts appear on your desktop after setup |
+
+---
+
+## Quick Start
+
+Three simple steps to a working local RDP setup.
+
+**01 — Download RDPWrapKit**
+
+[⬇ Download RDPWrapKit-Setup.exe](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
+
+> Your browser or antivirus might require an allow action. It is virus-free.
+
+**02 — Run the Installer**
+
+Run setup and choose **Typical Setup** for new installs.
+
+> This installs TermWrap, creates users, and configures everything. Restart your PC if prompted.
+
+**03 — Connect**
+
+Open the new desktop RDP shortcut to begin using RDP.
+
+> Re-run Setup if you need to make changes to your shortcuts.
+
+---
+
+## Support / Contact
+
+> There is no implied warranty and unexpected results might occur.
+
+Have a question, found a bug, or want to request an enhancement? Open an [issue](https://github.com/cpdx4/RDPWrapKit/issues) on this repository.
+
+---
+
+## Credits
+
 - RDPWrapKit builds on the fantastic work of [TermWrap](https://github.com/llccd/TermWrap), which was inspired by [RDPWrapper](https://github.com/stascorp/rdpwrap/releases)
-- Bee Swarm Simulator communities ([BSGH](https://discord.gg/bsgh) and [BSS Grinders](https://discord.gg/K5U3RdGXh6))
-
+- Bee Swarm Simulator communities: [BSGH](https://discord.gg/bsgh) and [BSS Grinders](https://discord.gg/K5U3RdGXh6)
 
 ---
-### To build this from source code
-#### (Advanced. NOT required for most people):
-1. Install [Inno Setup](https://github.com/jrsoftware/issrc/releases)
-2. Download the [Source Code](https://github.com/cpdx4/RDPWrapKit/archive/refs/heads/main.zip)
-3. Open `RDPWrapKit.iss` in the Inno Setup Compiler.
-4. Compile the script (press F9 or use the Compile button).
-5. The generated installer will appear in the `output/` folder.
+
+## Build from Source
+
+> Advanced — not required for most people.
+
+**01 — Install Inno Setup and download the source**
+
+Install [Inno Setup](https://github.com/jrsoftware/issrc/releases) and download the [Source Code](https://github.com/cpdx4/RDPWrapKit/archive/refs/heads/main.zip).
+
+**02 — Open and Compile**
+
+Open `RDPWrapKit.iss` in the Inno Setup Compiler, then press `F9` or use the Compile button.
+
+> The generated installer will appear in the `output/` folder.
