@@ -28,8 +28,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.3"
-#define APP_VERSION_FILEINFO "0.5.3.0"
+#define APP_VERSION_STRING "0.5.4"
+#define APP_VERSION_FILEINFO "0.5.4.0"
 
 [Setup]
 AppName=RDPWrapKit
@@ -155,7 +155,7 @@ var
   SelectedShortcutIndex: Integer;
   SelectedShortcutPath: string;
   FinishedExampleImage: TBitmapImage;
-  FinishedExampleLabel: TLabel;
+  
   // Flags derived from welcome/options controls
   DoInstallTermWrap: Boolean;
   DoCreateRdpShortcuts: Boolean;
@@ -164,6 +164,7 @@ var
   OrigEnableRDP: Boolean;
   OrigShowUsers: Boolean;
   OrigPreventDuplicate: Boolean;
+  OrigHideSecurityWarnings: Boolean;
   OrigRdpPort: Cardinal;
   OptionsLabel: TLabel;
   Tool1UsersHeaderLabel: TLabel;  // "Users found" header
@@ -184,6 +185,7 @@ var
   chkEnableRDP: TCheckBox;
   chkShowUsers: TCheckBox;
   chkPreventDuplicate: TCheckBox;
+  chkHideSecurityWarnings: TCheckBox;
   lblRdpPort: TLabel;
   edtRdpPort: TEdit;
   lblPortDefault: TLabel;
@@ -1097,6 +1099,27 @@ begin
       DeleteFile(PSPath);
     end;
   end;
+end;
+
+procedure SignRdpFile(const RdpPath: string);
+var
+  PSCommand: string;
+  ResultCode: Integer;
+begin
+  // Ensure cert exists and sign the .rdp file using rdpsign.exe
+  PSCommand :=
+    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
+    '$existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
+    'if ($existing) { $thumb = $existing.Thumbprint } else { ' +
+      '$c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
+      '$thumb = $c.Thumbprint; $tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; Export-Certificate -Cert ("Cert:\\LocalMachine\\My\\" + $thumb) -FilePath $tmp; Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root"; Remove-Item $tmp -Force } ; ' +
+    'try { & rdpsign.exe /sha256 $thumb "' + RdpPath + '"; exit $LASTEXITCODE } catch { exit 1 }';
+
+  Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+    WriteInstallerLog('SignRdpFile: signed ' + RdpPath)
+  else
+    WriteInstallerLog('SignRdpFile: failed to sign ' + RdpPath + ' (exit=' + IntToStr(ResultCode) + ')');
 end;
 
 procedure OpenTermWrap(Sender: TObject);
@@ -3008,6 +3031,8 @@ begin
     SL.Add('redirectclipboard:i:' + IntToStr(RedirectClipboard));
     SL.Add('redirectdrives:i:0');
     SL.Add('redirectprinters:i:0');
+    SL.Add('redirectsmartcards:i:0');
+    SL.Add('redirectwebauthn:i:0');
     SL.Add('videoplaybackmode:i:1');
     SL.Add('connection type:i:7');
     SL.Add('displayconnectionbar:i:1');
@@ -3170,6 +3195,8 @@ begin
   // Direct write path avoids PowerShell hangs in shortcut generation.
   if WriteRDPFileDirect(UserName, RDPPath, EncPath) then
   begin
+    // Sign the .rdp file immediately after direct write
+    SignRdpFile(RDPPath);
     SecureCleanupTempFiles(UserName);
     exit;
   end
@@ -3225,6 +3252,8 @@ begin
   else
   begin
     WriteInstallerLog('CreateRDPShortcut: RDP file created successfully');
+    // Sign the created RDP file so saved shortcuts are trusted by our cert
+    SignRdpFile(RDPPath);
   end;
 
   // Securely delete temporary files containing sensitive data
@@ -3825,6 +3854,10 @@ begin
   SaveStringToFile(ScriptPath, PSScript, False);
   Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   WriteInstallerLog('WriteShortcutSettingsToRdpFile: exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
+  if ResultCode = 0 then
+  begin
+    SignRdpFile(RdpPath);
+  end;
 end;
 
 // Displays help for a setting on the Shortcut Settings page.
@@ -4145,53 +4178,59 @@ var
 begin
   case TButton(Sender).Tag of
     1: HelpText :=
-         'Enable Remote Desktop' + #13#10#13#10 +
-         'Allows or blocks RDP connections to this PC.' + #13#10#13#10 + #13#10#13#10 +
-         'Note: TermWrap requires RDP to be enabled. Disabling it here will prevent TermWrap from functioning.';
+      'Enable Remote Desktop' + #13#10#13#10 +
+      'Allows or blocks RDP connections to this PC.' + #13#10#13#10 + #13#10#13#10 +
+      'Note: TermWrap requires RDP to be enabled. Disabling it here will prevent TermWrap from functioning.';
     2: HelpText :=
-         'Show users on logon screen' + #13#10#13#10 +
-         'Controls whether local user accounts are listed on the Windows login screen.' + #13#10#13#10 +
-         'When enabled, user account names appear as tiles on the lock/login screen. ' +
-         'Disabling can improve security and keep things tidy by not displaying account names on the screen.';
+      'Show users on logon screen' + #13#10#13#10 +
+      'Controls whether local user accounts are listed on the Windows login screen.' + #13#10#13#10 +
+      'When enabled, user account names appear as tiles on the lock/login screen. ' +
+      'Disabling can improve security and keep things tidy by not displaying account names on the screen.';
     3: HelpText :=
-         'Prevent duplicate connections per user' + #13#10#13#10 +
-         'When enabled, a user who already has an active RDP session cannot open a second simultaneous session. ' +
-         'Their new connection takes over the existing one.' + #13#10#13#10 +
-         'When disabled, the same user account can have multiple independent RDP sessions running at the same time. ' +
-         'This is useful in shared-access scenarios where you may need to log in more than once to the same account.';
+      'Prevent duplicate connections per user' + #13#10#13#10 +
+      'When enabled, a user who already has an active RDP session cannot open a second simultaneous session. ' +
+      'Their new connection takes over the existing one.' + #13#10#13#10 +
+      'When disabled, the same user account can have multiple independent RDP sessions running at the same time. ' +
+      'This is useful in shared-access scenarios where you may need to log in more than once to the same account.';
     4: HelpText :=
-         'RDP Listening Port' + #13#10#13#10 +
-         'The TCP port that the Remote Desktop service listens on for incoming connections. Default is 3389.' + #13#10#13#10 +
-         'Change this to a non-standard port to reduce exposure to automated port scans and brute-force attempts. ' +
-         'If you change it, you must edit all RDP shortcuts to use the new port (e.g. 127.0.0.2:3390).' + #13#10#13#10 +
-         'Requires a restart of the RDP service to take effect.';
+      'RDP Listening Port' + #13#10#13#10 +
+      'The TCP port that the Remote Desktop service listens on for incoming connections. Default is 3389.' + #13#10#13#10 +
+      'Change this to a non-standard port to reduce exposure to automated port scans and brute-force attempts. ' +
+      'If you change it, you must edit all RDP shortcuts to use the new port (e.g. 127.0.0.2:3390).' + #13#10#13#10 +
+      'Requires a restart of the RDP service to take effect.';
     5: HelpText :=
-         'RemoteFX Image Quality' + #13#10#13#10 +
-         'Sets the image encoding quality level used by the RemoteFX Adaptive Graphics pipeline.' + #13#10#13#10 +
-         'Options:' + #13#10 +
-         '  Not Set  - Windows chooses automatically' + #13#10 +
-         '  0 - Low      (lowest quality, fewest resources)' + #13#10 +
-         '  1 - Medium   (good balance of quality and CPU)' + #13#10 +
-         '  2 - High     (near-lossless, higher CPU cost)' + #13#10 +
-         '  3 - Lossless (perfect quality, highest CPU/memory)' + #13#10#13#10 +
-         'For local sessions, Medium or High is usually indistinguishable visually.';
+      'RemoteFX Image Quality' + #13#10#13#10 +
+      'Sets the image encoding quality level used by the RemoteFX Adaptive Graphics pipeline.' + #13#10#13#10 +
+      'Options:' + #13#10 +
+      '  Not Set  - Windows chooses automatically' + #13#10 +
+      '  0 - Low      (lowest quality, fewest resources)' + #13#10 +
+      '  1 - Medium   (good balance of quality and CPU)' + #13#10 +
+      '  2 - High     (near-lossless, higher CPU cost)' + #13#10 +
+      '  3 - Lossless (perfect quality, highest CPU/memory)' + #13#10#13#10 +
+      'For local sessions, Medium or High is usually indistinguishable visually.';
     6: HelpText :=
-         'RemoteFX Compression' + #13#10#13#10 +
-         'Controls the compression algorithm applied to RemoteFX display data before it is sent.' + #13#10#13#10 +
-         'Options:' + #13#10 +
-         '  Not Set  - Windows chooses automatically' + #13#10 +
-         '  0 - No compression      (lowest CPU, highest memory use)' + #13#10 +
-         '  1 - Optimized for memory (reduces RAM during encoding)' + #13#10 +
-         '  2 - Balanced            (recommended for most cases)' + #13#10 +
-         '  3 - Optimized for bandwidth (most CPU, smallest frames)' + #13#10#13#10 +
-         'For a local same-PC session, option 1 or 2 is generally best. Bandwidth is not ' +
-         'a bottleneck, so heavy compression wastes CPU without benefit.';
+      'RemoteFX Compression' + #13#10#13#10 +
+      'Controls the compression algorithm applied to RemoteFX display data before it is sent.' + #13#10#13#10 +
+      'Options:' + #13#10 +
+      '  Not Set  - Windows chooses automatically' + #13#10 +
+      '  0 - No compression      (lowest CPU, highest memory use)' + #13#10 +
+      '  1 - Optimized for memory (reduces RAM during encoding)' + #13#10 +
+      '  2 - Balanced            (recommended for most cases)' + #13#10 +
+      '  3 - Optimized for bandwidth (most CPU, smallest frames)' + #13#10#13#10 +
+      'For a local same-PC session, option 1 or 2 is generally best. Bandwidth is not ' +
+      'a bottleneck, so heavy compression wastes CPU without benefit.';
     7: HelpText :=
-         'Restart RDP Service' + #13#10#13#10 +
-         'Stops and restarts the Windows Remote Desktop service (TermService) after applying changes.' + #13#10#13#10 +
-         'Some settings (such as the RDP port number) do not take effect until the service is restarted. ' +
-         'Active RDP sessions will be disconnected. Check this box if you changed the port or want to ' +
-         'ensure all settings are fully applied immediately.';
+      'Restart RDP Service' + #13#10#13#10 +
+      'Stops and restarts the Windows Remote Desktop service (TermService) after applying changes.' + #13#10#13#10 +
+      'Some settings (such as the RDP port number) do not take effect until the service is restarted. ' +
+      'Active RDP sessions will be disconnected. Check this box if you changed the port or want to ' +
+      'ensure all settings are fully applied immediately.';
+    8: HelpText :=
+      'Hide most security warnings' + #13#10#13#10 +
+      'When enabled, common security prompt dialogs related to RDP are hidden. Please be aware that ' +
+      'this can suppress warnings, which may have security implications. Files created by RDPWrapKit ' +
+      'are safe because they are Local RDP files.' + #13#10#13#10 +
+      'Exercise caution if you use RDP to connect to untrusted remote machines.';
   else
     HelpText := 'No additional information available for this setting.';
   end;
@@ -4731,6 +4770,18 @@ begin
     MakeHelpButton(EditSystemwideSettingsPage, topPos, 3);
     topPos := topPos + ScaleY(26);
 
+    chkHideSecurityWarnings := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkHideSecurityWarnings.Parent := EditSystemwideSettingsPage.Surface;
+    chkHideSecurityWarnings.Left := childLeft;
+    chkHideSecurityWarnings.Top := topPos;
+    chkHideSecurityWarnings.Width := ScaleX(420) - childIndent;
+    chkHideSecurityWarnings.Caption := 'Hide most security warnings';
+    chkHideSecurityWarnings.Checked := False;
+    chkHideSecurityWarnings.ParentFont := False;
+    chkHideSecurityWarnings.Font.Color := LabelColor;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 8);
+    topPos := topPos + ScaleY(26);
+
     lblRdpPort := TLabel.Create(EditSystemwideSettingsPage);
     lblRdpPort.Parent := EditSystemwideSettingsPage.Surface;
     lblRdpPort.Left := childLeft;
@@ -5089,21 +5140,11 @@ begin
   FinishedExampleImage := TBitmapImage.Create(WizardForm.FinishedLabel.Parent);
   FinishedExampleImage.Parent := WizardForm.FinishedLabel.Parent;
   FinishedExampleImage.Left := WizardForm.FinishedLabel.Left;
-  FinishedExampleImage.Top := FinishedText.Top + ScaleY(70);
-  FinishedExampleImage.Width := ScaleX(210);
-  FinishedExampleImage.Height := ScaleY(220);
+  FinishedExampleImage.Top := FinishedText.Top + ScaleY(100);
+  FinishedExampleImage.Width := ScaleX(142);
+  FinishedExampleImage.Height := ScaleY(150);
   FinishedExampleImage.Stretch := False;
   FinishedExampleImage.Visible := False;
-
-  FinishedExampleLabel := TLabel.Create(WizardForm.FinishedLabel.Parent);
-  FinishedExampleLabel.Parent := WizardForm.FinishedLabel.Parent;
-  FinishedExampleLabel.Left := WizardForm.FinishedLabel.Left;
-  FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
-  FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
-  FinishedExampleLabel.AutoSize := False;
-  FinishedExampleLabel.WordWrap := True;
-  FinishedExampleLabel.Caption := '';
-  FinishedExampleLabel.Visible := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -5752,6 +5793,27 @@ begin
         SetStepDone(StepPreventDuplicate, 'Prevent duplicate connections per user');
       end;
 
+      // Hide most security warnings (RedirectionWarningDialogVersion)
+      if Assigned(chkHideSecurityWarnings) and (chkHideSecurityWarnings.Checked <> OrigHideSecurityWarnings) then
+      begin
+        SetStepInProgress(StepPreventDuplicate, 'Updating RDP client redirection warning policy');
+        if chkHideSecurityWarnings.Checked then
+        begin
+          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1) then
+            WriteInstallerLog('Applied RedirectionWarningDialogVersion=1 (Hide security warnings)')
+          else
+            WriteInstallerLog('Failed to write RedirectionWarningDialogVersion');
+        end
+        else
+        begin
+          if RegDeleteValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion') then
+            WriteInstallerLog('Removed RedirectionWarningDialogVersion (Restore warnings)')
+          else
+            WriteInstallerLog('Failed to remove RedirectionWarningDialogVersion');
+        end;
+        SetStepDone(StepPreventDuplicate, 'Hide most security warnings');
+      end;
+
       // RDP port change
       if (StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT) <> OrigRdpPort) then
       begin
@@ -5932,6 +5994,12 @@ begin
         WriteInstallerLog('Registry: Set RemoteDesktop_SuppressWhenMinimized=2 (allow minimized RDP)')
       else
         WriteInstallerLog('Registry: FAILED to set RemoteDesktop_SuppressWhenMinimized');
+
+      // Hide most security warnings by default for TermWrap installs
+      if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1) then
+        WriteInstallerLog('Registry: Set RedirectionWarningDialogVersion=1 (Hide security warnings)')
+      else
+        WriteInstallerLog('Registry: FAILED to set RedirectionWarningDialogVersion');
 
       // Set unlimited max connections (default is 99999999, but some systems might have lower caps)
       if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxInstanceCount', 999999) then
@@ -6209,6 +6277,12 @@ begin
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
+    // Reset displayed values to indicate loading when page is shown again (e.g. after Back/Next)
+    if Assigned(lblWinVer) then lblWinVer.Caption := '--';
+    if Assigned(lblRDPService) then lblRDPService.Caption := '--';
+    if Assigned(lblWinRDPVer) then lblWinRDPVer.Caption := '--';
+    if Assigned(lblWrapperVer) then lblWrapperVer.Caption := '--';
+
     // System Status — refresh live values each time the page is shown
     DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
     if DisplayVersion = '' then
@@ -6259,6 +6333,8 @@ begin
     LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, chkEnableRDP, False);
     LoadDWordCheckbox(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, chkShowUsers, True);
     LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, chkPreventDuplicate, False);
+    // Hide most security warnings: RedirectionWarningDialogVersion under Policies\...\Terminal Services\Client
+    LoadDWordCheckbox(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1, chkHideSecurityWarnings, False);
     if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
       edtRdpPort.Text := IntToStr(PortNumber)
     else
@@ -6272,6 +6348,7 @@ begin
     if Assigned(chkEnableRDP) then OrigEnableRDP := chkEnableRDP.Checked else OrigEnableRDP := False;
     if Assigned(chkShowUsers) then OrigShowUsers := chkShowUsers.Checked else OrigShowUsers := True;
     if Assigned(chkPreventDuplicate) then OrigPreventDuplicate := chkPreventDuplicate.Checked else OrigPreventDuplicate := False;
+    if Assigned(chkHideSecurityWarnings) then OrigHideSecurityWarnings := chkHideSecurityWarnings.Checked else OrigHideSecurityWarnings := False;
     OrigRdpPort := StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT);
     WriteInstallerLog('CurPageChanged: Captured original system settings: EnableRDP=' + BoolToStr(OrigEnableRDP) + ', ShowUsers=' + BoolToStr(OrigShowUsers) + ', SingleSession=' + BoolToStr(OrigPreventDuplicate) + ', Port=' + IntToStr(OrigRdpPort));
   end;
@@ -6291,7 +6368,6 @@ begin
   begin
     // Reset optional finish-page image controls by default.
     if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
-    if Assigned(FinishedExampleLabel) then FinishedExampleLabel.Visible := False;
 
     WriteInstallerLog('CurPageChanged: Finish page shown');
     if SelectedInstallMode = installModeUninstall then
@@ -6319,11 +6395,11 @@ begin
           'Important: Always click [Save] on the General tab.';
         WriteInstallerLog('CurPageChanged: Showing shortcut editor completion message');
 
-        if Assigned(FinishedExampleImage) and Assigned(FinishedExampleLabel) then
+        if Assigned(FinishedExampleImage) then
         begin
-          FinishedExampleImage.Top := FinishedText.Top + ScaleY(40);
-          FinishedExampleImage.Width := ScaleX(210);
-          FinishedExampleImage.Height := ScaleY(220);
+          FinishedExampleImage.Top := FinishedText.Top + ScaleY(100);
+          FinishedExampleImage.Width := ScaleX(142);
+          FinishedExampleImage.Height := ScaleY(150);
           FinishedExampleImage.Stretch := False;
           // Load the rdp_edit_save.bmp image from temp
           try
@@ -6334,12 +6410,7 @@ begin
             FinishedExampleImage.Visible := False;
           end;
           FinishedExampleImage.Visible := True;
-          FinishedExampleLabel.Top := FinishedExampleImage.Top + FinishedExampleImage.Height + ScaleY(4);
-          FinishedExampleLabel.Width := WizardForm.FinishedLabel.Width;
-          FinishedExampleLabel.AutoSize := False;
-          FinishedExampleLabel.WordWrap := True;
-          FinishedExampleLabel.Caption := '';
-          FinishedExampleLabel.Visible := True;
+          
         end;
       end
       else
@@ -6348,7 +6419,6 @@ begin
         CompletionText := 'Your shortcut settings have been saved to the .rdp file.';
         WriteInstallerLog('CurPageChanged: Showing shortcut settings saved message (no mstsc edit)');
         if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
-        if Assigned(FinishedExampleLabel) then FinishedExampleLabel.Visible := False;
       end;
     end
     else
@@ -6410,6 +6480,10 @@ begin
       end;
     end;
     
+    // Add note about Windows security warning when connecting to remote PCs
+    CompletionText := CompletionText + #13#10#13#10 +
+      'Windows may show a security warning when you connect to remote PCs. This is normal. RDPWrapKit is local so the connection never leaves your network.';
+
     // If Smart App Control is enabled, add guidance and show a popup
     if SmartAppControlIsOn then
     begin
