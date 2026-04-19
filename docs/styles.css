@@ -596,6 +596,25 @@ h2 {
     transform: none;
   }
 
+  .lightbox-controls {
+    display: flex;
+    gap: 0.6rem;
+    width: 100%;
+    justify-content: center;
+    order: 1;
+  }
+
+  .lightbox-controls .lightbox-nav {
+    position: relative;
+    width: 3.2rem;
+    height: 3.2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.03);
+  }
+
   .lightbox {
     flex-direction: column;
     gap: 0.8rem;
@@ -603,6 +622,11 @@ h2 {
 
   .lightbox-content {
     order: 2;
+  }
+
+  /* Avoid collapsed grid items on small screens: make the featured shot span full width */
+  .shot-result {
+    grid-column: 1 / -1;
   }
 }
 
