@@ -3610,10 +3610,12 @@ begin
   if Assigned(L) then
   begin
     L.Caption := '✓ ' + Text;
-    if IsDarkColor(WizardForm.Color) then
-      L.Font.Color := RGBToColor(0, 200, 0)   // brighter green for dark backgrounds
-    else
-      L.Font.Color := RGBToColor(0, 128, 0);  // standard green for light backgrounds
+    // Ensure the label does not inherit parent font settings or VCL style
+    // font application, then use a bright, high-contrast green so
+    // checkmarks remain visible in both light and dark themes.
+    L.ParentFont := False;
+    L.StyleElements := L.StyleElements - [seFont];
+    L.Font.Color := RGBToColor(0, 200, 0);
     L.Font.Style := [];
     L.Visible := True;
   end;
