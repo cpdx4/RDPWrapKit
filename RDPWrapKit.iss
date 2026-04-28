@@ -28,8 +28,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.4"
-#define APP_VERSION_FILEINFO "0.5.4.0"
+#define APP_VERSION_STRING "0.5.5"
+#define APP_VERSION_FILEINFO "0.5.5.0"
 
 [Setup]
 AppName=RDPWrapKit
@@ -138,6 +138,8 @@ var
   chkCreateRdpShortcuts: TCheckBox;
   rbCreateUsers: TRadioButton;
   rbUseExistingUsers: TRadioButton;
+  rbUseExistingUsersHint: TLabel;
+  InstallOptionsAutoUserSourceApplied: Boolean;
   rbEditShortcutSettings: TRadioButton;
   CreateRdpShortcutsGroup: TPanel;
   EditShortcutPage: TWizardPage;
@@ -2091,6 +2093,77 @@ begin
 
   FilesList.Sort;
   Result := FilesList;
+end;
+
+function IsPathEndingWithRdpExe(const FilePath: string): Boolean;
+var
+  S: string;
+begin
+  S := LowerCase(Trim(StripWrappingQuotes(FilePath)));
+  Result := (Length(S) >= Length('rdp.exe')) and
+            (Copy(S, Length(S) - Length('rdp.exe') + 1, Length('rdp.exe')) = 'rdp.exe');
+end;
+
+function DesktopFolderHasRdpShortcut(const DesktopDir: string): Boolean;
+var
+  FindRec: TFindRec;
+  LnkPattern: string;
+  ShellObj: Variant;
+  ShortcutObj: Variant;
+  TargetPath: string;
+begin
+  Result := False;
+  if not DirExists(DesktopDir) then
+    exit;
+
+  LnkPattern := AddBackslash(DesktopDir) + '*.lnk';
+  if not FindFirst(LnkPattern, FindRec) then
+    exit;
+
+  ShellObj := Unassigned;
+  try
+    try
+      ShellObj := CreateOleObject('WScript.Shell');
+    except
+      WriteInstallerLog('WARNING: Could not create WScript.Shell COM object for shortcut detection');
+      exit;
+    end;
+
+    repeat
+      if (FindRec.Attributes and 16) = 0 then
+      begin
+        TargetPath := '';
+        try
+          ShortcutObj := ShellObj.CreateShortcut(AddBackslash(DesktopDir) + FindRec.Name);
+          TargetPath := ShortcutObj.TargetPath;
+        except
+          // Ignore malformed shortcut files and continue scanning.
+          TargetPath := '';
+        end;
+
+        if IsPathEndingWithRdpExe(TargetPath) then
+        begin
+          Result := True;
+          exit;
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function HasDesktopShortcutTargetingRdpExe: Boolean;
+var
+  UserDesktop: string;
+  CommonDesktop: string;
+begin
+  UserDesktop := ExpandConstant('{userdesktop}');
+  CommonDesktop := ExpandConstant('{commondesktop}');
+
+  Result := DesktopFolderHasRdpShortcut(UserDesktop);
+  if (not Result) and (CommonDesktop <> '') and (CompareText(UserDesktop, CommonDesktop) <> 0) then
+    Result := DesktopFolderHasRdpShortcut(CommonDesktop);
 end;
 
 procedure OnShortcutRadioClick(Sender: TObject);
@@ -4260,7 +4333,10 @@ end;
 procedure InitializeWizard;
 var
   leftPos, topPos, widthVal: Integer;
+  TermWrapAlreadyInstalled: Boolean;
+  InstallHintOffset: Integer;
   childIndent, childLeft, valueLeft: Integer;
+  chkInstallTermWrapHint: TLabel;
   WelcomeExpLabel: TLabel;
   WelcomeIcon: TBitmapImage;
   // Credits labels (non-selectable) and link labels
@@ -4289,6 +4365,8 @@ var
     radioSpacing: Integer;
     TmpLabel: TLabel;
 begin
+  InstallOptionsAutoUserSourceApplied := False;
+
   // Initialize installer log file
   InitInstallerLog;
   WriteInstallerLog('BUILD_FINGERPRINT=' + BUILD_FINGERPRINT);
@@ -4406,21 +4484,34 @@ begin
   chkInstallTermWrap.Left := ScaleX(30);
   chkInstallTermWrap.Top := ScaleY(36);
   chkInstallTermWrap.Width := ScaleX(420);
-  if IsTermWrapInstalled() then
+  TermWrapAlreadyInstalled := IsTermWrapInstalled();
+  InstallHintOffset := 0;
+  chkInstallTermWrap.Caption := 'Install TermWrap';
+  if TermWrapAlreadyInstalled then
   begin
-    chkInstallTermWrap.Caption := 'Install TermWrap (Already installed. Selecting this will re-install it)';
     chkInstallTermWrap.Checked := False;
+
+    chkInstallTermWrapHint := TLabel.Create(Page_InstallOptions);
+    chkInstallTermWrapHint.Parent := Page_InstallOptions.Surface;
+    chkInstallTermWrapHint.Left := ScaleX(46);
+    chkInstallTermWrapHint.Top := chkInstallTermWrap.Top + ScaleY(20);
+    chkInstallTermWrapHint.Width := ScaleX(390);
+    chkInstallTermWrapHint.AutoSize := False;
+    chkInstallTermWrapHint.WordWrap := True;
+    chkInstallTermWrapHint.Caption := '(Already installed. Selecting this will re-install it)';
+    chkInstallTermWrapHint.Font.Style := [fsItalic];
+
+    InstallHintOffset := ScaleY(16);
   end
   else
   begin
-    chkInstallTermWrap.Caption := 'Install TermWrap';
     chkInstallTermWrap.Checked := True;
   end;
 
   chkCreateRdpShortcuts := TCheckBox.Create(Page_InstallOptions);
   chkCreateRdpShortcuts.Parent := Page_InstallOptions.Surface;
   chkCreateRdpShortcuts.Left := ScaleX(30);
-  chkCreateRdpShortcuts.Top := ScaleY(60);
+  chkCreateRdpShortcuts.Top := ScaleY(60) + InstallHintOffset;
   chkCreateRdpShortcuts.Width := ScaleX(380);
   chkCreateRdpShortcuts.Caption := 'Create RDP shortcuts';
   chkCreateRdpShortcuts.Checked := True;
@@ -4429,7 +4520,7 @@ begin
   CreateRdpShortcutsGroup := TPanel.Create(Page_InstallOptions);
   CreateRdpShortcutsGroup.Parent := Page_InstallOptions.Surface;
   CreateRdpShortcutsGroup.Left := ScaleX(40);
-  CreateRdpShortcutsGroup.Top := ScaleY(84);
+  CreateRdpShortcutsGroup.Top := ScaleY(84) + InstallHintOffset;
   CreateRdpShortcutsGroup.Width := ScaleX(360);
   CreateRdpShortcutsGroup.Height := ScaleY(88);
   CreateRdpShortcutsGroup.BorderStyle := bsNone;
@@ -4455,6 +4546,17 @@ begin
   rbUseExistingUsers.Caption := 'Use existing users';
   rbUseExistingUsers.Checked := False;
   rbUseExistingUsers.OnClick := @OnCreateRdpShortcutsClick;
+
+  rbUseExistingUsersHint := TLabel.Create(CreateRdpShortcutsGroup);
+  rbUseExistingUsersHint.Parent := CreateRdpShortcutsGroup;
+  rbUseExistingUsersHint.Left := ScaleX(26);
+  rbUseExistingUsersHint.Top := rbUseExistingUsers.Top + ScaleY(20);
+  rbUseExistingUsersHint.Width := ScaleX(320);
+  rbUseExistingUsersHint.AutoSize := False;
+  rbUseExistingUsersHint.WordWrap := True;
+  rbUseExistingUsersHint.Caption := '(Selected because your desktop already has RDP+ shortcuts)';
+  rbUseExistingUsersHint.Font.Style := [fsItalic];
+  rbUseExistingUsersHint.Visible := False;
 
   // Edit Shortcut radio placed halfway between Install and Uninstall
 
@@ -6188,6 +6290,31 @@ begin
 
   if CurPageID = EditShortcutPage.ID then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
+
+  if CurPageID = Page_InstallOptions.ID then
+  begin
+    if not InstallOptionsAutoUserSourceApplied then
+    begin
+      InstallOptionsAutoUserSourceApplied := True;
+      if HasDesktopShortcutTargetingRdpExe then
+      begin
+        rbUseExistingUsers.Checked := True;
+        rbUseExistingUsers.Caption := 'Use existing users';
+        if Assigned(rbUseExistingUsersHint) then
+          rbUseExistingUsersHint.Visible := True;
+        WriteInstallerLog('Install options: detected Desktop .lnk targeting rdp.exe; defaulting to "Use existing users" (first load only).');
+      end
+      else
+      begin
+        rbUseExistingUsers.Caption := 'Use existing users';
+        if Assigned(rbUseExistingUsersHint) then
+          rbUseExistingUsersHint.Visible := False;
+        WriteInstallerLog('Install options: no Desktop .lnk targeting rdp.exe found; keeping default user source option.');
+      end;
+
+      OnCreateRdpShortcutsClick(nil);
+    end;
+  end;
 
   if CurPageID = EditShortcutPage.ID then
   begin
