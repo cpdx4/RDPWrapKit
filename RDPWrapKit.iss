@@ -1115,6 +1115,11 @@ begin
     'if ($existing) { $thumb = $existing.Thumbprint } else { ' +
       '$c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
       '$thumb = $c.Thumbprint; $tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; Export-Certificate -Cert ("Cert:\\LocalMachine\\My\\" + $thumb) -FilePath $tmp; Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root"; Remove-Item $tmp -Force } ; ' +
+    '$rdpRegPath = "HKLM:\\Software\\Policies\\Microsoft\\Windows NT\\Terminal Services"; ' +
+    'if (-not (Test-Path $rdpRegPath)) { New-Item -Path $rdpRegPath -Force | Out-Null }; ' +
+    '$existingThumbs = (Get-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -ErrorAction SilentlyContinue).TrustedCertThumbprints; ' +
+    'if ($null -ne $existingThumbs) { if ($existingThumbs -notlike "*$thumb*") { Set-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -Value ($existingThumbs + "," + $thumb) } } ' +
+    'else { New-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -Value $thumb -PropertyType String -Force | Out-Null }; ' +
     'try { & rdpsign.exe /sha256 $thumb "' + RdpPath + '"; exit $LASTEXITCODE } catch { exit 1 }';
 
   Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -6099,11 +6104,11 @@ begin
       else
         WriteInstallerLog('Registry: FAILED to set RemoteDesktop_SuppressWhenMinimized');
 
-      // Hide most security warnings by default for TermWrap installs
-      if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1) then
-        WriteInstallerLog('Registry: Set RedirectionWarningDialogVersion=1 (Hide security warnings)')
+      // Accept RDP launch consent prompt by default
+      if RegWriteDWordValue(HKCU, 'Software\Microsoft\Terminal Server Client', 'RdpLaunchConsentAccepted', 1) then
+        WriteInstallerLog('Registry: Set RdpLaunchConsentAccepted=1 (consent accepted)')
       else
-        WriteInstallerLog('Registry: FAILED to set RedirectionWarningDialogVersion');
+        WriteInstallerLog('Registry: FAILED to set RdpLaunchConsentAccepted');
 
       // Set unlimited max connections (default is 99999999, but some systems might have lower caps)
       if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxInstanceCount', 999999) then
