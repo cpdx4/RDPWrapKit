@@ -6,6 +6,7 @@
 ;   This Inno Setup installer provides a comprehensive solution for setting
 ;   up TermWrap on Windows systems, enabling multiple concurrent
 ;   Remote Desktop sessions on non-Server editions of Windows.
+
 ;
 ; KEY FEATURES:
 ;   - Automatic installation of TermWrap (llccd)
@@ -138,6 +139,7 @@ var
   chkCreateRdpShortcuts: TCheckBox;
   rbCreateUsers: TRadioButton;
   rbUseExistingUsers: TRadioButton;
+  chkInstallTermWrapHint: TLabel;
   rbUseExistingUsersHint: TLabel;
   InstallOptionsAutoUserSourceApplied: Boolean;
   rbEditShortcutSettings: TRadioButton;
@@ -2530,6 +2532,14 @@ begin
   end;
 end;
 
+procedure SyncSetupOptionHintStates();
+begin
+  if Assigned(chkInstallTermWrapHint) and Assigned(chkInstallTermWrap) then
+    chkInstallTermWrapHint.Enabled := chkInstallTermWrap.Enabled;
+  if Assigned(rbUseExistingUsersHint) and Assigned(rbUseExistingUsers) then
+    rbUseExistingUsersHint.Enabled := rbUseExistingUsers.Enabled;
+end;
+
 procedure OnCreateRdpShortcutsClick(Sender: TObject);
 begin
   if Assigned(rbCreateUsers) then
@@ -2545,6 +2555,7 @@ begin
     else
       CreateUserMode := createUserModeExisting;
   end;
+  SyncSetupOptionHintStates();
 end;
 
   procedure OnInstallModeChange(Sender: TObject);
@@ -2555,6 +2566,7 @@ begin
   if Assigned(CreateRdpShortcutsGroup) then CreateRdpShortcutsGroup.Enabled := Assigned(rbInstall) and rbInstall.Checked;
   if Assigned(rbCreateUsers) then rbCreateUsers.Enabled := Assigned(rbInstall) and rbInstall.Checked and chkCreateRdpShortcuts.Checked;
   if Assigned(rbUseExistingUsers) then rbUseExistingUsers.Enabled := Assigned(rbInstall) and rbInstall.Checked and chkCreateRdpShortcuts.Checked;
+  SyncSetupOptionHintStates();
 end;
 
 procedure OnUseAllMonitorsClick(Sender: TObject);
@@ -4139,15 +4151,28 @@ end;
 procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
 var
   TmpLabel: TLabel;
+  lblHint: TLabel;
 begin
 
-  // Current file context (used by Edit Shortcut flow)
+  // Hint label — bold green guidance text
+  lblHint := TLabel.Create(ParentSurface);
+  lblHint.Parent := ParentSurface;
+  lblHint.Left := ScaleX(10);
+  lblHint.Top := StartTop;
+  lblHint.Caption := 'If you dont know what to choose here, just click [Next]';
+  lblHint.ParentFont := False;
+  lblHint.StyleElements := lblHint.StyleElements - [seFont];
+  lblHint.Font.Style := [fsBold];
+  lblHint.Font.Color := RGBToColor(0, 200, 0);
+  lblHint.AutoSize := True;
+
+  // Keep this placeholder label for spacing only.
   lblShortcutEditingFile := TLabel.Create(ParentSurface);
   lblShortcutEditingFile.Parent := ParentSurface;
   lblShortcutEditingFile.Left := ScaleX(10);
-  lblShortcutEditingFile.Top := StartTop;
-  lblShortcutEditingFile.Caption := 'Editing:';
-  lblShortcutEditingFile.Font.Style := [fsBold];
+  lblShortcutEditingFile.Top := StartTop + ScaleY(20);
+  lblShortcutEditingFile.Caption := '';
+  lblShortcutEditingFile.Visible := False;
   lblShortcutEditingFile.AutoSize := True;
 
   // Section separator label
@@ -4155,7 +4180,7 @@ begin
   lblShortcutSection.Parent := ParentSurface;
   lblShortcutSection.Left := ScaleX(10);
   lblShortcutSection.Top := lblShortcutEditingFile.Top + ScaleY(22);
-  lblShortcutSection.Caption := 'Basic Shortcut Settings';
+  lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: <>)';
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
@@ -4346,7 +4371,7 @@ begin
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
-  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(26);
+  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(21);
   chkShowMoreShortcutOptions.Width := ScaleX(260);
   chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
   chkShowMoreShortcutOptions.Checked := False;
@@ -4478,7 +4503,6 @@ var
   TermWrapAlreadyInstalled: Boolean;
   InstallHintOffset: Integer;
   childIndent, childLeft, valueLeft: Integer;
-  chkInstallTermWrapHint: TLabel;
   WelcomeExpLabel: TLabel;
   WelcomeIcon: TBitmapImage;
   // Credits labels (non-selectable) and link labels
@@ -4705,6 +4729,7 @@ begin
   // Set initial enabled state based on Create RDP shortcuts checkbox
   rbCreateUsers.Enabled := chkCreateRdpShortcuts.Checked;
   rbUseExistingUsers.Enabled := chkCreateRdpShortcuts.Checked;
+  SyncSetupOptionHintStates();
 
 
 
@@ -4941,7 +4966,7 @@ begin
   Page_ShortcutSettings := CreateCustomPage(
     UserPage.ID,
     'Shortcut Settings',
-    'Configure the settings for your RDP desktop shortcuts. If unsure, just click [Next]'
+    'Configure the settings for your RDP desktop shortcuts.'
   );
   BuildShortcutSettingsBlock(Page_ShortcutSettings.Surface, ScaleY(10));
 
@@ -6479,12 +6504,12 @@ begin
 
     if SelectedInstallMode = installModeEditShortcuts then
     begin
-      if Assigned(lblShortcutEditingFile) then
+      if Assigned(lblShortcutSection) then
       begin
         if SelectedShortcutPath <> '' then
-          lblShortcutEditingFile.Caption := 'Editing:  ' + ExtractFileName(SelectedShortcutPath)
+          lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: ' + ExtractFileName(SelectedShortcutPath) + ')'
         else
-          lblShortcutEditingFile.Caption := 'Editing:';
+          lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: <>)';
       end;
       // EditShortcuts path: hide multi-note and tips, show "more options" checkbox
       if Assigned(lblMultiShortcutEditingNote) then lblMultiShortcutEditingNote.Visible := False;
@@ -6496,8 +6521,8 @@ begin
     end
     else if (SelectedInstallMode = installModeInstall) and (CreateUserMode = createUserModeNew) then
     begin
-      if Assigned(lblShortcutEditingFile) then
-        lblShortcutEditingFile.Caption := 'Editing:  New shortcut(s)';
+      if Assigned(lblShortcutSection) then
+        lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: New shortcut(s))';
       // CreateUsers path: show tips, show multi-note only when 2+ users queued
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
       if Assigned(lblShortcutTips) then lblShortcutTips.Visible := True;
@@ -6514,8 +6539,8 @@ begin
     end
     else
     begin
-      if Assigned(lblShortcutEditingFile) then
-        lblShortcutEditingFile.Caption := 'Editing:  Selected shortcut(s)';
+      if Assigned(lblShortcutSection) then
+        lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: Selected shortcut(s))';
       // ExistingUsers path: hide tips, show multi-note only when 2+ shortcuts selected
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
       if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
