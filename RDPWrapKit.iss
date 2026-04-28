@@ -1103,30 +1103,167 @@ begin
   end;
 end;
 
+// Execute PowerShell and capture both stdout/stderr output regardless of exit code.
+function ExecPSCaptureAll(const Command: string; var ResultCode: Integer): string;
+var
+  PSPath: string;
+  SL: TStringList;
+  WrappedCommand: string;
+begin
+  Result := '';
+  PSPath := TempFile('psall.txt');
+  WrappedCommand := '& { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
+  Exec(EXE_POWERSHELL,
+    BuildPowerShellArgs(WrappedCommand, True),
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if FileExists(PSPath) then
+  begin
+    SL := TStringList.Create;
+    try
+      SL.LoadFromFile(PSPath);
+      Result := Trim(SL.Text);
+    finally
+      SL.Free;
+      DeleteFile(PSPath);
+    end;
+  end;
+end;
+
+procedure EnsureRDPSigningCert; forward;
+
 procedure SignRdpFile(const RdpPath: string);
 var
   PSCommand: string;
   ResultCode: Integer;
 begin
-  // Ensure cert exists and sign the .rdp file using rdpsign.exe
+  // Ensure cert only when we are about to sign an .rdp file
+  EnsureRDPSigningCert;
+
+  // Sign the .rdp file using rdpsign.exe
   PSCommand :=
     '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
-    '$existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
-    'if ($existing) { $thumb = $existing.Thumbprint } else { ' +
-      '$c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
-      '$thumb = $c.Thumbprint; $tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; Export-Certificate -Cert ("Cert:\\LocalMachine\\My\\" + $thumb) -FilePath $tmp; Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root"; Remove-Item $tmp -Force } ; ' +
-    '$rdpRegPath = "HKLM:\\Software\\Policies\\Microsoft\\Windows NT\\Terminal Services"; ' +
-    'if (-not (Test-Path $rdpRegPath)) { New-Item -Path $rdpRegPath -Force | Out-Null }; ' +
-    '$existingThumbs = (Get-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -ErrorAction SilentlyContinue).TrustedCertThumbprints; ' +
-    'if ($null -ne $existingThumbs) { if ($existingThumbs -notlike "*$thumb*") { Set-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -Value ($existingThumbs + "," + $thumb) } } ' +
-    'else { New-ItemProperty -Path $rdpRegPath -Name TrustedCertThumbprints -Value $thumb -PropertyType String -Force | Out-Null }; ' +
-    'try { & rdpsign.exe /sha256 $thumb "' + RdpPath + '"; exit $LASTEXITCODE } catch { exit 1 }';
+    '$cert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
+    'if (-not $cert) { exit 2 }; ' +
+    'try { & rdpsign.exe /sha256 $cert.Thumbprint "' + RdpPath + '"; exit $LASTEXITCODE } catch { exit 1 }';
 
   Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode = 0 then
     WriteInstallerLog('SignRdpFile: signed ' + RdpPath)
   else
     WriteInstallerLog('SignRdpFile: failed to sign ' + RdpPath + ' (exit=' + IntToStr(ResultCode) + ')');
+end;
+
+// Ensures the RDPWrapKit code-signing cert exists, is trusted, and is registered
+// as a trusted RDP publisher in the Terminal Services policy.
+procedure EnsureRDPSigningCert;
+var
+  PSCommand: string;
+  ResultCode: Integer;
+  PSOut: string;
+  Thumb: string;
+begin
+  Thumb := '';
+
+  // Step 1: Ensure cert exists in LocalMachine\My and return thumbprint.
+  PSCommand :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    'try { ' +
+    '  $subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
+    '  $existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
+    '  if ($existing) { $thumb = $existing.Thumbprint } else { ' +
+    '    $c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
+    '    $thumb = $c.Thumbprint }; ' +
+    '  Write-Output $thumb ' +
+    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
+
+  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
+  WriteInstallerLog('EnsureRDPSigningCert [Step1-EnsureInMy] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  if ResultCode <> 0 then
+  begin
+    WriteInstallerLog('EnsureRDPSigningCert: failed at Step1-EnsureInMy');
+    exit;
+  end;
+  Thumb := Trim(PSOut);
+  if Thumb = '' then
+  begin
+    WriteInstallerLog('EnsureRDPSigningCert: failed at Step1-EnsureInMy (empty thumbprint output)');
+    exit;
+  end;
+
+  // Step 2: Ensure cert is in Trusted Root Certification Authorities.
+  PSCommand :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$thumb = ''' + Thumb + '''; ' +
+    'try { ' +
+    '  $rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    '  if (-not $rootCert) { ' +
+    '    $tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; ' +
+    '    $myCert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    '    if (-not $myCert) { throw ''Could not find cert in LocalMachine\\My for thumbprint '' + $thumb }; ' +
+    '    Export-Certificate -Cert $myCert -FilePath $tmp; ' +
+    '    Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root" | Out-Null; ' +
+    '    Remove-Item $tmp -Force; ' +
+    '    Write-Output ''Imported to Root'' ' +
+    '  } else { Write-Output ''Already in Root'' }; ' +
+    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
+
+  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
+  WriteInstallerLog('EnsureRDPSigningCert [Step2-EnsureInRoot] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  if ResultCode <> 0 then
+  begin
+    WriteInstallerLog('EnsureRDPSigningCert: failed at Step2-EnsureInRoot');
+    exit;
+  end;
+
+  // Step 3: Verify cert exists in Trusted Root Certification Authorities.
+  PSCommand :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$thumb = ''' + Thumb + '''; ' +
+    'try { ' +
+    '  $rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    '  if (-not $rootCert) { throw ''Failed to add cert to Trusted Root Certification Authorities'' }; ' +
+    '  Write-Output ''Verified in Root'' ' +
+    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
+
+  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
+  WriteInstallerLog('EnsureRDPSigningCert [Step3-VerifyRoot] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  if ResultCode <> 0 then
+  begin
+    WriteInstallerLog('EnsureRDPSigningCert: failed at Step3-VerifyRoot');
+    exit;
+  end;
+
+  // Step 4: Ensure TrustedCertThumbprints policy contains this thumbprint.
+  // Use .NET Registry API directly to avoid PowerShell type coercion issues
+  // (e.g. stale DWORD value causing Int32 conversion errors).
+  // SetValue with RegistryValueKind.String always writes REG_SZ without deleting.
+  PSCommand :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$thumb = ''' + Thumb + '''; ' +
+    'try { ' +
+    '  $keyPath = ''Software\Policies\Microsoft\Windows NT\Terminal Services''; ' +
+    '  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true); ' +
+    '  if (-not $key) { [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath) | Out-Null; $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true) }; ' +
+    '  $raw = $key.GetValue(''TrustedCertThumbprints'', $null); ' +
+    '  $existing = if ($raw -is [string]) { $raw } else { '''' }; ' +
+    '  if ($existing -notmatch [regex]::Escape($thumb)) { ' +
+    '    $newVal = if ($existing -ne '''') { $existing + '','' + $thumb } else { $thumb }; ' +
+    '    $key.SetValue(''TrustedCertThumbprints'', $newVal, [Microsoft.Win32.RegistryValueKind]::String); ' +
+    '    Write-Output (''Set TrustedCertThumbprints='' + $newVal) ' +
+    '  } else { Write-Output ''TrustedCertThumbprints already contains thumb'' }; ' +
+    '  $key.Close() ' +
+    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
+
+  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
+  WriteInstallerLog('EnsureRDPSigningCert [Step4-TrustedCertThumbprints] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  if ResultCode <> 0 then
+  begin
+    WriteInstallerLog('EnsureRDPSigningCert: failed at Step4-TrustedCertThumbprints');
+    exit;
+  end;
+
+  WriteInstallerLog('EnsureRDPSigningCert: cert ensured and registered as trusted publisher (thumb=' + Thumb + ')');
 end;
 
 procedure OpenTermWrap(Sender: TObject);
