@@ -1041,6 +1041,43 @@ end;
 // POWERSHELL EXECUTION HELPERS
 // -----------------------------------------------------------------------------
 
+// Encode a Pascal string as UTF-16LE base64 for use with PowerShell -EncodedCommand.
+// Inno Setup strings are UCS-2/UTF-16LE internally, so each Char is two bytes.
+function PSBase64Encode(const S: string): string;
+var
+  Table: string;
+  Bytes: array of Byte;
+  n, i, b0, b1, b2: Integer;
+begin
+  Table := 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  n := Length(S) * 2;
+  SetLength(Bytes, n);
+  for i := 0 to Length(S) - 1 do
+  begin
+    Bytes[i * 2]     := Ord(S[i + 1]) and $FF;
+    Bytes[i * 2 + 1] := (Ord(S[i + 1]) shr 8) and $FF;
+  end;
+  Result := '';
+  i := 0;
+  while i < n do
+  begin
+    b0 := Bytes[i];
+    if i + 1 < n then b1 := Bytes[i + 1] else b1 := 0;
+    if i + 2 < n then b2 := Bytes[i + 2] else b2 := 0;
+    Result := Result + Table[(b0 shr 2) + 1];
+    Result := Result + Table[((b0 and 3) shl 4) or (b1 shr 4) + 1];
+    if i + 1 < n then
+      Result := Result + Table[((b1 and $F) shl 2) or (b2 shr 6) + 1]
+    else
+      Result := Result + '=';
+    if i + 2 < n then
+      Result := Result + Table[(b2 and $3F) + 1]
+    else
+      Result := Result + '=';
+    i := i + 3;
+  end;
+end;
+
 // Build PowerShell -Command args
 function BuildPowerShellArgs(const Command: string; Hidden: Boolean): string;
 begin
@@ -1136,20 +1173,178 @@ procedure EnsureRDPSigningCert; forward;
 
 procedure SignRdpFile(const RdpPath: string);
 var
-  PSCommand: string;
+  PSScript: string;
   ResultCode: Integer;
 begin
-  // Ensure cert only when we are about to sign an .rdp file
+  // Ensure the signing certificate exists and is trusted before signing
   EnsureRDPSigningCert;
 
-  // Sign the .rdp file using rdpsign.exe
-  PSCommand :=
-    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
-    '$cert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
-    'if (-not $cert) { exit 2 }; ' +
-    'try { & rdpsign.exe /sha256 $cert.Thumbprint "' + RdpPath + '"; exit $LASTEXITCODE } catch { exit 1 }';
+  // Pure-PowerShell RDP signing — no rdpsign.exe dependency, which is only found
+  // on Win11 Pro or newer versions of Windows. This allows signing on Home editon.
+  // Replicates rdpsign.exe behaviour exactly: builds canonical UTF-16LE signed
+  // content (signscope fields + null terminator), calls CryptSignMessage via
+  // P/Invoke for a zero-attribute detached CMS/PKCS#7 blob, then writes the
+  // result as UTF-16LE with BOM and \r\r\n line endings.
+  // Embed the path directly as a PS literal string (single-quoted).
+  // Windows installer paths do not contain single quotes, so no escaping needed.
+  PSScript :=
+    '$RdpPath = ''' + RdpPath + '''' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'Add-Type -Language CSharp -TypeDefinition @''' + #13#10 +
+    'using System;' + #13#10 +
+    'using System.Runtime.InteropServices;' + #13#10 +
+    'using System.Security.Cryptography.X509Certificates;' + #13#10 +
+    'using System.ComponentModel;' + #13#10 +
+    'public static class RdpCrypt {' + #13#10 +
+    '    const uint PKCS_7_ASN_ENCODING = 0x00010000u;' + #13#10 +
+    '    const uint X509_ASN_ENCODING   = 0x00000001u;' + #13#10 +
+    '    const uint MSG_ENCODING = PKCS_7_ASN_ENCODING | X509_ASN_ENCODING;' + #13#10 +
+    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
+    '    struct CRYPT_OBJID_BLOB { public uint cbData; public IntPtr pbData; }' + #13#10 +
+    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
+    '    struct CRYPT_ALGORITHM_IDENTIFIER {' + #13#10 +
+    '        [MarshalAs(UnmanagedType.LPStr)] public string pszObjId;' + #13#10 +
+    '        public CRYPT_OBJID_BLOB Parameters;' + #13#10 +
+    '    }' + #13#10 +
+    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
+    '    struct CRYPT_SIGN_MESSAGE_PARA {' + #13#10 +
+    '        public uint   cbSize;' + #13#10 +
+    '        public uint   dwMsgEncodingType;' + #13#10 +
+    '        public IntPtr pSigningCert;' + #13#10 +
+    '        public CRYPT_ALGORITHM_IDENTIFIER HashAlgorithm;' + #13#10 +
+    '        public IntPtr pvHashAuxInfo;' + #13#10 +
+    '        public uint   cMsgCert;' + #13#10 +
+    '        public IntPtr rgpMsgCert;' + #13#10 +
+    '        public uint   cMsgCrl;' + #13#10 +
+    '        public IntPtr rgpMsgCrl;' + #13#10 +
+    '        public uint   cAuthAttr;' + #13#10 +
+    '        public IntPtr rgAuthAttr;' + #13#10 +
+    '        public uint   cUnauthAttr;' + #13#10 +
+    '        public IntPtr rgUnauthAttr;' + #13#10 +
+    '        public uint   dwFlags;' + #13#10 +
+    '        public uint   dwInnerContentType;' + #13#10 +
+    '        public CRYPT_ALGORITHM_IDENTIFIER HashEncryptionAlgorithm;' + #13#10 +
+    '        public IntPtr pvHashEncryptionAuxInfo;' + #13#10 +
+    '    }' + #13#10 +
+    '    [DllImport("crypt32.dll", SetLastError = true)]' + #13#10 +
+    '    static extern bool CryptSignMessage(' + #13#10 +
+    '        ref CRYPT_SIGN_MESSAGE_PARA pSignPara,' + #13#10 +
+    '        bool    fDetachedSignature,' + #13#10 +
+    '        uint    cToBeSigned,' + #13#10 +
+    '        IntPtr[] rgpbToBeSigned,' + #13#10 +
+    '        uint[]   rgcbToBeSigned,' + #13#10 +
+    '        byte[]   pbSignedBlob,' + #13#10 +
+    '        ref uint pcbSignedBlob' + #13#10 +
+    '    );' + #13#10 +
+    '    public static byte[] SignDetached(byte[] content, X509Certificate2 cert) {' + #13#10 +
+    '        IntPtr certPtrArr = Marshal.AllocHGlobal(IntPtr.Size);' + #13#10 +
+    '        Marshal.WriteIntPtr(certPtrArr, cert.Handle);' + #13#10 +
+    '        var para = new CRYPT_SIGN_MESSAGE_PARA {' + #13#10 +
+    '            cbSize            = (uint)Marshal.SizeOf(typeof(CRYPT_SIGN_MESSAGE_PARA)),' + #13#10 +
+    '            dwMsgEncodingType = MSG_ENCODING,' + #13#10 +
+    '            pSigningCert      = cert.Handle,' + #13#10 +
+    '            HashAlgorithm     = new CRYPT_ALGORITHM_IDENTIFIER { pszObjId = "2.16.840.1.101.3.4.2.1" },' + #13#10 +
+    '            cMsgCert          = 1u,' + #13#10 +
+    '            rgpMsgCert        = certPtrArr,' + #13#10 +
+    '        };' + #13#10 +
+    '        var handle = GCHandle.Alloc(content, GCHandleType.Pinned);' + #13#10 +
+    '        try {' + #13#10 +
+    '            IntPtr   contentPtr = handle.AddrOfPinnedObject();' + #13#10 +
+    '            IntPtr[] rgpb = { contentPtr };' + #13#10 +
+    '            uint[]   rgcb = { (uint)content.Length };' + #13#10 +
+    '            uint     cbBlob = 0;' + #13#10 +
+    '            CryptSignMessage(ref para, true, 1u, rgpb, rgcb, null, ref cbBlob);' + #13#10 +
+    '            if (cbBlob == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "CryptSignMessage size query failed");' + #13#10 +
+    '            byte[] blob = new byte[cbBlob];' + #13#10 +
+    '            if (!CryptSignMessage(ref para, true, 1u, rgpb, rgcb, blob, ref cbBlob))' + #13#10 +
+    '                throw new Win32Exception(Marshal.GetLastWin32Error(), "CryptSignMessage failed");' + #13#10 +
+    '            if (cbBlob == blob.Length) return blob;' + #13#10 +
+    '            byte[] trimmed = new byte[cbBlob]; Array.Copy(blob, trimmed, (int)cbBlob); return trimmed;' + #13#10 +
+    '        } finally { handle.Free(); Marshal.FreeHGlobal(certPtrArr); }' + #13#10 +
+    '    }' + #13#10 +
+    '}' + #13#10 +
+    '''' + '@' + #13#10 +
+    '' + #13#10 +
+    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''' + #13#10 +
+    '$cert = Get-ChildItem ''Cert:\LocalMachine\My'' | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1' + #13#10 +
+    'if (-not $cert) { exit 2 }' + #13#10 +
+    '' + #13#10 +
+    '$SIGNSCOPE = ''Full Address,Alternate Full Address,Use Redirection Server Name,Negotiate Security Layer,EnableCredSspSupport,DisableConnectionSharing,AutoReconnection Enabled,GatewayHostname,GatewayUsageMethod,GatewayProfileUsageMethod,GatewayCredentialsSource,PromptCredentialOnce,Alternate Shell,Shell Working Directory,RemoteApplicationMode,Prompt For Credentials,Authentication Level,AudioMode,RedirectDrives,RedirectPrinters,RedirectSmartCards,RedirectClipboard,DrivesToRedirect,RedirectWebAuthn''' + #13#10 +
+    '$SCOPE_FIELDS = $SIGNSCOPE -split '',''' + #13#10 +
+    '' + #13#10 +
+    '$FIELD_TYPE = @{' + #13#10 +
+    '    ''full address''=''s''; ''alternate full address''=''s''; ''use redirection server name''=''i''' + #13#10 +
+    '    ''negotiate security layer''=''i''; ''enablecredsspsupport''=''i''; ''disableconnectionsharing''=''i''' + #13#10 +
+    '    ''autoreconnection enabled''=''i''; ''gatewayhostname''=''s''; ''gatewayusagemethod''=''i''' + #13#10 +
+    '    ''gatewayprofileusagemethod''=''i''; ''gatewaycredentialssource''=''i''; ''promptcredentialonce''=''i''' + #13#10 +
+    '    ''alternate shell''=''s''; ''shell working directory''=''s''; ''remoteapplicationmode''=''i''' + #13#10 +
+    '    ''prompt for credentials''=''i''; ''authentication level''=''i''; ''audiomode''=''i''' + #13#10 +
+    '    ''redirectdrives''=''i''; ''redirectprinters''=''i''; ''redirectsmartcards''=''i''' + #13#10 +
+    '    ''redirectclipboard''=''i''; ''drivestoredirect''=''s''; ''redirectwebauthn''=''i''' + #13#10 +
+    '}' + #13#10 +
+    '' + #13#10 +
+    '$inputBytes = [IO.File]::ReadAllBytes($RdpPath)' + #13#10 +
+    'if ($inputBytes.Length -ge 2 -and $inputBytes[0] -eq 0xFF -and $inputBytes[1] -eq 0xFE) {' + #13#10 +
+    '    $rawText = [Text.Encoding]::Unicode.GetString($inputBytes, 2, $inputBytes.Length - 2)' + #13#10 +
+    '} else {' + #13#10 +
+    '    $rawText = [Text.Encoding]::UTF8.GetString($inputBytes)' + #13#10 +
+    '}' + #13#10 +
+    '$inputLines = $rawText -split ''\r?\r\n|\r(?!\n)|\n'' | Where-Object { $_ -ne '''' }' + #13#10 +
+    '' + #13#10 +
+    '$fieldMap = @{}' + #13#10 +
+    'foreach ($line in $inputLines) {' + #13#10 +
+    '    if ($line -match ''^(.+?):(.):(.*?)$'') {' + #13#10 +
+    '        $fieldMap[$Matches[1].ToLower()] = @{ Name=$Matches[1]; Type=$Matches[2]; Value=$Matches[3] }' + #13#10 +
+    '    }' + #13#10 +
+    '}' + #13#10 +
+    'if (-not $fieldMap[''full address'']) { throw "Missing required full address field" }' + #13#10 +
+    '' + #13#10 +
+    '$STRIP_KEYS = [Collections.Generic.HashSet[string]] @(''alternate full address'',''signscope'',''signature'')' + #13#10 +
+    '$baseLines = $inputLines | ForEach-Object {' + #13#10 +
+    '    if ($_ -match ''^(.+?):b:(.*)$'') {' + #13#10 +
+    '        $k = $Matches[1].ToLower()' + #13#10 +
+    '        if (-not $STRIP_KEYS.Contains($k)) { "$($Matches[1]):b:$($Matches[2].ToUpper())" }' + #13#10 +
+    '    } elseif ($_ -match ''^(.+?):'') {' + #13#10 +
+    '        if (-not $STRIP_KEYS.Contains($Matches[1].ToLower())) { $_ }' + #13#10 +
+    '    } else { $_ }' + #13#10 +
+    '}' + #13#10 +
+    '' + #13#10 +
+    '$altFullAddress = $fieldMap[''full address''].Value' + #13#10 +
+    '$fieldMap[''alternate full address''] = @{ Name=''alternate full address''; Type=''s''; Value=$altFullAddress }' + #13#10 +
+    '' + #13#10 +
+    '$sb = New-Object Text.StringBuilder' + #13#10 +
+    'foreach ($sf in $SCOPE_FIELDS) {' + #13#10 +
+    '    $key = $sf.ToLower()' + #13#10 +
+    '    $e   = $fieldMap[$key]' + #13#10 +
+    '    $typ = if ($e) { $e.Type  } else { $FIELD_TYPE[$key] }' + #13#10 +
+    '    $val = if ($e) { $e.Value } else { if ($FIELD_TYPE[$key] -eq ''s'') { '''' } else { ''0'' } }' + #13#10 +
+    '    [void] $sb.Append("${key}:${typ}:${val}`r`n")' + #13#10 +
+    '}' + #13#10 +
+    '[void] $sb.Append("signscope:s:${SIGNSCOPE}`r`n")' + #13#10 +
+    '[void] $sb.Append([char]0)' + #13#10 +
+    '$canonicalBytes = [Text.Encoding]::Unicode.GetBytes($sb.ToString())' + #13#10 +
+    '' + #13#10 +
+    '$cmsBytes = [RdpCrypt]::SignDetached($canonicalBytes, $cert)' + #13#10 +
+    '' + #13#10 +
+    '$header  = [byte[]]@(0x01,0x00,0x01,0x00,0x01,0x00,0x00,0x00)' + #13#10 +
+    '$sigBlob = $header + [BitConverter]::GetBytes([uint32]$cmsBytes.Length) + $cmsBytes' + #13#10 +
+    '$b64Raw  = [Convert]::ToBase64String($sigBlob)' + #13#10 +
+    '$sigB64  = [Text.RegularExpressions.Regex]::Replace($b64Raw, ''.{1,64}'', ''$0  '')' + #13#10 +
+    '' + #13#10 +
+    '$CRLF     = "`r`r`n"' + #13#10 +
+    '$outLines = [Collections.Generic.List[string]]$baseLines' + #13#10 +
+    '$outLines.Add("alternate full address:s:$altFullAddress")' + #13#10 +
+    '$outLines.Add("signscope:s:$SIGNSCOPE")' + #13#10 +
+    '$outLines.Add("signature:s:$sigB64")' + #13#10 +
+    '' + #13#10 +
+    '$outBytes = [byte[]]@(0xFF,0xFE) + [Text.Encoding]::Unicode.GetBytes(($outLines -join $CRLF) + $CRLF)' + #13#10 +
+    '[IO.File]::WriteAllBytes($RdpPath, $outBytes)' + #13#10 +
+    'exit 0';
 
-  Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // No temp file: encode the entire script as UTF-16LE base64 and pass via
+  // -EncodedCommand. Nothing touches disk; no AV trip-wire on a .ps1 artifact.
+  Exec(EXE_POWERSHELL, PS_ARGS_HIDDEN + ' -EncodedCommand ' + PSBase64Encode(PSScript),
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode = 0 then
     WriteInstallerLog('SignRdpFile: signed ' + RdpPath)
   else
