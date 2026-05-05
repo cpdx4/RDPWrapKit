@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.5"
-#define APP_VERSION_FILEINFO "0.5.5.0"
+#define APP_VERSION_STRING "0.5.6"
+#define APP_VERSION_FILEINFO "0.5.6.0"
 
 [Setup]
 AppName=RDPWrapKit
