@@ -132,6 +132,10 @@ procedure LogRegOp(const Operation, RegKey, RegValue: string; const Success: Boo
 procedure LogServiceOp(const Operation, ServiceName: string; const ResultCode: Integer); forward;
 procedure LogSim(const ScenarioText: string); forward;
 
+// Debug-enriched command execution forward declarations
+function RunCmdCapture(const CmdLine, OutTag: string): Integer; forward;
+function RunNetHiddenCapture(const Params, OutTag: string): Integer; forward;
+
 var
   Page_InstallOptions: TWizardPage;
   WelcomePage: TWizardPage;
@@ -1295,10 +1299,7 @@ begin
   // Ensure the signing certificate exists and is trusted before signing
   EnsureRDPSigningCert;
 
-  // Extract pre-compiled RdpSignTool.exe from installer to {tmp}
   ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
-  ExtractTemporaryFile('RdpSignTool.exe');
-  LogDebug('SignRdpFile: Extracted RdpSignTool.exe to ' + ExePath);
 
   // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
   // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
@@ -1315,7 +1316,10 @@ begin
   //   99 = Invalid arguments
   CmdLine := '"' + RdpPath + '"';
   LogDebug('SignRdpFile: Executing: ' + ExePath + ' ' + CmdLine);
-  Exec(ExePath, CmdLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // Capture RdpSignTool.exe output for diagnostic purposes.
+  // Use RunCmdCapture to redirect stdout/stderr to a temp file and log it on failure.
+  ResultCode := RunCmdCapture('"' + ExePath + '" ' + CmdLine, 'rdpsign_' + ExtractFileName(RdpPath));
   LogDebug('SignRdpFile: RdpSignTool.exe exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
   if ResultCode = 0 then
@@ -2184,6 +2188,133 @@ begin
 
   Result := RunHidden('net.exe', Params);
   LogExit('RunNetHidden');
+end;
+
+// -----------------------------------------------------------------------------
+// DEBUG-ENHANCED COMMAND EXECUTION
+// -----------------------------------------------------------------------------
+// Enhanced wrappers around RunCmdHidden / RunNetHidden that capture stdout
+// and stderr to a temp file and dump the output into the installer log.
+// These help diagnose failures without revealing passwords (output goes
+// through the centralized LoggerRedact pipeline).
+// -----------------------------------------------------------------------------
+
+// Run a command via cmd.exe with stdout/stderr captured to a log file.
+// OutTag is a short alphanumeric identifier used for the temp filename.
+// Returns the exit code. Output is logged at DEBUG level.
+function RunCmdCapture(const CmdLine, OutTag: string): Integer;
+var
+  OutPath: string;
+  SL: TStringList;
+  j: Integer;
+  RC: Integer;
+begin
+  LogEntry('RunCmdCapture');
+  OutPath := TempFile('capture_' + SanitizeFileName(OutTag) + '.log');
+  RC := 0;
+  LogDebug('RunCmdCapture: executing cmd /c "' + CmdLine + '"');
+  Exec(EXE_CMD, '/c "' + CmdLine + '" > "' + OutPath + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  LogDebug('RunCmdCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
+
+  if RC <> 0 then
+  begin
+    // On failure, dump output to log for diagnostics
+    if FileExists(OutPath) then
+    begin
+      SL := TStringList.Create;
+      try
+        try
+          SL.LoadFromFile(OutPath);
+          if SL.Count > 0 then
+          begin
+            LogDebug('Command output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+            for j := 0 to SL.Count - 1 do
+              LogDebug('  ' + SL[j]);
+          end;
+        except
+          LogWarn('RunCmdCapture: failed to read output file: ' + OutPath);
+        end;
+      finally
+        SL.Free;
+      end;
+    end
+    else
+      LogDebug('RunCmdCapture: no output file for tag=' + OutTag);
+  end
+  else
+  begin
+    LogDebug('RunCmdCapture: command succeeded (exit=0) for tag=' + OutTag);
+  end;
+
+  if FileExists(OutPath) then
+    DeleteFile(OutPath);
+  Result := RC;
+  LogExit('RunCmdCapture');
+end;
+
+// Run net.exe with stdout/stderr captured and logged.
+// Like RunNetHidden but dumps the command output on failure.
+// Uses the simulation bypass from RunNetHidden.
+function RunNetHiddenCapture(const Params, OutTag: string): Integer;
+var
+  OutPath: string;
+  SL: TStringList;
+  j: Integer;
+  RC: Integer;
+begin
+  LogEntry('RunNetHiddenCapture');
+  if SimulateNetFailPowerShell then
+  begin
+    if not SimLogNetPsShown then
+    begin
+      LogSimulationScenario('System fails on net.exe commands and uses PowerShell fallback');
+      SimLogNetPsShown := True;
+    end;
+    LogWarn('Simulation: forcing net.exe failure for: ' + MaskCommandForLog('net.exe', Params));
+    Result := 1;
+    LogExit('RunNetHiddenCapture');
+    exit;
+  end;
+
+  OutPath := TempFile('net_' + SanitizeFileName(OutTag) + '.log');
+  RC := 0;
+  LogDebug('RunNetHiddenCapture: ' + MaskCommandForLog('net.exe', Params));
+  Exec(EXE_CMD, '/c "net.exe ' + Params + '" > "' + OutPath + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  LogDebug('RunNetHiddenCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
+
+  if RC <> 0 then
+  begin
+    if FileExists(OutPath) then
+    begin
+      SL := TStringList.Create;
+      try
+        try
+          SL.LoadFromFile(OutPath);
+          if SL.Count > 0 then
+          begin
+            LogDebug('net.exe output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+            for j := 0 to SL.Count - 1 do
+              LogDebug('  ' + SL[j]);
+          end;
+        except
+          LogWarn('RunNetHiddenCapture: failed to read output: ' + OutPath);
+        end;
+      finally
+        SL.Free;
+      end;
+    end
+    else
+      LogDebug('RunNetHiddenCapture: no output file for tag=' + OutTag);
+  end
+  else
+  begin
+    LogDebug('RunNetHiddenCapture: command succeeded (exit=0) for tag=' + OutTag);
+  end;
+
+  if FileExists(OutPath) then
+    DeleteFile(OutPath);
+  Result := RC;
+  LogExit('RunNetHiddenCapture');
 end;
 
 // Sleep with UI updates
@@ -3889,6 +4020,7 @@ var
   PowerShellScript: string;
   ShortcutFileName: string;
   OpTick: Cardinal;
+  FileSizeStr: string;
 begin
   LogEntry('CreateRDPShortcut');
   OpTick := GetTickCount;
@@ -3930,6 +4062,16 @@ begin
   if WriteRDPFileDirect(UserName, RDPPath, EncPath) then
   begin
     LogDebug('CreateRDPShortcut: Direct write succeeded, signing...');
+
+    // Verify the RDP file exists and log its size for diagnostics
+    if FileExists(RDPPath) then
+    begin
+      FileSizeStr := GetPSOutput('(Get-Item ''' + PSSingleQuote(RDPPath) + ''').Length');
+      LogDebug('CreateRDPShortcut: RDP file verified: ' + RDPPath + ' size=' + FileSizeStr + ' bytes');
+    end
+    else
+      LogWarn('CreateRDPShortcut: RDP file NOT FOUND after direct write: ' + RDPPath);
+
     SignRdpFile(RDPPath);
     SecureCleanupTempFiles(UserName);
     LogInfo('CreateRDPShortcut: Completed for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
@@ -3985,7 +4127,17 @@ begin
   end
   else
   begin
-    LogDebug('CreateRDPShortcut: RDP file created successfully, signing...');
+    LogDebug('CreateRDPShortcut: RDP file created successfully via PowerShell, signing...');
+
+    // Verify the RDP file exists and log its size for diagnostics
+    if FileExists(RDPPath) then
+    begin
+      FileSizeStr := GetPSOutput('(Get-Item ''' + PSSingleQuote(RDPPath) + ''').Length');
+      LogDebug('CreateRDPShortcut: RDP file verified after PS: ' + RDPPath + ' size=' + FileSizeStr + ' bytes');
+    end
+    else
+      LogWarn('CreateRDPShortcut: RDP file NOT FOUND after PS creation: ' + RDPPath);
+
     SignRdpFile(RDPPath);
   end;
 
@@ -4084,14 +4236,15 @@ begin
     // Step 2: set real password (password change does not trigger the LM prompt)
     // If either step fails, delete the user and fall through to PowerShell.
     OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
-    NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never');
+    // Use RunNetHiddenCapture to capture net.exe stdout/stderr for debugging
+    NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never', 'create_' + UserName);
     if NetRc = 0 then
     begin
-      NetRc := RunNetHidden('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password));
+      NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password), 'setpwd_' + UserName);
       if NetRc <> 0 then
       begin
         WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + ', deleting partial user');
-        RunNetHidden('user ' + QuoteExeArg(UserName) + ' /delete');
+        RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /delete', 'del_' + UserName);
       end;
     end;
     ResultCode := NetRc;
@@ -4186,7 +4339,7 @@ begin
 
     // Add to Administrators group (prefer net localgroup)
     OutPath := TempFile('user_add_admin_' + SanitizeFileName(UserName) + '.log');
-    NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupAdministratorsName) + ' ' + QuoteExeArg(UserName) + ' /add');
+    NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupAdministratorsName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addadmin_' + UserName);
     ResultCode := NetRc;
     if ResultCode <> 0 then
     begin
@@ -4219,7 +4372,7 @@ begin
 
     // Check if Remote Desktop Users group exists before adding
     // Fast check via net localgroup first (avoids hangs in some PowerShell hosts)
-    NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupRDPUsersName));
+    NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupRDPUsersName), 'checkrdp_' + UserName);
     if NetRc = 0 then
       ResultCode := 0
     else
@@ -4237,7 +4390,7 @@ begin
     if ResultCode <> 2 then
     begin
       OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
-      NetRc := RunNetHidden('localgroup ' + QuoteExeArg(GroupRDPUsersName) + ' ' + QuoteExeArg(UserName) + ' /add');
+      NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupRDPUsersName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addrdp_' + UserName);
       ResultCode := NetRc;
       if ResultCode <> 0 then
       begin
@@ -4302,6 +4455,16 @@ begin
   LogEntry('CreateShortcutsForExistingUsers');
   StartTick := GetTickCount;
   LogInfo('Starting CreateShortcutsForExistingUsers for ' + IntToStr(ShortcutsList.Count) + ' entries');
+
+  // Log summary of shortcut entries (masked) for diagnostics
+  LogDebug('CreateShortcutsForExistingUsers: ShortcutsList entries:');
+  for i := 0 to ShortcutsList.Count - 1 do
+    LogDebug('  [' + IntToStr(i) + '] ' + MaskPasswordInEntry(ShortcutsList[i]));
+
+  // Log desktop info for shortcut path resolution
+  LogDebug('CreateShortcutsForExistingUsers: Desktop path=' + ExpandConstant('{userdesktop}') +
+    ' | user desktop exists=' + BoolToStr(DirExists(ExpandConstant('{userdesktop}'))));
+
   for i := 0 to ShortcutsList.Count - 1 do
   begin
     UserStartTick := GetTickCount;
@@ -4313,7 +4476,7 @@ begin
     end;
     Entry := ShortcutsList[i];
     ParseUserEntry(Entry, UserName, Password);
-    LogDebug('CreateShortcutsForExistingUsers: User=' + UserName);
+    LogDebug('CreateShortcutsForExistingUsers: User=' + UserName + ' hasPassword=' + BoolToStr(Password <> ''));
 
     WizardForm.StatusLabel.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
 
@@ -5104,6 +5267,10 @@ begin
   WriteInstallerLog('BUILD_FINGERPRINT=' + BUILD_FINGERPRINT);
   WriteInstallerLog('PRESERVE_USER_CREATE_DEBUG_LOGS=' + BoolToStr(PRESERVE_USER_CREATE_DEBUG_LOGS <> 0));
   WriteInstallerLog('PASSWORD_PIPELINE_DIAG=' + BoolToStr(PASSWORD_PIPELINE_DIAG <> 0));
+
+  // Extract RdpSignTool.exe upfront so it's available for all signing operations
+  ExtractTemporaryFile('RdpSignTool.exe');
+  WriteInstallerLog('InitializeWizard: Extracted RdpSignTool.exe to ' + ExpandConstant('{tmp}\RdpSignTool.exe'));
 
   SimLogNoMstscShown := False;
   SimLogNoVCRedistShown := False;
