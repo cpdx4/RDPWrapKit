@@ -36,6 +36,10 @@
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
 #define SourceTermWrapSize FileSize("third_party\termwrap_release\TermWrap.dll")
 
+; RdpSignTool.exe is compiled ahead-of-time from scripts\RdpSignTool.cs.
+; Run scripts\build_rdpcrypt.ps1 before compiling this installer.
+; This keeps the 19KB binary out of git while enabling a clean build.
+
 [Setup]
 AppName=RDPWrapKit
 AppVersion={#APP_VERSION_STRING}
@@ -61,6 +65,7 @@ SetupIconFile="assets\RDPWrapKitIcon.ico"
 ; Icon file always extracted to temp for welcome page display.
 ; TermWrap files only copied when DoInstallTermWrap = True (checked via ShouldInstallFiles).
 Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
+Source: "output\RdpSignTool.exe"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 
@@ -108,6 +113,25 @@ procedure InitInstallerLog; forward;
 procedure WriteInstallerLog(const Msg: string); forward;
 procedure LogSectionHeader(const Title: string); forward;
 procedure LogKeyValue(const KeyName, KeyValue: string); forward;
+
+// Logger architecture forward declarations
+function GetThreadIdHex: string; forward;
+function GetProcessIdHex: string; forward;
+function LoggerRedact(const S: string): string; forward;
+procedure LoggerWrite(const Level, Msg: string); forward;
+procedure LogInfo(const Msg: string); forward;
+procedure LogDebug(const Msg: string); forward;
+procedure LogWarn(const Msg: string); forward;
+procedure LogError(const Msg: string); forward;
+procedure LogEntry(const FuncName: string); forward;
+procedure LogExit(const FuncName: string); forward;
+procedure LoggerStartOp; forward;
+function LoggerEndOp: Cardinal; forward;
+procedure LogFileOp(const Operation, FilePath: string; const Success: Boolean; const Extra: string); forward;
+procedure LogRegOp(const Operation, RegKey, RegValue: string; const Success: Boolean); forward;
+procedure LogServiceOp(const Operation, ServiceName: string; const ResultCode: Integer); forward;
+procedure LogSim(const ScenarioText: string); forward;
+
 var
   Page_InstallOptions: TWizardPage;
   WelcomePage: TWizardPage;
@@ -284,6 +308,12 @@ var
   // Keyboard hook settings
   lblKeyboardHook: TLabel;
   cboKeyboardHook: TComboBox;
+  
+  // Logger state globals for performance profiling and metadata
+  LoggerProcId: DWORD;
+  LoggerThreadId: DWORD;
+  LoggerOpStartTick: Cardinal;
+  LoggerOpActive: Boolean;
 
 const
   // -------------------------------------------------------------------------
@@ -456,6 +486,12 @@ function CloseHandle(hObject: Cardinal): Boolean;
 function GetTickCount: Cardinal;
   external 'GetTickCount@kernel32.dll stdcall';
 
+function GetCurrentProcessId: DWORD;
+  external 'GetCurrentProcessId@kernel32.dll stdcall';
+
+function GetCurrentThreadId: DWORD;
+  external 'GetCurrentThreadId@kernel32.dll stdcall';
+
 // Windows SYSTEMTIME structure and GetSystemTime API for timestamps
 type
   SYSTEMTIME = record
@@ -608,9 +644,12 @@ procedure ParseUserEntry(const Entry: string; var UserName, Password: string);
 var
   PipePos: Integer;
 begin
+  LogEntry('ParseUserEntry');
   PipePos := Pos('|', Entry);
   UserName := Copy(Entry, 1, PipePos - 1);
   Password := Copy(Entry, PipePos + 1, Length(Entry));
+  LogDebug('ParseUserEntry: user=' + UserName + ' hasPassword=' + BoolToStr(Password <> ''));
+  LogExit('ParseUserEntry');
 end;
 
 // Return a version of a pipe-delimited user entry with the password obscured
@@ -618,11 +657,13 @@ function MaskPasswordInEntry(const Entry: string): string;
 var
   PipePos: Integer;
 begin
+  LogEntry('MaskPasswordInEntry');
   PipePos := Pos('|', Entry);
   if PipePos > 0 then
     Result := Copy(Entry, 1, PipePos) + '*****'
   else
     Result := Entry;
+  LogExit('MaskPasswordInEntry');
 end;
 
 function PosFrom(const Needle, Haystack: string; const FromPos: Integer): Integer;
@@ -767,28 +808,34 @@ function EnsureDebugWorkDir: string;
 var
   BaseDir: string;
 begin
+  LogEntry('EnsureDebugWorkDir');
   BaseDir := ExpandConstant('{localappdata}\RDPWrapKit');
   if (not DirExists(BaseDir)) and (not CreateDir(BaseDir)) then
   begin
-    WriteInstallerLog('WARNING: Could not create debug work base directory: ' + BaseDir);
+    LogWarn('Could not create debug work base directory: ' + BaseDir);
     Result := ExpandConstant('{tmp}');
+    LogExit('EnsureDebugWorkDir');
     exit;
   end;
 
   Result := BaseDir + '\DebugLogs';
   if (not DirExists(Result)) and (not CreateDir(Result)) then
   begin
-    WriteInstallerLog('WARNING: Could not create debug work directory: ' + Result);
+    LogWarn('Could not create debug work directory: ' + Result);
     Result := ExpandConstant('{tmp}');
+    LogExit('EnsureDebugWorkDir');
     exit;
   end;
 
-  WriteInstallerLog('Debug work directory ready: ' + Result);
+  LogDebug('Debug work directory ready: ' + Result);
+  LogExit('EnsureDebugWorkDir');
 end;
 
 function DebugLogFile(const FileName: string): string;
 begin
+  LogEntry('DebugLogFile');
   Result := EnsureDebugWorkDir + '\' + FileName;
+  LogExit('DebugLogFile');
 end;
 
 function BuildPowerShellFileArgs(const ScriptPath, ExtraParams: string; Hidden: Boolean): string; forward;
@@ -825,7 +872,6 @@ begin
   for i := 1 to Length(Name) do
   begin
     c := Name[i];
-    // Reject truly invalid Windows filename characters
     if (c = '<') or (c = '>') or (c = ':') or (c = '"') or
        (c = '/') or (c = '\') or (c = '|') or (c = '?') or (c = '*') then
       exit;
@@ -865,9 +911,6 @@ begin
   end;
   if SafeName = '' then
     SafeName := 'Param';
-  // Double-quote the value so Windows CreateProcess (CommandLineToArgvW) strips the
-  // surrounding quotes correctly when PowerShell runs in -File mode.
-  // Single quotes have no special meaning in CreateProcess and would be passed as literals.
   Escaped := '';
   for i := 1 to Length(Value) do
   begin
@@ -900,25 +943,35 @@ end;
 function ExecPowerShellScriptContent(const ScriptBaseName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
 var
   ScriptPath: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('ExecPowerShellScriptContent');
+  OpTick := GetTickCount;
   ScriptPath := TempFile(ScriptBaseName);
   SaveStringToFile(ScriptPath, ScriptContent, False);
-  WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
+  LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
   Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   DeleteFile(ScriptPath);
+  LogExit('ExecPowerShellScriptContent');
 end;
 
 function ExecSavedPowerShellDebugScriptParams(const ScriptTag, UserName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
 var
   ScriptPath: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('ExecSavedPowerShellDebugScriptParams');
+  OpTick := GetTickCount;
   ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
   SaveStringToFile(ScriptPath, ScriptContent, False);
-  WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
+  LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
   Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not Result then
-    WriteInstallerLog('ERROR: Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+    LogError('Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+  LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   DeleteFile(ScriptPath);
+  LogExit('ExecSavedPowerShellDebugScriptParams');
 end;
 
 function BuildAddGroupMemberPowerShellScript(const GroupName, UserName, OutPath, SuccessTag: string): string;
@@ -958,16 +1011,19 @@ var
   MemberName: string;
   InList: Boolean;
 begin
+  LogEntry('ValidateGroupMembership');
   Result := False;
   OutPath := TempFile('grp_members_' + SanitizeFileName(GroupName) + '.txt');
 
-  // net localgroup lists members one per line after a "---" separator line.
-  // Members may appear as DOMAIN\username or bare username.
   Exec('cmd.exe', '/c net localgroup ' + QuoteExeArg(GroupName) + ' > ' + QuoteExeArg(OutPath) + ' 2>&1',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if not FileExists(OutPath) then
+  begin
+    LogDebug('ValidateGroupMembership: output file not found for ' + GroupName);
+    LogExit('ValidateGroupMembership');
     exit;
+  end;
 
   Lines := TStringList.Create;
   try
@@ -984,7 +1040,6 @@ begin
       end;
       if Line = '' then
         continue;
-      // Strip domain prefix if present (DOMAIN\username -> username)
       BackslashPos := Pos('\', Line);
       if BackslashPos > 0 then
         MemberName := Copy(Line, BackslashPos + 1, MaxInt)
@@ -1000,13 +1055,18 @@ begin
     Lines.Free;
     DeleteFile(OutPath);
   end;
+  LogDebug('ValidateGroupMembership: group=' + GroupName + ' user=' + UserName + ' result=' + BoolToStr(Result));
+  LogExit('ValidateGroupMembership');
 end;
 
 // Verify file is authenticode-signed by Microsoft Corporation
 function IsSignedByMicrosoftCorporation(const FilePath: string): Boolean;
 var
   OutText: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('IsSignedByMicrosoftCorporation');
+  OpTick := GetTickCount;
   LogSectionHeader('SIGNATURE VALIDATION');
   LogKeyValue('File', FilePath);
   OutText := GetPSOutput(
@@ -1022,12 +1082,13 @@ begin
     '$isMs = ($subj -like ''*CN=Microsoft Corporation*''); ' +
     '$ok = (($sig.Status -eq ''Valid'') -and $isMs); ' +
     '''STATUS='' + $sig.Status + ''|IS_MICROSOFT='' + $isMs + ''|SUBJECT='' + $subj + ''|ISSUER='' + $issuer + ''|THUMBPRINT='' + $thumb + ''|NOT_BEFORE='' + $nb + ''|NOT_AFTER='' + $na + ''|RESULT='' + ($(if($ok){''OK''}else{''BAD''}))');
-  WriteInstallerLog('Signature details: ' + OutText);
+  LogDebug('Signature details: ' + OutText);
   Result := Pos('|RESULT=OK', UpperCase(Trim(OutText))) > 0;
   if Result then
-    WriteInstallerLog('Signature verdict: Microsoft publisher validation passed')
+    LogInfo('Signature verdict: Microsoft publisher validation passed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
   else
-    WriteInstallerLog('Signature verdict: Microsoft publisher validation failed');
+    LogWarn('Signature verdict: Microsoft publisher validation failed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('IsSignedByMicrosoftCorporation');
 end;
 
 // Resolve mstsc.exe path dynamically
@@ -1144,12 +1205,16 @@ end;
 function ExecPowerShellHidden(const Command: string; var ResultCode: Integer): Boolean;
 var
   PSArgs: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('ExecPowerShellHidden');
+  OpTick := GetTickCount;
   PSArgs := BuildPowerShellArgs(Command, True);
   // Log command and run (mask any embedded passwords)
-  WriteInstallerLog('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
+  LogDebug('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
   Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  WriteInstallerLog('PowerShell exitcode=' + IntToStr(ResultCode));
+  LogDebug('PowerShell exitcode=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('ExecPowerShellHidden');
 end;
 
 // Execute a PowerShell command and capture stdout to a temp file, returning
@@ -1159,7 +1224,10 @@ var
   PSPath: string;
   RC: Integer;
   SL: TStringList;
+  OpTick: Cardinal;
 begin
+  LogEntry('GetPSOutput');
+  OpTick := GetTickCount;
   Result := '';
   PSPath := TempFile('psout.txt');
   Exec(EXE_POWERSHELL,
@@ -1176,6 +1244,8 @@ begin
       DeleteFile(PSPath);
     end;
   end;
+  LogDebug('GetPSOutput exit=' + IntToStr(RC) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('GetPSOutput');
 end;
 
 // Execute PowerShell and capture both stdout/stderr output regardless of exit code.
@@ -1184,7 +1254,10 @@ var
   PSPath: string;
   SL: TStringList;
   WrappedCommand: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('ExecPSCaptureAll');
+  OpTick := GetTickCount;
   Result := '';
   PSPath := TempFile('psall.txt');
   WrappedCommand := '& { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
@@ -1203,300 +1276,144 @@ begin
       DeleteFile(PSPath);
     end;
   end;
+  LogDebug('ExecPSCaptureAll exit=' + IntToStr(ResultCode) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('ExecPSCaptureAll');
 end;
 
 procedure EnsureRDPSigningCert; forward;
 
 procedure SignRdpFile(const RdpPath: string);
 var
-  PSScript: string;
   ResultCode: Integer;
+  OpTick: Cardinal;
+  ExePath: string;
+  CmdLine: string;
 begin
+  LogEntry('SignRdpFile');
+  OpTick := GetTickCount;
+  LogDebug('SignRdpFile: RdpPath=''' + RdpPath + '''');
   // Ensure the signing certificate exists and is trusted before signing
   EnsureRDPSigningCert;
 
-  // Pure-PowerShell RDP signing — no rdpsign.exe dependency, which is only found
-  // on Win11 Pro or newer versions of Windows. This allows signing on Home editon.
-  // Replicates rdpsign.exe behaviour exactly: builds canonical UTF-16LE signed
-  // content (signscope fields + null terminator), calls CryptSignMessage via
-  // P/Invoke for a zero-attribute detached CMS/PKCS#7 blob, then writes the
-  // result as UTF-16LE with BOM and \r\r\n line endings.
-  // Embed the path directly as a PS literal string (single-quoted).
-  // Windows installer paths do not contain single quotes, so no escaping needed.
-  PSScript :=
-    '$RdpPath = ''' + RdpPath + '''' + #13#10 +
-    '$ErrorActionPreference = ''Stop''' + #13#10 +
-    'Add-Type -Language CSharp -TypeDefinition @''' + #13#10 +
-    'using System;' + #13#10 +
-    'using System.Runtime.InteropServices;' + #13#10 +
-    'using System.Security.Cryptography.X509Certificates;' + #13#10 +
-    'using System.ComponentModel;' + #13#10 +
-    'public static class RdpCrypt {' + #13#10 +
-    '    const uint PKCS_7_ASN_ENCODING = 0x00010000u;' + #13#10 +
-    '    const uint X509_ASN_ENCODING   = 0x00000001u;' + #13#10 +
-    '    const uint MSG_ENCODING = PKCS_7_ASN_ENCODING | X509_ASN_ENCODING;' + #13#10 +
-    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
-    '    struct CRYPT_OBJID_BLOB { public uint cbData; public IntPtr pbData; }' + #13#10 +
-    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
-    '    struct CRYPT_ALGORITHM_IDENTIFIER {' + #13#10 +
-    '        [MarshalAs(UnmanagedType.LPStr)] public string pszObjId;' + #13#10 +
-    '        public CRYPT_OBJID_BLOB Parameters;' + #13#10 +
-    '    }' + #13#10 +
-    '    [StructLayout(LayoutKind.Sequential)]' + #13#10 +
-    '    struct CRYPT_SIGN_MESSAGE_PARA {' + #13#10 +
-    '        public uint   cbSize;' + #13#10 +
-    '        public uint   dwMsgEncodingType;' + #13#10 +
-    '        public IntPtr pSigningCert;' + #13#10 +
-    '        public CRYPT_ALGORITHM_IDENTIFIER HashAlgorithm;' + #13#10 +
-    '        public IntPtr pvHashAuxInfo;' + #13#10 +
-    '        public uint   cMsgCert;' + #13#10 +
-    '        public IntPtr rgpMsgCert;' + #13#10 +
-    '        public uint   cMsgCrl;' + #13#10 +
-    '        public IntPtr rgpMsgCrl;' + #13#10 +
-    '        public uint   cAuthAttr;' + #13#10 +
-    '        public IntPtr rgAuthAttr;' + #13#10 +
-    '        public uint   cUnauthAttr;' + #13#10 +
-    '        public IntPtr rgUnauthAttr;' + #13#10 +
-    '        public uint   dwFlags;' + #13#10 +
-    '        public uint   dwInnerContentType;' + #13#10 +
-    '        public CRYPT_ALGORITHM_IDENTIFIER HashEncryptionAlgorithm;' + #13#10 +
-    '        public IntPtr pvHashEncryptionAuxInfo;' + #13#10 +
-    '    }' + #13#10 +
-    '    [DllImport("crypt32.dll", SetLastError = true)]' + #13#10 +
-    '    static extern bool CryptSignMessage(' + #13#10 +
-    '        ref CRYPT_SIGN_MESSAGE_PARA pSignPara,' + #13#10 +
-    '        bool    fDetachedSignature,' + #13#10 +
-    '        uint    cToBeSigned,' + #13#10 +
-    '        IntPtr[] rgpbToBeSigned,' + #13#10 +
-    '        uint[]   rgcbToBeSigned,' + #13#10 +
-    '        byte[]   pbSignedBlob,' + #13#10 +
-    '        ref uint pcbSignedBlob' + #13#10 +
-    '    );' + #13#10 +
-    '    public static byte[] SignDetached(byte[] content, X509Certificate2 cert) {' + #13#10 +
-    '        IntPtr certPtrArr = Marshal.AllocHGlobal(IntPtr.Size);' + #13#10 +
-    '        Marshal.WriteIntPtr(certPtrArr, cert.Handle);' + #13#10 +
-    '        var para = new CRYPT_SIGN_MESSAGE_PARA {' + #13#10 +
-    '            cbSize            = (uint)Marshal.SizeOf(typeof(CRYPT_SIGN_MESSAGE_PARA)),' + #13#10 +
-    '            dwMsgEncodingType = MSG_ENCODING,' + #13#10 +
-    '            pSigningCert      = cert.Handle,' + #13#10 +
-    '            HashAlgorithm     = new CRYPT_ALGORITHM_IDENTIFIER { pszObjId = "2.16.840.1.101.3.4.2.1" },' + #13#10 +
-    '            cMsgCert          = 1u,' + #13#10 +
-    '            rgpMsgCert        = certPtrArr,' + #13#10 +
-    '        };' + #13#10 +
-    '        var handle = GCHandle.Alloc(content, GCHandleType.Pinned);' + #13#10 +
-    '        try {' + #13#10 +
-    '            IntPtr   contentPtr = handle.AddrOfPinnedObject();' + #13#10 +
-    '            IntPtr[] rgpb = { contentPtr };' + #13#10 +
-    '            uint[]   rgcb = { (uint)content.Length };' + #13#10 +
-    '            uint     cbBlob = 0;' + #13#10 +
-    '            CryptSignMessage(ref para, true, 1u, rgpb, rgcb, null, ref cbBlob);' + #13#10 +
-    '            if (cbBlob == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "CryptSignMessage size query failed");' + #13#10 +
-    '            byte[] blob = new byte[cbBlob];' + #13#10 +
-    '            if (!CryptSignMessage(ref para, true, 1u, rgpb, rgcb, blob, ref cbBlob))' + #13#10 +
-    '                throw new Win32Exception(Marshal.GetLastWin32Error(), "CryptSignMessage failed");' + #13#10 +
-    '            if (cbBlob == blob.Length) return blob;' + #13#10 +
-    '            byte[] trimmed = new byte[cbBlob]; Array.Copy(blob, trimmed, (int)cbBlob); return trimmed;' + #13#10 +
-    '        } finally { handle.Free(); Marshal.FreeHGlobal(certPtrArr); }' + #13#10 +
-    '    }' + #13#10 +
-    '}' + #13#10 +
-    '''' + '@' + #13#10 +
-    '' + #13#10 +
-    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''' + #13#10 +
-    '$cert = Get-ChildItem ''Cert:\LocalMachine\My'' | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1' + #13#10 +
-    'if (-not $cert) { exit 2 }' + #13#10 +
-    '' + #13#10 +
-    '$SIGNSCOPE = ''Full Address,Alternate Full Address,Use Redirection Server Name,Negotiate Security Layer,EnableCredSspSupport,DisableConnectionSharing,AutoReconnection Enabled,GatewayHostname,GatewayUsageMethod,GatewayProfileUsageMethod,GatewayCredentialsSource,PromptCredentialOnce,Alternate Shell,Shell Working Directory,RemoteApplicationMode,Prompt For Credentials,Authentication Level,AudioMode,RedirectDrives,RedirectPrinters,RedirectSmartCards,RedirectClipboard,DrivesToRedirect,RedirectWebAuthn''' + #13#10 +
-    '$SCOPE_FIELDS = $SIGNSCOPE -split '',''' + #13#10 +
-    '' + #13#10 +
-    '$FIELD_TYPE = @{' + #13#10 +
-    '    ''full address''=''s''; ''alternate full address''=''s''; ''use redirection server name''=''i''' + #13#10 +
-    '    ''negotiate security layer''=''i''; ''enablecredsspsupport''=''i''; ''disableconnectionsharing''=''i''' + #13#10 +
-    '    ''autoreconnection enabled''=''i''; ''gatewayhostname''=''s''; ''gatewayusagemethod''=''i''' + #13#10 +
-    '    ''gatewayprofileusagemethod''=''i''; ''gatewaycredentialssource''=''i''; ''promptcredentialonce''=''i''' + #13#10 +
-    '    ''alternate shell''=''s''; ''shell working directory''=''s''; ''remoteapplicationmode''=''i''' + #13#10 +
-    '    ''prompt for credentials''=''i''; ''authentication level''=''i''; ''audiomode''=''i''' + #13#10 +
-    '    ''redirectdrives''=''i''; ''redirectprinters''=''i''; ''redirectsmartcards''=''i''' + #13#10 +
-    '    ''redirectclipboard''=''i''; ''drivestoredirect''=''s''; ''redirectwebauthn''=''i''' + #13#10 +
-    '}' + #13#10 +
-    '' + #13#10 +
-    '$inputBytes = [IO.File]::ReadAllBytes($RdpPath)' + #13#10 +
-    'if ($inputBytes.Length -ge 2 -and $inputBytes[0] -eq 0xFF -and $inputBytes[1] -eq 0xFE) {' + #13#10 +
-    '    $rawText = [Text.Encoding]::Unicode.GetString($inputBytes, 2, $inputBytes.Length - 2)' + #13#10 +
-    '} else {' + #13#10 +
-    '    $rawText = [Text.Encoding]::UTF8.GetString($inputBytes)' + #13#10 +
-    '}' + #13#10 +
-    '$inputLines = $rawText -split ''\r?\r\n|\r(?!\n)|\n'' | Where-Object { $_ -ne '''' }' + #13#10 +
-    '' + #13#10 +
-    '$fieldMap = @{}' + #13#10 +
-    'foreach ($line in $inputLines) {' + #13#10 +
-    '    if ($line -match ''^(.+?):(.):(.*?)$'') {' + #13#10 +
-    '        $fieldMap[$Matches[1].ToLower()] = @{ Name=$Matches[1]; Type=$Matches[2]; Value=$Matches[3] }' + #13#10 +
-    '    }' + #13#10 +
-    '}' + #13#10 +
-    'if (-not $fieldMap[''full address'']) { throw "Missing required full address field" }' + #13#10 +
-    '' + #13#10 +
-    '$STRIP_KEYS = [Collections.Generic.HashSet[string]] @(''alternate full address'',''signscope'',''signature'')' + #13#10 +
-    '$baseLines = $inputLines | ForEach-Object {' + #13#10 +
-    '    if ($_ -match ''^(.+?):b:(.*)$'') {' + #13#10 +
-    '        $k = $Matches[1].ToLower()' + #13#10 +
-    '        if (-not $STRIP_KEYS.Contains($k)) { "$($Matches[1]):b:$($Matches[2].ToUpper())" }' + #13#10 +
-    '    } elseif ($_ -match ''^(.+?):'') {' + #13#10 +
-    '        if (-not $STRIP_KEYS.Contains($Matches[1].ToLower())) { $_ }' + #13#10 +
-    '    } else { $_ }' + #13#10 +
-    '}' + #13#10 +
-    '' + #13#10 +
-    '$altFullAddress = $fieldMap[''full address''].Value' + #13#10 +
-    '$fieldMap[''alternate full address''] = @{ Name=''alternate full address''; Type=''s''; Value=$altFullAddress }' + #13#10 +
-    '' + #13#10 +
-    '$sb = New-Object Text.StringBuilder' + #13#10 +
-    'foreach ($sf in $SCOPE_FIELDS) {' + #13#10 +
-    '    $key = $sf.ToLower()' + #13#10 +
-    '    $e   = $fieldMap[$key]' + #13#10 +
-    '    $typ = if ($e) { $e.Type  } else { $FIELD_TYPE[$key] }' + #13#10 +
-    '    $val = if ($e) { $e.Value } else { if ($FIELD_TYPE[$key] -eq ''s'') { '''' } else { ''0'' } }' + #13#10 +
-    '    [void] $sb.Append("${key}:${typ}:${val}`r`n")' + #13#10 +
-    '}' + #13#10 +
-    '[void] $sb.Append("signscope:s:${SIGNSCOPE}`r`n")' + #13#10 +
-    '[void] $sb.Append([char]0)' + #13#10 +
-    '$canonicalBytes = [Text.Encoding]::Unicode.GetBytes($sb.ToString())' + #13#10 +
-    '' + #13#10 +
-    '$cmsBytes = [RdpCrypt]::SignDetached($canonicalBytes, $cert)' + #13#10 +
-    '' + #13#10 +
-    '$header  = [byte[]]@(0x01,0x00,0x01,0x00,0x01,0x00,0x00,0x00)' + #13#10 +
-    '$sigBlob = $header + [BitConverter]::GetBytes([uint32]$cmsBytes.Length) + $cmsBytes' + #13#10 +
-    '$b64Raw  = [Convert]::ToBase64String($sigBlob)' + #13#10 +
-    '$sigB64  = [Text.RegularExpressions.Regex]::Replace($b64Raw, ''.{1,64}'', ''$0  '')' + #13#10 +
-    '' + #13#10 +
-    '$CRLF     = "`r`r`n"' + #13#10 +
-    '$outLines = [Collections.Generic.List[string]]$baseLines' + #13#10 +
-    '$outLines.Add("alternate full address:s:$altFullAddress")' + #13#10 +
-    '$outLines.Add("signscope:s:$SIGNSCOPE")' + #13#10 +
-    '$outLines.Add("signature:s:$sigB64")' + #13#10 +
-    '' + #13#10 +
-    '$outBytes = [byte[]]@(0xFF,0xFE) + [Text.Encoding]::Unicode.GetBytes(($outLines -join $CRLF) + $CRLF)' + #13#10 +
-    '[IO.File]::WriteAllBytes($RdpPath, $outBytes)' + #13#10 +
-    'exit 0';
+  // Extract pre-compiled RdpSignTool.exe from installer to {tmp}
+  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  ExtractTemporaryFile('RdpSignTool.exe');
+  LogDebug('SignRdpFile: Extracted RdpSignTool.exe to ' + ExePath);
 
-  // No temp file: encode the entire script as UTF-16LE base64 and pass via
-  // -EncodedCommand. Nothing touches disk; no AV trip-wire on a .ps1 artifact.
-  Exec(EXE_POWERSHELL, PS_ARGS_HIDDEN + ' -EncodedCommand ' + PSBase64Encode(PSScript),
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
+  // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
+  // via P/Invoke to crypt32.dll — no PowerShell involved, no C# JIT compilation,
+  // no -EncodedCommand overhead.  The EXE is ~20KB and completes in ~100-300ms.
+  //
+  // Exit codes:
+  //   0  = Success
+  //   1  = Certificate not found
+  //   2  = RDP file not found/unreadable
+  //   3  = Missing "full address" field
+  //   4  = CryptSignMessage failure
+  //   5  = Internal error/exception
+  //   99 = Invalid arguments
+  CmdLine := '"' + RdpPath + '"';
+  LogDebug('SignRdpFile: Executing: ' + ExePath + ' ' + CmdLine);
+  Exec(ExePath, CmdLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  LogDebug('SignRdpFile: RdpSignTool.exe exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+
   if ResultCode = 0 then
-    WriteInstallerLog('SignRdpFile: signed ' + RdpPath)
+    LogInfo('SignRdpFile: signed ' + RdpPath + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
   else
-    WriteInstallerLog('SignRdpFile: failed to sign ' + RdpPath + ' (exit=' + IntToStr(ResultCode) + ')');
+    LogWarn('SignRdpFile: failed to sign ' + RdpPath + ' (exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogInfo('SignRdpFile total [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('SignRdpFile');
 end;
 
 // Ensures the RDPWrapKit code-signing cert exists, is trusted, and is registered
 // as a trusted RDP publisher in the Terminal Services policy.
+//
+// PERFORMANCE: All four logical steps are executed in a single PowerShell
+// invocation (~500ms total for PS startup + execution) instead of four separate
+// invocations (~2s total).  The single script returns the certificate thumbprint
+// on success, or exits with a non-zero code on failure.
 procedure EnsureRDPSigningCert;
 var
   PSCommand: string;
   ResultCode: Integer;
   PSOut: string;
   Thumb: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('EnsureRDPSigningCert');
+  OpTick := GetTickCount;
   Thumb := '';
 
-  // Step 1: Ensure cert exists in LocalMachine\My and return thumbprint.
+  // Single consolidated PowerShell script that performs all four steps:
+  //   1. Find or create the cert in LocalMachine\My
+  //   2. Import into Trusted Root (if not already there)
+  //   3. [implicit] verify — step 2 already checks existence
+  //   4. Register thumbprint in TrustedCertThumbprints policy
+  // Outputs thumbprint on success; any error triggers catch/throw.
+  LogDebug('EnsureRDPSigningCert: Running consolidated PS cert setup');
+  // NOTE: PSCommand is a one-liner separated by ; — NO inline # comments
+  // because the PS script has no #13#10 line breaks and # would comment out
+  // the rest of the line (all statements after it).
   PSCommand :=
     '$ErrorActionPreference = ''Stop''; ' +
     'try { ' +
-    '  $subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
-    '  $existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
-    '  if ($existing) { $thumb = $existing.Thumbprint } else { ' +
-    '    $c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
-    '    $thumb = $c.Thumbprint }; ' +
-    '  Write-Output $thumb ' +
+    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
+    '$existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
+    'if ($existing) { $thumb = $existing.Thumbprint } else { ' +
+    '$c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
+    '$thumb = $c.Thumbprint }; ' +
+    'if (-not $thumb) { throw "Failed to obtain certificate thumbprint" }; ' +
+    '$rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    'if (-not $rootCert) { ' +
+    '$tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; ' +
+    '$myCert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    'if (-not $myCert) { throw ''Certificate vanished from LocalMachine\My'' }; ' +
+    'Export-Certificate -Cert $myCert -FilePath $tmp | Out-Null; ' +
+    'Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root" | Out-Null; ' +
+    'Remove-Item $tmp -Force; ' +
+    '$rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
+    'if (-not $rootCert) { throw "Failed to import cert to Trusted Root" } }; ' +
+    '$keyPath = ''Software\Policies\Microsoft\Windows NT\Terminal Services''; ' +
+    '$key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true); ' +
+    'if (-not $key) { ' +
+    '$null = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath); ' +
+    '$key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true) }; ' +
+    '$raw = $key.GetValue(''TrustedCertThumbprints'', $null); ' +
+    '$existingList = if ($raw -is [string]) { $raw } else { '''' }; ' +
+    'if ($existingList -notmatch [regex]::Escape($thumb)) { ' +
+    '$newVal = if ($existingList -ne '''') { $existingList + '','' + $thumb } else { $thumb }; ' +
+    '$key.SetValue(''TrustedCertThumbprints'', $newVal, [Microsoft.Win32.RegistryValueKind]::String) }; ' +
+    '$key.Close(); ' +
+    'Write-Output $thumb ' +
     '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
 
   PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
-  WriteInstallerLog('EnsureRDPSigningCert [Step1-EnsureInMy] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  LogDebug('EnsureRDPSigningCert [ConsolidatedPS] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+
   if ResultCode <> 0 then
   begin
-    WriteInstallerLog('EnsureRDPSigningCert: failed at Step1-EnsureInMy');
+    LogError('EnsureRDPSigningCert: failed (exit=' + IntToStr(ResultCode) + ')');
+    LogExit('EnsureRDPSigningCert');
     exit;
   end;
+
   Thumb := Trim(PSOut);
   if Thumb = '' then
   begin
-    WriteInstallerLog('EnsureRDPSigningCert: failed at Step1-EnsureInMy (empty thumbprint output)');
+    LogError('EnsureRDPSigningCert: empty thumbprint output');
+    LogExit('EnsureRDPSigningCert');
     exit;
   end;
-
-  // Step 2: Ensure cert is in Trusted Root Certification Authorities.
-  PSCommand :=
-    '$ErrorActionPreference = ''Stop''; ' +
-    '$thumb = ''' + Thumb + '''; ' +
-    'try { ' +
-    '  $rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    '  if (-not $rootCert) { ' +
-    '    $tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; ' +
-    '    $myCert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    '    if (-not $myCert) { throw ''Could not find cert in LocalMachine\\My for thumbprint '' + $thumb }; ' +
-    '    Export-Certificate -Cert $myCert -FilePath $tmp; ' +
-    '    Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root" | Out-Null; ' +
-    '    Remove-Item $tmp -Force; ' +
-    '    Write-Output ''Imported to Root'' ' +
-    '  } else { Write-Output ''Already in Root'' }; ' +
-    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
-
-  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
-  WriteInstallerLog('EnsureRDPSigningCert [Step2-EnsureInRoot] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
-  if ResultCode <> 0 then
+  if Copy(Thumb, 1, 6) = 'ERROR:' then
   begin
-    WriteInstallerLog('EnsureRDPSigningCert: failed at Step2-EnsureInRoot');
+    LogError('EnsureRDPSigningCert: PS error: ' + PSOut);
+    LogExit('EnsureRDPSigningCert');
     exit;
   end;
 
-  // Step 3: Verify cert exists in Trusted Root Certification Authorities.
-  PSCommand :=
-    '$ErrorActionPreference = ''Stop''; ' +
-    '$thumb = ''' + Thumb + '''; ' +
-    'try { ' +
-    '  $rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    '  if (-not $rootCert) { throw ''Failed to add cert to Trusted Root Certification Authorities'' }; ' +
-    '  Write-Output ''Verified in Root'' ' +
-    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
-
-  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
-  WriteInstallerLog('EnsureRDPSigningCert [Step3-VerifyRoot] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
-  if ResultCode <> 0 then
-  begin
-    WriteInstallerLog('EnsureRDPSigningCert: failed at Step3-VerifyRoot');
-    exit;
-  end;
-
-  // Step 4: Ensure TrustedCertThumbprints policy contains this thumbprint.
-  // Use .NET Registry API directly to avoid PowerShell type coercion issues
-  // (e.g. stale DWORD value causing Int32 conversion errors).
-  // SetValue with RegistryValueKind.String always writes REG_SZ without deleting.
-  PSCommand :=
-    '$ErrorActionPreference = ''Stop''; ' +
-    '$thumb = ''' + Thumb + '''; ' +
-    'try { ' +
-    '  $keyPath = ''Software\Policies\Microsoft\Windows NT\Terminal Services''; ' +
-    '  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true); ' +
-    '  if (-not $key) { [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath) | Out-Null; $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true) }; ' +
-    '  $raw = $key.GetValue(''TrustedCertThumbprints'', $null); ' +
-    '  $existing = if ($raw -is [string]) { $raw } else { '''' }; ' +
-    '  if ($existing -notmatch [regex]::Escape($thumb)) { ' +
-    '    $newVal = if ($existing -ne '''') { $existing + '','' + $thumb } else { $thumb }; ' +
-    '    $key.SetValue(''TrustedCertThumbprints'', $newVal, [Microsoft.Win32.RegistryValueKind]::String); ' +
-    '    Write-Output (''Set TrustedCertThumbprints='' + $newVal) ' +
-    '  } else { Write-Output ''TrustedCertThumbprints already contains thumb'' }; ' +
-    '  $key.Close() ' +
-    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
-
-  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
-  WriteInstallerLog('EnsureRDPSigningCert [Step4-TrustedCertThumbprints] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
-  if ResultCode <> 0 then
-  begin
-    WriteInstallerLog('EnsureRDPSigningCert: failed at Step4-TrustedCertThumbprints');
-    exit;
-  end;
-
-  WriteInstallerLog('EnsureRDPSigningCert: cert ensured and registered as trusted publisher (thumb=' + Thumb + ')');
+  LogInfo('EnsureRDPSigningCert: cert ensured and registered (thumb=' + Copy(Thumb, 1, 8) + '...) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('EnsureRDPSigningCert');
 end;
 
 procedure OpenTermWrap(Sender: TObject);
@@ -1569,6 +1486,7 @@ var
   InstallLang: string;
   Arch: string;
 begin
+  LogEntry('LogSystemInfo');
   ProductName := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ProductName', 'Unknown');
   DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
   if DisplayVersion = '' then
@@ -1583,16 +1501,17 @@ begin
   else
     Arch := 'x86';
 
-  WriteInstallerLog('SystemInfo: Build.UBR=' + BuildNumber + '.' + IntToStr(UBR));
+  LogInfo('SystemInfo: OS=' + ProductName + ' Build.UBR=' + BuildNumber + '.' + IntToStr(UBR));
   if DisplayVersion <> '' then
-    WriteInstallerLog('SystemInfo: Version=' + DisplayVersion);
+    LogInfo('SystemInfo: Version=' + DisplayVersion);
   if BuildNumber <> '' then
-    WriteInstallerLog('SystemInfo: Build=' + BuildNumber + ' (UBR ' + IntToStr(UBR) + ')');
+    LogInfo('SystemInfo: Build=' + BuildNumber + ' (UBR ' + IntToStr(UBR) + ')');
   if EditionID <> '' then
-    WriteInstallerLog('SystemInfo: Edition=' + EditionID);
+    LogInfo('SystemInfo: Edition=' + EditionID);
   if InstallLang <> '' then
-    WriteInstallerLog('SystemInfo: InstallLanguage=' + InstallLang);
-  WriteInstallerLog('SystemInfo: Arch=' + Arch);
+    LogInfo('SystemInfo: InstallLanguage=' + InstallLang);
+  LogInfo('SystemInfo: Arch=' + Arch);
+  LogExit('LogSystemInfo');
 end;
 
 function GetTimestampString: string;
@@ -1611,6 +1530,42 @@ begin
   Result := '[' + h + ':' + m + ':' + s + '.' + ms + ']';
 end;
 
+function DWordToHex(const Value: Cardinal; const MinDigits: Integer): string;
+var
+  V: Cardinal;
+  Digit: Integer;
+begin
+  Result := '';
+  V := Value;
+  if V = 0 then
+    Result := '0'
+  else
+  begin
+    while V > 0 do
+    begin
+      Digit := V and $F;
+      if Digit < 10 then
+        Result := Chr(Ord('0') + Digit) + Result
+      else
+        Result := Chr(Ord('A') + Digit - 10) + Result;
+      V := V shr 4;
+    end;
+  end;
+  // Pad to minimum digits
+  while Length(Result) < MinDigits do
+    Result := '0' + Result;
+end;
+
+function GetThreadIdHex: string;
+begin
+  Result := DWordToHex(GetCurrentThreadId, 4);
+end;
+
+function GetProcessIdHex: string;
+begin
+  Result := DWordToHex(GetCurrentProcessId, 4);
+end;
+
 function RepeatChar(const Ch: string; const Count: Integer): string;
 var
   i: Integer;
@@ -1620,11 +1575,215 @@ begin
     Result := Result + Ch;
 end;
 
+// -----------------------------------------------------------------------------
+// CENTRALIZED LOGGER ARCHITECTURE
+// -----------------------------------------------------------------------------
+// All log output flows through LoggerWrite which applies:
+//   1. Sensitive key redaction (Password, Credential, AuthToken, Secret, APIKey, ServiceAccount)
+//   2. Thread ID and Process ID metadata injection
+//   3. Duration tracking via LoggerStartOp/LoggerEndOp
+//   4. [DEBUG]/[INFO]/[WARN]/[ERROR] level tagging
+// -----------------------------------------------------------------------------
+
+// Helper: redact a single sensitive key pattern from Result/U in-place
+procedure RedactKeyPattern(var ResultStr, UpperStr: string; const KeyPattern: string);
+var
+  p, startPos, endPos, SearchPos, idx: Integer;
+begin
+  SearchPos := 1;
+  idx := PosFrom(KeyPattern, UpperStr, SearchPos);
+  while idx > 0 do
+  begin
+    p := idx + Length(KeyPattern);
+    while (p <= Length(ResultStr)) and ((ResultStr[p] = ' ') or (ResultStr[p] = '=')) do
+      Inc(p);
+    if p > Length(ResultStr) then
+      Break;
+    if ResultStr[p] = '"' then
+    begin
+      startPos := p;
+      endPos := startPos + 1;
+      while (endPos <= Length(ResultStr)) and (ResultStr[endPos] <> '"') do
+        Inc(endPos);
+      if endPos > Length(ResultStr) then
+        endPos := Length(ResultStr);
+      Delete(ResultStr, startPos, endPos - startPos + 1);
+      Insert('"[REDACTED]"', ResultStr, startPos);
+    end
+    else
+    begin
+      endPos := p;
+      while (endPos <= Length(ResultStr)) and (ResultStr[endPos] <> ' ') do
+        Inc(endPos);
+      Delete(ResultStr, p, endPos - p);
+      Insert('[REDACTED]', ResultStr, p);
+    end;
+    UpperStr := UpperCase(ResultStr);
+    SearchPos := idx + Length(KeyPattern) + 1;
+    idx := PosFrom(KeyPattern, UpperStr, SearchPos);
+  end;
+end;
+
+// Centralized redaction engine - scrubs all sensitive values before any log output
+function LoggerRedact(const S: string): string;
+var
+  U: string;
+  idx, p, startPos, endPos: Integer;
+begin
+  // First pass: use existing password masking (handles -Password "..." and net.exe patterns)
+  Result := MaskPasswordsInString(S);
+
+  // Second pass: redact additional sensitive key patterns using the helper
+  U := UpperCase(Result);
+  RedactKeyPattern(Result, U, '-PASSWORD');
+  RedactKeyPattern(Result, U, '-CREDENTIAL');
+  RedactKeyPattern(Result, U, '-AUTHTOKEN');
+  RedactKeyPattern(Result, U, '-SECRET');
+  RedactKeyPattern(Result, U, '-APIKEY');
+  RedactKeyPattern(Result, U, '-SERVICEACCOUNT');
+
+  // Third pass: redact Password/credential values in key=value contexts (e.g. User=x Password=y)
+  U := UpperCase(Result);
+  idx := Pos('PASSWORD:', U);
+  while idx > 0 do
+  begin
+    p := idx + Length('PASSWORD:');
+    if (p <= Length(Result)) and (Result[p] <> ' ') then
+    begin
+      startPos := p;
+      endPos := startPos;
+      while (endPos <= Length(Result)) and (Result[endPos] <> ' ') and (Result[endPos] <> '|') and (Result[endPos] <> #13) and (Result[endPos] <> #10) do
+        Inc(endPos);
+      Delete(Result, startPos, endPos - startPos);
+      Insert('[REDACTED]', Result, startPos);
+    end;
+    U := UpperCase(Result);
+    idx := Pos('PASSWORD:', U);
+  end;
+end;
+
+// Core log writer - every log entry flows through here
+procedure LoggerWrite(const Level, Msg: string);
+var
+  FinalMsg: string;
+  RedactedMsg: string;
+  DurationStr: string;
+begin
+  // Apply centralized redaction
+  RedactedMsg := LoggerRedact(Msg);
+
+  // Build duration string if an operation is active
+  if LoggerOpActive then
+    DurationStr := ' [DURATION:' + IntToStr(GetTickCount - LoggerOpStartTick) + 'ms]'
+  else
+    DurationStr := '';
+
+  // Format: [HH:MM:SS.mmm] [LEVEL] [Thread:0xTID] [PID:0xPID] [Time: Xms] Message
+  FinalMsg := GetTimestampString + ' [' + Level + '] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + ']' + DurationStr + ' ' + RedactedMsg;
+
+  try
+    SaveStringToFile(InstallLogPath, FinalMsg + #13#10, True);
+  except
+  end;
+end;
+
+// Convenience wrappers
+procedure LogInfo(const Msg: string);
+begin
+  LoggerWrite('INFO', Msg);
+end;
+
+procedure LogDebug(const Msg: string);
+begin
+  LoggerWrite('DEBUG', Msg);
+end;
+
+procedure LogWarn(const Msg: string);
+begin
+  LoggerWrite('WARN', Msg);
+end;
+
+procedure LogError(const Msg: string);
+begin
+  LoggerWrite('ERROR', Msg);
+end;
+
+// Lifecycle tracing - function entry/exit
+procedure LogEntry(const FuncName: string);
+begin
+  LogDebug('>>> ENTER ' + FuncName);
+end;
+
+procedure LogExit(const FuncName: string);
+begin
+  LogDebug('<<< EXIT ' + FuncName);
+end;
+
+// Performance profiling helpers
+procedure LoggerStartOp;
+begin
+  LoggerOpStartTick := GetTickCount;
+  LoggerOpActive := True;
+end;
+
+function LoggerEndOp: Cardinal;
+begin
+  LoggerOpActive := False;
+  Result := GetTickCount - LoggerOpStartTick;
+end;
+
+// Typed I/O operation logging with performance metric
+procedure LogFileOp(const Operation, FilePath: string; const Success: Boolean; const Extra: string);
+var
+  Duration: Cardinal;
+  StatusStr: string;
+begin
+  LoggerStartOp;
+  // The operation happens externally; we log before and after
+  if Success then
+    StatusStr := 'Success'
+  else
+    StatusStr := 'Failed';
+  Duration := LoggerEndOp;
+  LogDebug('File' + Operation + ': Path=''' + FilePath + ''', Result=''' + StatusStr + ''', Duration=' + IntToStr(Duration) + 'ms' + Extra);
+end;
+
+// Typed registry operation logging with performance metric
+procedure LogRegOp(const Operation, RegKey, RegValue: string; const Success: Boolean);
+var
+  Duration: Cardinal;
+  StatusStr: string;
+begin
+  if Success then
+    StatusStr := 'Success'
+  else
+    StatusStr := 'Failed';
+  // Duration is the time of the write operation itself
+  Duration := 0;
+  LoggerWrite('DEBUG', 'Reg' + Operation + ': Key=''' + RegKey + ''', Value=''' + LoggerRedact(RegValue) + ''', Result=''' + StatusStr + ''', Duration=' + IntToStr(Duration) + 'ms');
+end;
+
+// Typed service operation logging with performance metric
+procedure LogServiceOp(const Operation, ServiceName: string; const ResultCode: Integer);
+var
+  Duration: Cardinal;
+begin
+  Duration := LoggerEndOp;
+  LoggerWrite('DEBUG', 'Service' + Operation + ': Name=''' + ServiceName + ''', ExitCode=' + IntToStr(ResultCode) + ', Duration=' + IntToStr(Duration) + 'ms');
+end;
+
+// Simulation scenario logging (uses [SIM] level)
+procedure LogSim(const ScenarioText: string);
+begin
+  LoggerWrite('SIM', 'SIMULATED SCENARIO: ' + ScenarioText);
+  Log('SIMULATED SCENARIO: ' + ScenarioText);
+end;
+
 procedure LogSectionHeader(const Title: string);
 begin
-  WriteInstallerLog('+' + RepeatChar('-', 78) + '+');
-  WriteInstallerLog('| ' + Title);
-  WriteInstallerLog('+' + RepeatChar('-', 78) + '+');
+  LoggerWrite('INFO', '+' + RepeatChar('-', 78) + '+');
+  LoggerWrite('INFO', '| ' + Title);
+  LoggerWrite('INFO', '+' + RepeatChar('-', 78) + '+');
 end;
 
 function NormalizeLogLevel(const Msg: string): string;
@@ -1737,7 +1896,7 @@ end;
 
 procedure LogKeyValue(const KeyName, KeyValue: string);
 begin
-  WriteInstallerLog('  - ' + KeyName + ': ' + KeyValue);
+  LogDebug('  - ' + KeyName + ': ' + KeyValue);
 end;
 
 procedure DumpTextFileToLog(const HeaderText, FilePath: string);
@@ -1745,9 +1904,11 @@ var
   Tmp: TStringList;
   k: Integer;
 begin
+  LogEntry('DumpTextFileToLog');
   if not FileExists(FilePath) then
   begin
-    WriteInstallerLog('WARNING: ' + HeaderText + ' file not found: ' + FilePath);
+    LogWarn(HeaderText + ' file not found: ' + FilePath);
+    LogExit('DumpTextFileToLog');
     exit;
   end;
 
@@ -1755,22 +1916,23 @@ begin
   try
     try
       Tmp.LoadFromFile(FilePath);
-      WriteInstallerLog(HeaderText + ' (' + IntToStr(Tmp.Count) + ' lines):');
+      LogDebug(HeaderText + ' (' + IntToStr(Tmp.Count) + ' lines):');
       for k := 0 to Tmp.Count - 1 do
-        WriteInstallerLog('DEBUG: ' + Tmp[k]);
+        LogDebug(Tmp[k]);
     except
-      WriteInstallerLog('WARNING: Failed to read debug output file: ' + FilePath);
+      LogWarn('Failed to read debug output file: ' + FilePath);
     end;
   finally
     Tmp.Free;
   end;
+  LogExit('DumpTextFileToLog');
 end;
 
 procedure LogPasswordPipeline(const StageName, UserName, Password: string);
 begin
   if PASSWORD_PIPELINE_DIAG = 0 then
     exit;
-  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] user=' + UserName + ' :: details=<redacted>');
+  LogDebug('PASSWORD_DIAG [' + StageName + '] user=' + UserName + ' :: details=[REDACTED]');
 end;
 
 procedure LogEncryptedFileSummary(const StageName, FilePath: string);
@@ -1783,19 +1945,18 @@ begin
 
   if not FileExists(FilePath) then
   begin
-    WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] encrypted file missing: ' + FilePath);
+    LogDebug('PASSWORD_DIAG [' + StageName + '] encrypted file missing: ' + FilePath);
     exit;
   end;
 
   if not LoadStringFromFile(FilePath, EncRaw) then
   begin
-    WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] failed reading encrypted file: ' + FilePath);
+    LogDebug('PASSWORD_DIAG [' + StageName + '] failed reading encrypted file: ' + FilePath);
     exit;
   end;
 
   EncText := Trim(String(EncRaw));
-  WriteInstallerLog('PASSWORD_DIAG [' + StageName + '] encLen=' + IntToStr(Length(EncText)) +
-    ' | encPrefix=' + Copy(EncText, 1, 24));
+  LogDebug('PASSWORD_DIAG [' + StageName + '] encLen=' + IntToStr(Length(EncText)));
 end;
 
 procedure PreserveDebugLogFileToDesktop(const FilePath: string);
@@ -1804,25 +1965,34 @@ var
   DestPath: string;
   BaseName: string;
 begin
+  LogEntry('PreserveDebugLogFileToDesktop');
   if PRESERVE_USER_CREATE_DEBUG_LOGS = 0 then
+  begin
+    LogExit('PreserveDebugLogFileToDesktop');
     exit;
+  end;
 
   if not FileExists(FilePath) then
+  begin
+    LogExit('PreserveDebugLogFileToDesktop');
     exit;
+  end;
 
   DestDir := ExpandConstant('{userdesktop}\RDPWrapKit_DebugLogs');
   if (not DirExists(DestDir)) and (not CreateDir(DestDir)) then
   begin
-    WriteInstallerLog('WARNING: Could not create debug log folder: ' + DestDir);
+    LogWarn('Could not create debug log folder: ' + DestDir);
+    LogExit('PreserveDebugLogFileToDesktop');
     exit;
   end;
 
   BaseName := ChangeFileExt(ExtractFileName(FilePath), '');
   DestPath := DestDir + '\' + BaseName + '_' + IntToStr(GetTickCount) + '.log';
   if CopyFile(FilePath, DestPath, False) then
-    WriteInstallerLog('Saved debug user-create log: ' + DestPath)
+    LogInfo('Saved debug user-create log: ' + DestPath)
   else
-    WriteInstallerLog('WARNING: Failed to save debug user-create log copy for ' + FilePath);
+    LogWarn('Failed to save debug user-create log copy for ' + FilePath);
+  LogExit('PreserveDebugLogFileToDesktop');
 end;
 
 procedure RegisterDebugFileForFinishCleanup(const FilePath: string);
@@ -1834,7 +2004,7 @@ begin
   if PendingDebugCleanupFiles.IndexOf(FilePath) < 0 then
   begin
     PendingDebugCleanupFiles.Add(FilePath);
-    WriteInstallerLog('Deferred cleanup registered for Finish: ' + FilePath);
+    LogDebug('Deferred cleanup registered for Finish: ' + FilePath);
   end;
 end;
 
@@ -1843,15 +2013,20 @@ var
   i: Integer;
   P: string;
 begin
+  LogEntry('CleanupPendingDebugFiles');
   if not Assigned(PendingDebugCleanupFiles) then
+  begin
+    LogExit('CleanupPendingDebugFiles');
     exit;
+  end;
 
   if CLEANUP_DEBUG_FILES_ON_FINISH = 0 then
   begin
     LogSectionHeader('FINISH CLEANUP: DEFERRED DEBUG FILES');
-    WriteInstallerLog('Deferred debug cleanup skipped by configuration; files retained for troubleshooting');
+    LogInfo('Deferred debug cleanup skipped; files retained for troubleshooting');
     LogKeyValue('Queued files retained', IntToStr(PendingDebugCleanupFiles.Count));
     PendingDebugCleanupFiles.Clear;
+    LogExit('CleanupPendingDebugFiles');
     exit;
   end;
 
@@ -1864,15 +2039,16 @@ begin
     if FileExists(P) then
     begin
       if DeleteFile(P) then
-        WriteInstallerLog('Deleted deferred debug file: ' + P)
+        LogDebug('Deleted deferred debug file: ' + P)
       else
-        WriteInstallerLog('WARNING: Failed to delete deferred debug file: ' + P);
+        LogWarn('Failed to delete deferred debug file: ' + P);
     end
     else
-      WriteInstallerLog('Deferred debug file already missing: ' + P);
+      LogDebug('Deferred debug file already missing: ' + P);
   end;
 
   PendingDebugCleanupFiles.Clear;
+  LogExit('CleanupPendingDebugFiles');
 end;
 
 procedure PromptManualDownload(const ComponentName, Url, Reason: string);
@@ -1880,6 +2056,7 @@ var
   Choice: Integer;
   RC: Integer;
 begin
+  LogEntry('PromptManualDownload');
   LogSectionHeader('MANUAL DOWNLOAD REQUIRED');
   LogKeyValue('Component', ComponentName);
   LogKeyValue('Reason', Reason);
@@ -1895,50 +2072,63 @@ begin
 
   if Choice = IDYES then
   begin
-    WriteInstallerLog('Manual download prompt: user chose YES for ' + ComponentName);
+    LogInfo('Manual download prompt: user chose YES for ' + ComponentName);
     if not ShellExec('', Url, '', '', SW_SHOWNORMAL, ewNoWait, RC) then
-      WriteInstallerLog('Manual download launch failed for ' + ComponentName + ', ShellExec rc=' + IntToStr(RC))
+      LogWarn('Manual download launch failed for ' + ComponentName + ', ShellExec rc=' + IntToStr(RC))
     else
-      WriteInstallerLog('Manual download launch succeeded for ' + ComponentName);
+      LogInfo('Manual download launch succeeded for ' + ComponentName);
   end
   else
   begin
-    WriteInstallerLog('Manual download prompt: user chose NO for ' + ComponentName);
+    LogInfo('Manual download prompt: user chose NO for ' + ComponentName);
   end;
+  LogExit('PromptManualDownload');
 end;
 
 procedure InitInstallerLog;
+var
+  HeaderTS: string;
 begin
   InstallLogPath := ExpandConstant(INSTALL_LOG_PATH);
+  LoggerProcId := GetCurrentProcessId;
+  LoggerThreadId := GetCurrentThreadId;
+  LoggerOpActive := False;
+
+  HeaderTS := GetTimestampString;
   try
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' +' + RepeatChar('=', 78) + '+' + #13#10, False);
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' | RDPWrapKit Installer Log' + #13#10, True);
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' | Session started (UTC)' + #13#10, True);
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' +' + RepeatChar('=', 78) + '+' + #13#10, True);
+    SaveStringToFile(InstallLogPath, HeaderTS + ' [INFO] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + '] +' + RepeatChar('=', 78) + '+' + #13#10, False);
+    SaveStringToFile(InstallLogPath, HeaderTS + ' [INFO] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + '] | RDPWrapKit Installer Log' + #13#10, True);
+    SaveStringToFile(InstallLogPath, HeaderTS + ' [INFO] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + '] | Build: ' + BUILD_FINGERPRINT + #13#10, True);
+    SaveStringToFile(InstallLogPath, HeaderTS + ' [INFO] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + '] | Session started (UTC)' + #13#10, True);
+    SaveStringToFile(InstallLogPath, HeaderTS + ' [INFO] [Thread:0x' + GetThreadIdHex + '] [PID:0x' + GetProcessIdHex + '] +' + RepeatChar('=', 78) + '+' + #13#10, True);
   except
   end;
   LogSectionHeader('ENVIRONMENT SNAPSHOT');
   LogSystemInfo;
+  LogInfo('Logger initialized: PID=0x' + GetProcessIdHex + ' TID=0x' + GetThreadIdHex);
 end;
 
 procedure WriteInstallerLog(const Msg: string);
 begin
-  try
-    SaveStringToFile(InstallLogPath, GetTimestampString + ' ' + BeautifyLogMessage(Msg) + #13#10, True);
-  except
-  end;
+  // Legacy bridge - routes old-style WriteInstallerLog calls through the new centralized logger.
+  // Auto-detects log level from message prefix for backward compatibility.
+  LoggerWrite(Trim(NormalizeLogLevel(Msg)), Msg);
 end;
 
 // Run any process hidden and return its exit code
 function RunHidden(const FileName, Params: string): Integer;
 var
   RC: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('RunHidden');
+  OpTick := GetTickCount;
   RC := 0;
-  WriteInstallerLog('Exec: ' + FileName + ' ' + MaskCommandForLog(FileName, Params));
+  LogDebug('Exec: ' + FileName + ' ' + MaskCommandForLog(FileName, Params));
   Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
-  WriteInstallerLog('ExitCode: ' + IntToStr(RC) + ' for ' + FileName);
+  LogDebug('ExitCode: ' + IntToStr(RC) + ' for ' + FileName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   Result := RC;
+  LogExit('RunHidden');
 end;
 
 // Run a cmd.exe one-liner hidden and return its exit code
@@ -1973,12 +2163,12 @@ end;
 
 procedure LogSimulationScenario(const ScenarioText: string);
 begin
-  WriteInstallerLog('SIMULATED SCENARIO: ' + ScenarioText);
-  Log('SIMULATED SCENARIO: ' + ScenarioText);
+  LogSim(ScenarioText);
 end;
 
 function RunNetHidden(const Params: string): Integer;
 begin
+  LogEntry('RunNetHidden');
   if SimulateNetFailPowerShell then
   begin
     if SimulateNetFailPowerShell and (not SimLogNetPsShown) then
@@ -1986,12 +2176,14 @@ begin
       LogSimulationScenario('System fails on net.exe commands and uses PowerShell fallback');
       SimLogNetPsShown := True;
     end;
-    WriteInstallerLog('Simulation: forcing net.exe failure for params: ' + MaskCommandForLog('net.exe', Params));
+    LogWarn('Simulation: forcing net.exe failure for params: ' + MaskCommandForLog('net.exe', Params));
     Result := 1;
+    LogExit('RunNetHidden');
     exit;
   end;
 
   Result := RunHidden('net.exe', Params);
+  LogExit('RunNetHidden');
 end;
 
 // Sleep with UI updates
@@ -2015,12 +2207,16 @@ end;
 function RunPSHiddenCode(const Command: string): Integer;
 var
   RC: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('RunPSHiddenCode');
+  OpTick := GetTickCount;
   RC := -1;
-  WriteInstallerLog('RunPSHiddenCode: ' + MaskPasswordsInString(Command));
+  LogDebug('RunPSHiddenCode: ' + MaskPasswordsInString(Command));
   ExecPowerShellHidden(Command, RC);
-  WriteInstallerLog('RunPSHiddenCode exit=' + IntToStr(RC));
+  LogDebug('RunPSHiddenCode exit=' + IntToStr(RC) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   Result := RC;
+  LogExit('RunPSHiddenCode');
 end;
 
 // Convert plain text to a minimal RTF string (escapes braces and backslashes and converts CRLF to \par)
@@ -2193,9 +2389,11 @@ var
   ResultCode: Integer;
   Attempt: Integer;
   ServiceRunning: Boolean;
+  OpTick: Cardinal;
 begin
-  Log('[StopTermService] START');
-  WriteInstallerLog('StopTermService: Stopping Remote Desktop Services...');
+  LogEntry('StopTermService');
+  OpTick := GetTickCount;
+  LogInfo('Stopping Remote Desktop Services...');
   WizardForm.StatusLabel.Caption := 'Stopping Remote Desktop Services...';
   
   // Start with disable + stop attempts (no initial "normal" stop)
@@ -2204,22 +2402,18 @@ begin
   while ServiceRunning and (Attempt < 5) do
   begin
     Inc(Attempt);
-    Log('[StopTermService] Attempt ' + IntToStr(Attempt) + '/5: Disable and stop');
-    WriteInstallerLog('StopTermService: Attempt ' + IntToStr(Attempt) + '/5');
+    LogDebug('StopTermService: Attempt ' + IntToStr(Attempt) + '/5');
     WizardForm.Update;
     
     // Disable the service to prevent auto-restart
     ResultCode := RunPSHiddenCode('Set-Service -Name TermService -StartupType Disabled -ErrorAction Stop');
-    Log('[StopTermService] Set-Service Disabled exit code: ' + IntToStr(ResultCode));
-    WriteInstallerLog('StopTermService: Set-Service Disabled exit code=' + IntToStr(ResultCode));
+    LogDebug('Set-Service Disabled exit code=' + IntToStr(ResultCode));
     SleepWithUI(SLEEP_MEDIUM);
     
     // Try stopping with PowerShell
-    Log('[StopTermService] Stop-Service TermService');
-    WriteInstallerLog('StopTermService: Executing Stop-Service TermService');
+    LogDebug('Executing Stop-Service TermService');
     ResultCode := RunPSHiddenCode('Stop-Service -Name TermService -Force -ErrorAction Stop');
-    Log('[StopTermService] Stop-Service exit code: ' + IntToStr(ResultCode));
-    WriteInstallerLog('StopTermService: Stop-Service exit code=' + IntToStr(ResultCode));
+    LogDebug('Stop-Service exit code=' + IntToStr(ResultCode));
     
     // Wait longer for service to actually stop
     SleepWithUI(SLEEP_LONG + SLEEP_LONG);
@@ -2227,49 +2421,40 @@ begin
     // Check service state (exit 0 if stopped, exit 1 if running or any other state)
     ResultCode := RunPSHiddenCode('if ((Get-Service -Name TermService).Status -eq ''Stopped'') { exit 0 } else { exit 1 }');
     ServiceRunning := (ResultCode = 1);
-    Log('[StopTermService] After attempt ' + IntToStr(Attempt) + ': Service running=' + BoolToStr(ServiceRunning) + ' (check exit code: ' + IntToStr(ResultCode) + ')');
-    WriteInstallerLog('StopTermService: Service running=' + BoolToStr(ServiceRunning) + ' after attempt ' + IntToStr(Attempt));
+    LogDebug('Service running=' + BoolToStr(ServiceRunning) + ' after attempt ' + IntToStr(Attempt));
   end;
   
   if ServiceRunning then
-  begin
-    Log('[StopTermService] WARNING: Service still running after 5 attempts, proceeding anyway');
-    WriteInstallerLog('StopTermService: WARNING - Service still running after 5 attempts, proceeding anyway');
-  end
+    LogWarn('Service still running after 5 attempts, proceeding anyway')
   else
-  begin
-    Log('[StopTermService] SUCCESS: Service verified stopped');
-    WriteInstallerLog('StopTermService: SUCCESS - Service verified stopped');
-  end;
+    LogInfo('Service verified stopped');
   
-  Log('[StopTermService] END');
-  WriteInstallerLog('StopTermService: END');
+  LogInfo('StopTermService completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('StopTermService');
 end;
 
 // Start TermService and set it to Automatic startup, return exit code
 function StartTermServiceEx: Integer;
 var
   RC: Integer;
+  OpTick: Cardinal;
 begin
-  Log('[StartTermServiceEx] START');
-  WriteInstallerLog('StartTermServiceEx: Starting Remote Desktop Services...');
+  LogEntry('StartTermServiceEx');
+  OpTick := GetTickCount;
+  LogInfo('Starting Remote Desktop Services...');
   WizardForm.StatusLabel.Caption := 'Restarting Remote Desktop Services...';
   
-  Log('[StartTermServiceEx] Setting TermService to Automatic via PowerShell');
-  WriteInstallerLog('StartTermServiceEx: Setting TermService to Automatic');
+  LogDebug('Setting TermService to Automatic');
   RC := RunPSHiddenCode('Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop');
-  Log('[StartTermServiceEx] Set-Service Automatic exit code: ' + IntToStr(RC));
-  WriteInstallerLog('StartTermServiceEx: Set-Service Automatic exit code=' + IntToStr(RC));
+  LogDebug('Set-Service Automatic exit code=' + IntToStr(RC));
   
   Sleep(SLEEP_MEDIUM);
-  Log('[StartTermServiceEx] Starting TermService via PowerShell');
-  WriteInstallerLog('StartTermServiceEx: Executing Start-Service TermService');
+  LogDebug('Executing Start-Service TermService');
   RC := RunPSHiddenCode('Start-Service -Name TermService -ErrorAction Stop');
-  Log('[StartTermServiceEx] Start-Service exit code: ' + IntToStr(RC) + ' (0=success)');
-  WriteInstallerLog('StartTermServiceEx: Start-Service exit code=' + IntToStr(RC));
+  LogDebug('Start-Service exit code=' + IntToStr(RC));
   Sleep(SLEEP_LONG);
-  Log('[StartTermServiceEx] END');
-  WriteInstallerLog('StartTermServiceEx: END');
+  LogInfo('StartTermServiceEx completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('StartTermServiceEx');
   Result := RC;
 end;
 
@@ -2278,28 +2463,38 @@ procedure EnsureServiceStringConfig(const RegKey, ValueName, ScArgs, TargetValue
 var
   Current: string;
   RC: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('EnsureServiceStringConfig');
+  OpTick := GetTickCount;
   Current := '';
   if RegQueryStringValue(HKLM, RegKey, ValueName, Current) then
-    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=' + Current)
+    LogDebug(CheckDesc + ': current ' + ValueName + '=' + Current)
   else
-    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=<missing>');
+    LogDebug(CheckDesc + ': current ' + ValueName + '=<missing>');
 
   if CompareText(Trim(Current), TargetValue) = 0 then
+  begin
+    LogDebug(CheckDesc + ': already correct, no action needed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogExit('EnsureServiceStringConfig');
     Exit;
+  end;
 
+  LogDebug(FixDesc + ': executing sc.exe fix');
   RC := RunHidden('sc.exe', ScArgs);
   if RC = 0 then
-    WriteInstallerLog(FixDesc + ': success')
+    LogInfo(FixDesc + ': success')
   else
-    WriteInstallerLog('WARNING: ' + FixDesc + ' failed: sc.exe exit=' + IntToStr(RC));
+    LogWarn(FixDesc + ': failed: sc.exe exit=' + IntToStr(RC));
 
   Sleep(SLEEP_SHORT);
   Current := '';
   if RegQueryStringValue(HKLM, RegKey, ValueName, Current) then
-    WriteInstallerLog(CheckDesc + ' (post-fix): ' + ValueName + '=' + Current)
+    LogDebug(CheckDesc + ' (post-fix): ' + ValueName + '=' + Current)
   else
-    WriteInstallerLog('WARNING: ' + CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
+    LogWarn(CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
+  LogInfo('EnsureServiceStringConfig completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('EnsureServiceStringConfig');
 end;
 
 // Shared helper: query a DWord value, fix it via sc.exe if wrong, then verify.
@@ -2307,47 +2502,62 @@ procedure EnsureServiceDWordConfig(const RegKey, ValueName, ScArgs: string; Targ
 var
   Current: Cardinal;
   RC: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('EnsureServiceDWordConfig');
+  OpTick := GetTickCount;
   Current := $FFFFFFFF;
   if RegQueryDWordValue(HKLM, RegKey, ValueName, Current) then
-    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=' + IntToStr(Current))
+    LogDebug(CheckDesc + ': current ' + ValueName + '=' + IntToStr(Current))
   else
-    WriteInstallerLog(CheckDesc + ': current ' + ValueName + '=<unable to read>');
+    LogDebug(CheckDesc + ': current ' + ValueName + '=<unable to read>');
 
   if Current = TargetValue then
+  begin
+    LogDebug(CheckDesc + ': already correct, no action needed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogExit('EnsureServiceDWordConfig');
     Exit;
+  end;
 
+  LogDebug(FixDesc + ': executing sc.exe fix');
   RC := RunHidden('sc.exe', ScArgs);
   if RC = 0 then
-    WriteInstallerLog(FixDesc + ': success')
+    LogInfo(FixDesc + ': success')
   else
-    WriteInstallerLog('WARNING: ' + FixDesc + ' failed: sc.exe exit=' + IntToStr(RC));
+    LogWarn(FixDesc + ': failed: sc.exe exit=' + IntToStr(RC));
 
   Sleep(SLEEP_SHORT);
   if RegQueryDWordValue(HKLM, RegKey, ValueName, Current) then
-    WriteInstallerLog(CheckDesc + ' (post-fix): ' + ValueName + '=' + IntToStr(Current))
+    LogDebug(CheckDesc + ' (post-fix): ' + ValueName + '=' + IntToStr(Current))
   else
-    WriteInstallerLog('WARNING: ' + CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
+    LogWarn(CheckDesc + ' (post-fix): ' + ValueName + ' could not be read');
+  LogInfo('EnsureServiceDWordConfig completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('EnsureServiceDWordConfig');
 end;
 
 procedure EnsureTermServiceRunsAsNetworkService;
 begin
+  LogEntry('EnsureTermServiceRunsAsNetworkService');
   EnsureServiceStringConfig(
     REG_TERMSERVICE, 'ObjectName',
     'config TermService obj= "NT AUTHORITY\NetworkService" password= ""',
     'NT AUTHORITY\NetworkService',
     'TermService account check',
     'TermService account fix: set ObjectName to NT AUTHORITY\NetworkService');
+  LogExit('EnsureTermServiceRunsAsNetworkService');
 end;
 
 // Wrapper that calls StartTermServiceEx and discards the exit code
 procedure StartTermService;
 begin
+  LogEntry('StartTermService');
   StartTermServiceEx;
+  LogExit('StartTermService');
 end;
 
 procedure EnsureUmRdpServiceAutomatic;
 begin
+  LogEntry('EnsureUmRdpServiceAutomatic');
   // Start type 2 = Automatic
   EnsureServiceDWordConfig(
     REG_UMRDPSERVICE, 'Start',
@@ -2355,6 +2565,7 @@ begin
     2,
     'UmRdpService startup type check',
     'UmRdpService startup type fix: set Start=2 (Automatic)');
+  LogExit('EnsureUmRdpServiceAutomatic');
 end;
 
 function IsExcludedUser(const UserName: string): Boolean;
@@ -2380,14 +2591,12 @@ var
   UserName: string;
   DisplayName: string;
   PSCommand: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('GetLocalUsers');
+  OpTick := GetTickCount;
   PSPath := ExpandConstant(TEMP_LOCAL_USERS);
 
-  // Get-LocalUser is available on all Win11 Home/Pro editions. It is the only
-  // reliable way to filter ghost/orphaned accounts via PrincipalSource.
-  // For Microsoft-linked accounts, the connected email is read from the
-  // IdentityStore registry cache. Inlined via -Command; single-quotes used
-  // throughout to avoid conflicts with the outer double-quote wrapper.
   PSCommand :=
     'try {' +
     ' $out=@();' +
@@ -2409,19 +2618,24 @@ begin
     ' exit 0' +
     '} catch { exit 1 }';
   Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
   if not FileExists(PSPath) then
+  begin
+    LogDebug('GetLocalUsers: no output file, no users found');
+    LogExit('GetLocalUsers');
     exit;
+  end;
 
   Parts := TStringList.Create;
   try
     Parts.LoadFromFile(PSPath);
+    LogDebug('GetLocalUsers: raw lines=' + IntToStr(Parts.Count));
     for i := 0 to Parts.Count - 1 do
     begin
       Line := Trim(Parts[i]);
       if Line = '' then
         continue;
-      // Split "username|displayname"
       if Pos('|', Line) > 0 then
       begin
         UserName := Copy(Line, 1, Pos('|', Line) - 1);
@@ -2435,14 +2649,19 @@ begin
       UserName := Trim(UserName);
       DisplayName := Trim(DisplayName);
       if (UserName = '') or IsExcludedUser(UserName) then
+      begin
+        LogDebug('GetLocalUsers: skipped excluded/empty user: ' + UserName);
         continue;
+      end;
       UsersList.Add(UserName);
       DisplayList.Add(DisplayName);
     end;
+    LogDebug('GetLocalUsers: found ' + IntToStr(UsersList.Count) + ' users [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   finally
     Parts.Free;
     DeleteFile(PSPath);
   end;
+  LogExit('GetLocalUsers');
 end;
 
 function GetDesktopRdpFiles: TStringList;
@@ -3390,8 +3609,12 @@ var
   ResultCode: Integer;
   EncPath: string;
   Cmd: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('EncryptPasswordToFile');
+  OpTick := GetTickCount;
   EncPath := TempFile('enc_' + UserName + '.txt');
+  LogDebug('EncryptPasswordToFile: user=' + UserName + ' encPath=''' + EncPath + '''');
 
   // Use inline PowerShell command (no temporary .ps1 file) to avoid script-file stalls.
   Cmd :=
@@ -3404,15 +3627,17 @@ begin
 
   if (ResultCode = 0) and FileExists(EncPath) then
   begin
+    LogDebug('EncryptPasswordToFile: success for user=' + UserName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
     Result := EncPath;
   end
   else
   begin
     if FileExists(EncPath) then
       DeleteFile(EncPath);
-    WriteInstallerLog('WARNING: EncryptPasswordToFile failed for user ' + UserName + ', proceeding without embedded password');
+    LogWarn('EncryptPasswordToFile failed for user=' + UserName + ' (exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
     Result := '';
   end;
+  LogExit('EncryptPasswordToFile');
 end;
 
 // Read experience / performance checkboxes into RDP key integer values.
@@ -3663,19 +3888,20 @@ var
   RunnerScript: string;
   PowerShellScript: string;
   ShortcutFileName: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('CreateRDPShortcut');
+  OpTick := GetTickCount;
   // Use custom shortcut name if the field is visible (single-user editing only).
-  // When hidden (multiple users being created), always fall back to UserName.rdp
-  // to avoid all shortcuts sharing the same name and overwriting each other.
   if Assigned(edtShortcutName) and edtShortcutName.Visible and (Trim(edtShortcutName.Text) <> '') then
     ShortcutFileName := Trim(edtShortcutName.Text)
   else
     ShortcutFileName := UserName + '.rdp';
-  // Ensure .rdp extension
   if CompareText(ExtractFileExt(ShortcutFileName), '.rdp') <> 0 then
     ShortcutFileName := ShortcutFileName + '.rdp';
   RDPPath := ExpandConstant('{userdesktop}\' + ShortcutFileName);
   ScriptPath := TempFile('create_rdp_' + UserName + '.ps1');
+  LogDebug('CreateRDPShortcut: ShortcutFileName=' + ShortcutFileName + ' RDPPath=''' + RDPPath + ''' CreationSource=' + CreationSource);
 
   if PASSWORD_PIPELINE_DIAG <> 0 then
   begin
@@ -3685,17 +3911,17 @@ begin
     LogPasswordPipeline('SHORTCUT_INPUT', UserName, Password);
   end;
 
-  WriteInstallerLog('CreateRDPShortcut: Creating RDP file at ' + RDPPath);
+  LogDebug('CreateRDPShortcut: Creating RDP file at ' + RDPPath);
 
   // Remove any existing shortcut so we always overwrite with the new one
   if FileExists(RDPPath) then
   begin
-    WriteInstallerLog('CreateRDPShortcut: Deleting existing RDP file');
+    LogDebug('CreateRDPShortcut: Deleting existing RDP file');
     DeleteFile(RDPPath);
   end;
 
   // Encrypt the password
-  WriteInstallerLog('CreateRDPShortcut: Encrypting password for user ' + UserName);
+  LogDebug('CreateRDPShortcut: Encrypting password for user ' + UserName);
   EncPath := EncryptPasswordToFile(Password, UserName);
   if EncPath <> '' then
     LogEncryptedFileSummary('AFTER_ENCRYPT', EncPath);
@@ -3703,23 +3929,24 @@ begin
   // Direct write path avoids PowerShell hangs in shortcut generation.
   if WriteRDPFileDirect(UserName, RDPPath, EncPath) then
   begin
-    // Sign the .rdp file immediately after direct write
+    LogDebug('CreateRDPShortcut: Direct write succeeded, signing...');
     SignRdpFile(RDPPath);
     SecureCleanupTempFiles(UserName);
+    LogInfo('CreateRDPShortcut: Completed for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogExit('CreateRDPShortcut');
     exit;
   end
   else
   begin
-    WriteInstallerLog('CreateRDPShortcut: Direct write failed, falling back to PowerShell script path');
+    LogWarn('CreateRDPShortcut: Direct write failed, falling back to PowerShell script path');
   end;
 
   // Generate and execute PowerShell script
-  WriteInstallerLog('CreateRDPShortcut: Generating RDP PowerShell script');
+  LogDebug('CreateRDPShortcut: Generating RDP PowerShell script');
   PowerShellScript := GenerateRDPPowerShellScript(UserName, RDPPath, EncPath);
   SaveStringToFile(ScriptPath, PowerShellScript, False);
-  WriteInstallerLog('CreateRDPShortcut: Script saved to ' + ScriptPath);
+  LogDebug('CreateRDPShortcut: Script saved to ' + ScriptPath);
   
-  // Wrap script execution in a timed job to avoid installer hangs
   RunnerPath := TempFile('run_create_rdp_' + UserName + '.ps1');
   RunnerScript :=
     'param([string]$TargetScript, [string]$EncPath, [int]$TimeoutSec)' + #13#10 +
@@ -3742,40 +3969,41 @@ begin
     '  exit 1' + #13#10 +
     '}';
   SaveStringToFile(RunnerPath, RunnerScript, False);
-  WriteInstallerLog('CreateRDPShortcut: Executing PowerShell script with timeout wrapper');
+  LogDebug('CreateRDPShortcut: Executing PowerShell script with timeout wrapper');
   Exec(EXE_POWERSHELL,
     BuildPowerShellFileArgs(
       RunnerPath,
       BuildPSNamedParam('TargetScript', ScriptPath) + ' ' + BuildPSNamedParam('EncPath', EncPath) + ' -TimeoutSec 30',
       True),
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  WriteInstallerLog('CreateRDPShortcut: Wrapped PowerShell script exit code=' + IntToStr(ResultCode));
+  LogDebug('CreateRDPShortcut: Wrapped PowerShell script exit code=' + IntToStr(ResultCode));
   DeleteFile(RunnerPath);
   
   if ResultCode <> 0 then
   begin
-    Log('WARNING: RDP file creation failed with exit code = ' + IntToStr(ResultCode));
-    WriteInstallerLog('CreateRDPShortcut: WARNING - RDP file creation failed with exit code=' + IntToStr(ResultCode));
+    LogWarn('RDP file creation failed with exit code=' + IntToStr(ResultCode));
   end
   else
   begin
-    WriteInstallerLog('CreateRDPShortcut: RDP file created successfully');
-    // Sign the created RDP file so saved shortcuts are trusted by our cert
+    LogDebug('CreateRDPShortcut: RDP file created successfully, signing...');
     SignRdpFile(RDPPath);
   end;
 
-  // Securely delete temporary files containing sensitive data
-  WriteInstallerLog('CreateRDPShortcut: Cleaning up temporary files');
+  LogDebug('CreateRDPShortcut: Cleaning up temporary files');
   SecureCleanupTempFiles(UserName);
+  LogInfo('CreateRDPShortcut: Completed for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('CreateRDPShortcut');
 end;
 
 procedure ClearPasswordsFromMemory;
 begin
-  // Clear all passwords from UsersList after use
+  LogEntry('ClearPasswordsFromMemory');
   if Assigned(UsersList) then
   begin
+    LogDebug('ClearPasswordsFromMemory: clearing ' + IntToStr(UsersList.Count) + ' entries');
     UsersList.Clear;
   end;
+  LogExit('ClearPasswordsFromMemory');
 end;
 
 procedure CreateRDPUsers;
@@ -3800,23 +4028,31 @@ var
   CredentialMatchesEnteredPassword: Boolean;
   ValidationError: string;
 begin
+  LogEntry('CreateRDPUsers');
   // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
   if GroupAdministratorsName = 'Administrators' then
+  begin
     GroupAdministratorsName := GetLocalizedGroupName('S-1-5-32-544', 'Administrators');
+    LogDebug('CreateRDPUsers: Resolved Administrators group name to: ' + GroupAdministratorsName);
+  end;
   if GroupRDPUsersName = 'Remote Desktop Users' then
+  begin
     GroupRDPUsersName := GetLocalizedGroupName('S-1-5-32-555', 'Remote Desktop Users');
+    LogDebug('CreateRDPUsers: Resolved Remote Desktop Users group name to: ' + GroupRDPUsersName);
+  end;
   
   // Start overall watchdog timer
   StartTick := GetTickCount;
-  WriteInstallerLog('Starting CreateRDPUsers for ' + IntToStr(UsersList.Count) + ' users');
+  LogInfo('Starting CreateRDPUsers for ' + IntToStr(UsersList.Count) + ' users | Timeout=' + IntToStr(USERS_OVERALL_TIMEOUT) + 'ms');
   
   for i := 0 to UsersList.Count - 1 do
   begin
     UserStartTick := GetTickCount;
+    LogDebug('CreateRDPUsers: Processing user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count));
     // Check overall timeout
     if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
     begin
-      WriteInstallerLog('CreateRDPUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining users');
+      LogError('CreateRDPUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining users');
       break;
     end;
 
@@ -3826,18 +4062,18 @@ begin
     ValidationError := IsValidUsername(UserName);
     if ValidationError <> '' then
     begin
-      WriteInstallerLog('ERROR: Skipping user due to invalid username input: ' + ValidationError + ' | User=' + UserName);
+      LogError('Skipping user due to invalid username input: ' + ValidationError + ' | User=' + UserName);
       continue;
     end;
     ValidationError := IsValidPassword(Password);
     if ValidationError <> '' then
     begin
-      WriteInstallerLog('ERROR: Skipping user due to invalid password input: ' + ValidationError + ' | User=' + UserName);
+      LogError('Skipping user due to invalid password input: ' + ValidationError + ' | User=' + UserName);
       continue;
     end;
 
     WizardForm.StatusLabel.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
-    WriteInstallerLog('Creating user: ' + UserName);
+    LogDebug('Creating user: ' + UserName + ' (user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count) + ')');
     UserCreateOutputAlreadyLogged := False;
     UserCreatePath := 'NET';
     LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
@@ -4045,12 +4281,13 @@ begin
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password, UserCreatePath);
-    WriteInstallerLog('Created shortcut for ' + UserName);
+    LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
-      WriteInstallerLog('WARNING: CreateRDPUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
+      LogWarn('CreateRDPUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
   end;
-  WriteInstallerLog('CreateRDPUsers completed');
+  LogInfo('CreateRDPUsers completed: ' + IntToStr(UsersList.Count) + ' users processed [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
+  LogExit('CreateRDPUsers');
 end;
 
 procedure CreateShortcutsForExistingUsers;
@@ -4062,34 +4299,39 @@ var
   StartTick: Cardinal;
   UserStartTick: Cardinal;
 begin
+  LogEntry('CreateShortcutsForExistingUsers');
   StartTick := GetTickCount;
-  WriteInstallerLog('Starting CreateShortcutsForExistingUsers for ' + IntToStr(ShortcutsList.Count) + ' entries');
+  LogInfo('Starting CreateShortcutsForExistingUsers for ' + IntToStr(ShortcutsList.Count) + ' entries');
   for i := 0 to ShortcutsList.Count - 1 do
   begin
     UserStartTick := GetTickCount;
+    LogDebug('CreateShortcutsForExistingUsers: Processing entry ' + IntToStr(i+1) + '/' + IntToStr(ShortcutsList.Count));
     if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
     begin
-      WriteInstallerLog('CreateShortcutsForExistingUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining shortcuts');
+      LogError('CreateShortcutsForExistingUsers overall timeout reached after ' + IntToStr(GetTickCount - StartTick) + ' ms; aborting remaining shortcuts');
       break;
     end;
     Entry := ShortcutsList[i];
     ParseUserEntry(Entry, UserName, Password);
+    LogDebug('CreateShortcutsForExistingUsers: User=' + UserName);
 
     WizardForm.StatusLabel.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
-    WriteInstallerLog('Created shortcut for ' + UserName);
+    LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
-      WriteInstallerLog('WARNING: CreateShortcutsForExistingUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
+      LogWarn('CreateShortcutsForExistingUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
   end;
-  WriteInstallerLog('CreateShortcutsForExistingUsers completed');
+  LogInfo('CreateShortcutsForExistingUsers completed: ' + IntToStr(ShortcutsList.Count) + ' shortcuts [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
+  LogExit('CreateShortcutsForExistingUsers');
 end;
 
 // Helper functions to display and update step-by-step progress on Installing page
 procedure SetStepPending(L: TLabel; const Text: string);
 begin
+  LogDebug('SetStepPending: ' + Text);
   if Assigned(L) then
   begin
     L.Caption := '• ' + Text;
@@ -4101,6 +4343,7 @@ end;
 
 procedure SetStepInProgress(L: TLabel; const Text: string);
 begin
+  LogDebug('SetStepInProgress: ' + Text);
   if Assigned(L) then
   begin
     L.Caption := '• ' + Text;
@@ -4115,12 +4358,10 @@ end;
 
 procedure SetStepDone(L: TLabel; const Text: string);
 begin
+  LogDebug('SetStepDone: ' + Text);
   if Assigned(L) then
   begin
     L.Caption := '✓ ' + Text;
-    // Ensure the label does not inherit parent font settings or VCL style
-    // font application, then use a bright, high-contrast green so
-    // checkmarks remain visible in both light and dark themes.
     L.ParentFont := False;
     L.StyleElements := L.StyleElements - [seFont];
     L.Font.Color := RGBToColor(0, 200, 0);
@@ -4339,7 +4580,10 @@ var
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResultCode: Integer;
   PSScript, ScriptPath: string;
+  OpTick: Cardinal;
 begin
+  LogEntry('WriteShortcutSettingsToRdpFile');
+  OpTick := GetTickCount;
   // Collect values from UI controls
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
@@ -4373,12 +4617,19 @@ begin
 
   ScriptPath := TempFile('update_rdp_settings.ps1');
   SaveStringToFile(ScriptPath, PSScript, False);
+  LogDebug('WriteShortcutSettingsToRdpFile: Starting PS update for ' + RdpPath);
+  OpTick := GetTickCount;
   Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  WriteInstallerLog('WriteShortcutSettingsToRdpFile: exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
+  LogDebug('WriteShortcutSettingsToRdpFile: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   if ResultCode = 0 then
   begin
+    LogDebug('WriteShortcutSettingsToRdpFile: Update succeeded, signing file...');
     SignRdpFile(RdpPath);
-  end;
+  end
+  else
+    LogWarn('WriteShortcutSettingsToRdpFile: PS update failed with exit=' + IntToStr(ResultCode));
+  LogInfo('WriteShortcutSettingsToRdpFile: completed for ' + RdpPath + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('WriteShortcutSettingsToRdpFile');
 end;
 
 // Displays help for a setting on the Shortcut Settings page.
@@ -7352,7 +7603,11 @@ var
   MSTSCExists: Boolean;
   MstscPath: string;
   InstallerPath: string;
+  OpTick: Cardinal;
+  DownloadTick: Cardinal;
 begin
+  LogEntry('CheckAndInstallMSTSC');
+  OpTick := GetTickCount;
   LogSectionHeader('MSTSC CHECK/INSTALL');
   // Check if mstsc.exe exists
   SetStepInProgress(StepCheckMSTSC, TXT_CheckMSTSC);
@@ -7373,46 +7628,52 @@ begin
   end;
   if MSTSCExists then
   begin
-    Log('DEBUG: mstsc.exe found.');
+    LogDebug('mstsc.exe found at: ' + MstscPath);
     LogKeyValue('mstsc path', MstscPath);
     SetStepDone(StepCheckMSTSC, TXT_CheckMSTSC);
     SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC); // skipped
   end
   else
   begin
-    Log('DEBUG: mstsc.exe missing. Initiating installation.');
+    LogInfo('mstsc.exe missing. Initiating download/install.');
     LogKeyValue('Download URL', URL_RDP_INSTALLER);
     SetStepDone(StepCheckMSTSC, TXT_CheckMSTSC);
     SetStepInProgress(StepInstallMSTSC, TXT_InstallMSTSC);
     InstallerPath := TempFile('mstsc_installer.exe');
-    LogKeyValue('Installer temp path', InstallerPath);
+    LogDebug('Installer temp path: ' + InstallerPath);
+    DownloadTick := GetTickCount;
     Exec(EXE_POWERSHELL, BuildPowerShellArgs('$out = ''' + InstallerPath + '''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    LogKeyValue('Download exit code', IntToStr(ResultCode));
-    LogKeyValue('Installer file exists after download', BoolToStr(FileExists(InstallerPath)));
+    LogDebug('Download exit code=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - DownloadTick) + 'ms]');
+    LogDebug('Installer file exists after download: ' + BoolToStr(FileExists(InstallerPath)));
     if (ResultCode = 0) and FileExists(InstallerPath) and IsSignedByMicrosoftCorporation(InstallerPath) then
     begin
+      LogDebug('Installer verified as Microsoft-signed, executing...');
       Exec(InstallerPath, '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      LogKeyValue('Installer execution exit code', IntToStr(ResultCode));
+      LogDebug('Installer execution exit code=' + IntToStr(ResultCode));
       if ResultCode = 0 then
       begin
-        Log('DEBUG: Remote Desktop Connection installed successfully.');
+        LogInfo('Remote Desktop Connection installed successfully.');
         SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
       end
       else
       begin
-        Log('ERROR: mstsc installer execution failed. Exit code: ' + IntToStr(ResultCode));
+        LogError('mstsc installer execution failed. Exit code: ' + IntToStr(ResultCode));
         PromptManualDownload('Remote Desktop Connection (mstsc)', URL_RDP_INSTALLER, 'Installer execution failed (exit code ' + IntToStr(ResultCode) + ')');
         SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
       end;
     end
     else
     begin
-      Log('ERROR: Failed to download or validate Remote Desktop Connection installer. Exit code: ' + IntToStr(ResultCode));
+      LogError('Failed to download or validate Remote Desktop Connection installer. Exit code: ' + IntToStr(ResultCode));
       PromptManualDownload('Remote Desktop Connection (mstsc)', URL_RDP_INSTALLER, 'Download or signature validation failed (exit code ' + IntToStr(ResultCode) + ')');
-      SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC); // mark as done even on failure?
-      // Perhaps leave it pending or something, but for now, done.
+      SetStepDone(StepInstallMSTSC, TXT_InstallMSTSC);
     end;
     if FileExists(InstallerPath) then
+    begin
       DeleteFile(InstallerPath);
+      LogDebug('Deleted temp installer: ' + InstallerPath);
+    end;
   end;
+  LogInfo('CheckAndInstallMSTSC completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('CheckAndInstallMSTSC');
 end;

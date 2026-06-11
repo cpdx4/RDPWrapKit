@@ -1,2 +1,6 @@
-output/RDPWrapKit-Setup*.exe
+# Build outputs
+output/
+scripts/*.exe
+
+# Local / user-specific settings
 settings.local.json
