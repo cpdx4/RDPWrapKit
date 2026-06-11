@@ -264,8 +264,6 @@ var
   chkUseAllMonitors: TCheckBox;
   chkCopyPaste: TCheckBox;
   chkSound: TCheckBox;
-  lblShortcutTips: TLabel;
-  lblShortcutEditingFile: TLabel;
   lblMultiShortcutEditingNote: TLabel;
   chkShowMoreShortcutOptions: TCheckBox;
   lblCustomWidth: TLabel;
@@ -279,6 +277,13 @@ var
   chkExpDragContents: TCheckBox;
   chkExpMenuAnim: TCheckBox;
   chkExpVisualStyles: TCheckBox;
+  // New shortcut name customization
+  lblShortcutName: TLabel;
+  edtShortcutName: TEdit;
+  lblShortcutExtension: TLabel;
+  // Keyboard hook settings
+  lblKeyboardHook: TLabel;
+  cboKeyboardHook: TComboBox;
 
 const
   // -------------------------------------------------------------------------
@@ -805,6 +810,27 @@ begin
     else
       Result := Result + '_';
   end;
+end;
+
+// Returns True if the given string is safe to use as a Windows filename (no invalid chars).
+// Invalid Windows filename characters: < > : " / \ | ? *
+function IsValidShortcutName(const Name: string): Boolean;
+var
+  i: Integer;
+  c: Char;
+begin
+  Result := False;
+  if Trim(Name) = '' then
+    exit;
+  for i := 1 to Length(Name) do
+  begin
+    c := Name[i];
+    // Reject truly invalid Windows filename characters
+    if (c = '<') or (c = '>') or (c = ':') or (c = '"') or
+       (c = '/') or (c = '\') or (c = '|') or (c = '?') or (c = '*') then
+      exit;
+  end;
+  Result := True;
 end;
 
 // Escape single quotes for use in PowerShell single-quoted literals
@@ -2895,7 +2921,7 @@ begin
   DestName := ExpandConstant('{userdesktop}\RDPWrapKit_install.log');
   Saved := CopyFile(InstallLogPath, DestName, False);
   if Saved then
-    MsgBox('Install log saved to:' + #13#10 + DestName, mbInformation, MB_OK)
+    MsgBox('File RDPWrapKit_install.log was saved to your Desktop', mbInformation, MB_OK)
   else
     MsgBox('Failed to save install log to the Desktop location.', mbError, MB_OK);
 end;
@@ -3409,7 +3435,7 @@ end;
 
 // Read shortcut display settings from UI controls into output vars.
 // Shared by WriteRDPFileDirect, GenerateRDPPowerShellScript, and WriteShortcutSettingsToRdpFile.
-procedure GetShortcutDisplaySettings(var ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer);
+procedure GetShortcutDisplaySettings(var ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook: Integer);
 var
   ResStr: string;
   XPos: Integer;
@@ -3443,6 +3469,11 @@ begin
   if Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked then UseMultiMon := 1 else UseMultiMon := 0;
   if Assigned(chkSound) and chkSound.Checked then AudioMode := 0 else AudioMode := 2;
   if Assigned(chkCopyPaste) and chkCopyPaste.Checked then RedirectClipboard := 1 else RedirectClipboard := 0;
+  // Keyboard Hook: 0=main PC, 1=RDP, 2=RDP only if full-screen
+  if Assigned(cboKeyboardHook) then
+    KeyboardHook := cboKeyboardHook.ItemIndex
+  else
+    KeyboardHook := 0;
 end;
 
 function WriteRDPFileDirect(const UserName, RDPPath, EncPath: string): Boolean;
@@ -3453,6 +3484,7 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
+  KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   SL: TStringList;
@@ -3473,7 +3505,7 @@ begin
     end;
   end;
 
-  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   SL := TStringList.Create;
@@ -3489,7 +3521,7 @@ begin
     SL.Add('dynamic resolution:i:1');
     SL.Add('autoreconnection enabled:i:1');
     SL.Add('compression:i:1');
-    SL.Add('keyboardhook:i:1');
+    SL.Add('keyboardhook:i:' + IntToStr(KeyboardHook));
     SL.Add('audiocapturemode:i:0');
     SL.Add('audiomode:i:' + IntToStr(AudioMode));
     SL.Add('redirectclipboard:i:' + IntToStr(RedirectClipboard));
@@ -3542,10 +3574,11 @@ var
   UseMultiMon: Integer;
   AudioMode: Integer;
   RedirectClipboard: Integer;
+  KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
 begin
-  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   Result :=
@@ -3573,7 +3606,7 @@ begin
     '  $rdp += "dynamic resolution:i:1"' + #13#10 +
     '  $rdp += "autoreconnection enabled:i:1"' + #13#10 +
     '  $rdp += "compression:i:1"' + #13#10 +
-    '  $rdp += "keyboardhook:i:1"' + #13#10 +
+    '  $rdp += "keyboardhook:i:' + IntToStr(KeyboardHook) + '"' + #13#10 +
     '  $rdp += "audiocapturemode:i:0"' + #13#10 +
     '  $rdp += "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
     '  $rdp += "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
@@ -3629,8 +3662,19 @@ var
   RunnerPath: string;
   RunnerScript: string;
   PowerShellScript: string;
+  ShortcutFileName: string;
 begin
-  RDPPath := ExpandConstant('{userdesktop}\' + UserName + '.rdp');
+  // Use custom shortcut name if the field is visible (single-user editing only).
+  // When hidden (multiple users being created), always fall back to UserName.rdp
+  // to avoid all shortcuts sharing the same name and overwriting each other.
+  if Assigned(edtShortcutName) and edtShortcutName.Visible and (Trim(edtShortcutName.Text) <> '') then
+    ShortcutFileName := Trim(edtShortcutName.Text)
+  else
+    ShortcutFileName := UserName + '.rdp';
+  // Ensure .rdp extension
+  if CompareText(ExtractFileExt(ShortcutFileName), '.rdp') <> 0 then
+    ShortcutFileName := ShortcutFileName + '.rdp';
+  RDPPath := ExpandConstant('{userdesktop}\' + ShortcutFileName);
   ScriptPath := TempFile('create_rdp_' + UserName + '.ps1');
 
   if PASSWORD_PIPELINE_DIAG <> 0 then
@@ -4156,7 +4200,7 @@ var
   Lines: TStringList;
   i, EqPos: Integer;
   Key, Val, Line: string;
-  ScreenMode, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  ScreenMode, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResIndex, ResultCode: Integer;
@@ -4187,6 +4231,7 @@ begin
     '  if ($l -match "^disable full window drag:i:(.+)$")  { $out += "disable_drag_contents="   + $Matches[1] };' +
     '  if ($l -match "^disable menu anims:i:(.+)$")        { $out += "disable_menu_anims="      + $Matches[1] };' +
     '  if ($l -match "^disable themes:i:(.+)$")            { $out += "disable_themes="          + $Matches[1] };' +
+    '  if ($l -match "^keyboardhook:i:(.+)$")              { $out += "keyboardhook="            + $Matches[1] };' +
     '};' +
     '[System.IO.File]::WriteAllText(''' + OutPath + ''', ($out -join "`n"))';
 
@@ -4199,7 +4244,7 @@ begin
 
   // Defaults (match BuildShortcutSettingsBlock initial state)
   ScreenMode := 1; DesktopWidth := DEFAULT_RDP_WIDTH; DesktopHeight := DEFAULT_RDP_HEIGHT;
-  UseMultiMon := 0; AudioMode := 0; RedirectClipboard := 1;
+  UseMultiMon := 0; AudioMode := 0; RedirectClipboard := 1; KeyboardHook := 0;
   DisableWallpaper := 1; AllowFontSmooth := 1; AllowComposition := 1;
   DisableFullWindowDrag := 0; DisableMenuAnims := 0; DisableThemes := 0;
 
@@ -4224,7 +4269,8 @@ begin
       else if Key = 'allow_composition'    then AllowComposition     := StrToIntDef(Val, 1)
       else if Key = 'disable_drag_contents' then DisableFullWindowDrag := StrToIntDef(Val, 0)
       else if Key = 'disable_menu_anims'   then DisableMenuAnims     := StrToIntDef(Val, 0)
-      else if Key = 'disable_themes'       then DisableThemes        := StrToIntDef(Val, 0);
+      else if Key = 'disable_themes'       then DisableThemes        := StrToIntDef(Val, 0)
+      else if Key = 'keyboardhook'          then KeyboardHook          := StrToIntDef(Val, 0);
     end;
   finally
     Lines.Free;
@@ -4274,20 +4320,28 @@ begin
   if Assigned(chkExpDragContents) then chkExpDragContents.Checked := (DisableFullWindowDrag = 0);
   if Assigned(chkExpMenuAnim)     then chkExpMenuAnim.Checked     := (DisableMenuAnims = 0);
   if Assigned(chkExpVisualStyles) then chkExpVisualStyles.Checked := (DisableThemes = 0);
+  // Keyboard Hook: 0=main PC, 1=RDP, 2=RDP only if full-screen
+  if Assigned(cboKeyboardHook) then
+  begin
+    if (KeyboardHook >= 0) and (KeyboardHook < cboKeyboardHook.Items.Count) then
+      cboKeyboardHook.ItemIndex := KeyboardHook
+    else
+      cboKeyboardHook.ItemIndex := 0;
+  end;
 end;
 
 procedure WriteShortcutSettingsToRdpFile(const RdpPath: string);
 // Reads the existing .rdp file and updates the display/audio/experience settings from the
 // current shortcut settings UI controls, then writes the file back in-place.
 var
-  ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard: Integer;
+  ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResultCode: Integer;
   PSScript, ScriptPath: string;
 begin
   // Collect values from UI controls
-  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard);
+  GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   // PowerShell: update specific keys in the .rdp file without touching the rest (e.g. password hash)
@@ -4314,6 +4368,7 @@ begin
     '$lines = Set-RdpKey $lines "disable full window drag" "disable full window drag:i:' + IntToStr(DisableFullWindowDrag) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "disable menu anims" "disable menu anims:i:' + IntToStr(DisableMenuAnims) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "disable themes" "disable themes:i:' + IntToStr(DisableThemes) + '"' + #13#10 +
+    '$lines = Set-RdpKey $lines "keyboardhook" "keyboardhook:i:' + IntToStr(KeyboardHook) + '"' + #13#10 +
     '[System.IO.File]::WriteAllLines($path, $lines)';
 
   ScriptPath := TempFile('update_rdp_settings.ps1');
@@ -4327,18 +4382,20 @@ begin
 end;
 
 // Displays help for a setting on the Shortcut Settings page.
-// Tag 1=Copy&Paste, 2=Sound, 3=Monitor settings (Window Size/Full Screen/All Monitors), 4=Performance vs Quality checkboxes
+// Tag 1=Shortcut Name, 2=Copy&Paste & Sound, 3=Monitor settings (Window Size/Full Screen/All Monitors), 4=Performance vs Quality checkboxes
 procedure ShowShortcutHelpInfo(Sender: TObject);
 var
   HelpText: string;
 begin
   case TButton(Sender).Tag of
     1: HelpText :=
-         'Allow Copy && Paste' + #13#10#13#10 +
+         'Shortcut Name' + #13#10#13#10 +
+         'This is the name of the RDP shortcut file that will be created on the Desktop. ';
+    2: HelpText :=
+         'Allow Copy & Paste' + #13#10#13#10 +
          'Enables clipboard sharing between the remote session and the local PC.' + #13#10#13#10 +
          'When checked, you can copy text, images, and files on one side and paste them on the other. ' +
-         'When unchecked, the clipboard is isolated. Nothing can be transferred between the two sides.';
-    2: HelpText :=
+         'When unchecked, the clipboard is isolated. Nothing can be transferred between the two sides.' + #13#10#13#10 +        
          'Allow Sound' + #13#10#13#10 +
          'Controls whether audio from the remote session plays on the local PC.' + #13#10#13#10 +
          'When checked, sounds (system alerts, media playback, etc.) from the remote session are ' +
@@ -4352,16 +4409,25 @@ begin
          'Use All Monitors: spans the remote session across all connected monitors. ' +
          'Each monitor''s full resolution is used. Requires Full Screen to be unchecked.';
     4: HelpText :=
-         'Performance vs Quality' + #13#10#13#10 +
-         'These settings control which visual effects are displayed in the RDP connection. ' +
-         'Disabling effects improves responsiveness and performance.' + #13#10#1310 +
+        'Performance vs Quality' + #13#10#13#10 +
+        'These settings control which visual effects are displayed in the RDP connection. ' +
+        'Disabling effects improves responsiveness and performance.' + #13#10#13#10 +
          'Desktop wallpaper: shows or hides the background image in the session.' + #13#10 +
          'Smooth text (ClearType): enables font anti-aliasing for sharper text.' + #13#10 +
          'Transparent windows & effects: enables Aero glass and window animations.' + #13#10 +
          'Show contents while dragging: renders window contents as you drag them.' + #13#10 +
          'Animated menus & transitions: enables fade/slide animations on menus.' + #13#10 +
          'Visual themes: enables Windows visual styling (disabling gives a classic look).';
-  else
+    5: HelpText :=
+        'Apply Keyboard Combos' + #13#10#13#10 +
+        'Controls how Windows key combinations (like ALT+TAB) are handled:' + #13#10#13#10 +
+        'To the main/host PC:' + #13#10 +
+        '  Windows key combinations (like ALT+TAB) are processed outside of RDPs on your main/host PC' + #13#10#13#10 +
+        'To the RDP:' + #13#10 +
+        '  Windows key combinations (like ALT+TAB) are processed by the RDP window' + #13#10#13#10 +
+        'To the RDP, only if full-screen:' + #13#10 +
+        '  Windows key combinations (like ALT+TAB) are processed by the RDP window only if it is full-screen';
+ else
     HelpText := 'No additional information available for this setting.';
   end;
   MsgBox(HelpText, mbInformation, MB_OK);
@@ -4388,40 +4454,42 @@ end;
 procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
 var
   TmpLabel: TLabel;
-  lblHint: TLabel;
 begin
 
-  // Hint label — bold green guidance text
-  lblHint := TLabel.Create(ParentSurface);
-  lblHint.Parent := ParentSurface;
-  lblHint.Left := ScaleX(10);
-  lblHint.Top := StartTop;
-  lblHint.Caption := 'If you dont know what to choose here, just click [Next]';
-  lblHint.ParentFont := False;
-  lblHint.StyleElements := lblHint.StyleElements - [seFont];
-  lblHint.Font.Style := [fsBold];
-  lblHint.Font.Color := RGBToColor(0, 200, 0);
-  lblHint.AutoSize := True;
+  // Shortcut Name field at top
+  lblShortcutName := TLabel.Create(ParentSurface);
+  lblShortcutName.Parent := ParentSurface;
+  lblShortcutName.Left := ScaleX(10);
+  lblShortcutName.Top := StartTop;
+  lblShortcutName.Caption := 'Shortcut Name:';
+  lblShortcutName.AutoSize := True;
 
-  // Keep this placeholder label for spacing only.
-  lblShortcutEditingFile := TLabel.Create(ParentSurface);
-  lblShortcutEditingFile.Parent := ParentSurface;
-  lblShortcutEditingFile.Left := ScaleX(10);
-  lblShortcutEditingFile.Top := StartTop + ScaleY(20);
-  lblShortcutEditingFile.Caption := '';
-  lblShortcutEditingFile.Visible := False;
-  lblShortcutEditingFile.AutoSize := True;
+  edtShortcutName := TEdit.Create(ParentSurface);
+  edtShortcutName.Parent := ParentSurface;
+  edtShortcutName.Left := lblShortcutName.Left + ScaleX(84);
+  edtShortcutName.Top := StartTop - ScaleY(2);
+  edtShortcutName.Width := ScaleX(120);
+  edtShortcutName.Text := 'macro1';
+
+  lblShortcutExtension := TLabel.Create(ParentSurface);
+  lblShortcutExtension.Parent := ParentSurface;
+  lblShortcutExtension.Left := edtShortcutName.Left + edtShortcutName.Width + ScaleX(4);
+  lblShortcutExtension.Top := edtShortcutName.Top + ScaleY(3);
+  lblShortcutExtension.Caption := '.rdp';
+  lblShortcutExtension.AutoSize := True;
+
+  MakeShortcutHelpButton(ParentSurface, lblShortcutName.Top, 1);
 
   // Section separator label
   lblShortcutSection := TLabel.Create(ParentSurface);
   lblShortcutSection.Parent := ParentSurface;
   lblShortcutSection.Left := ScaleX(10);
-  lblShortcutSection.Top := lblShortcutEditingFile.Top + ScaleY(22);
+  lblShortcutSection.Top := lblShortcutName.Top + ScaleY(22);
   lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: <>)';
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
-  // Row 1 — Copy & Paste
+  // Row 2 — Copy & Paste (1st column)
   chkCopyPaste := TCheckBox.Create(ParentSurface);
   chkCopyPaste.Parent := ParentSurface;
   chkCopyPaste.Left := ScaleX(10);
@@ -4429,27 +4497,46 @@ begin
   chkCopyPaste.Width := ScaleX(150);
   chkCopyPaste.Caption := 'Allow Copy && Paste';
   chkCopyPaste.Checked := True;
-  MakeShortcutHelpButton(ParentSurface, chkCopyPaste.Top, 1);
 
-  // Row 2 — Sound (own row)
+  // Row 2 — Sound (2nd column)
   chkSound := TCheckBox.Create(ParentSurface);
   chkSound.Parent := ParentSurface;
-  chkSound.Left := ScaleX(10);
-  chkSound.Top := chkCopyPaste.Top + ScaleY(24);
-  chkSound.Width := ScaleX(150);
+  chkSound.Left := ScaleX(180);
+  chkSound.Top := lblShortcutSection.Top + ScaleY(24);
+  chkSound.Width := ScaleX(180);
   chkSound.Caption := 'Allow Sound';
   chkSound.Checked := True;
   MakeShortcutHelpButton(ParentSurface, chkSound.Top, 2);
 
-  // Row 3 — Screen Size label
+  // Row 3 — Keyboard Combos dropdown (after Sound)
+  lblKeyboardHook := TLabel.Create(ParentSurface);
+  lblKeyboardHook.Parent := ParentSurface;
+  lblKeyboardHook.Left := ScaleX(10);
+  lblKeyboardHook.Top := chkSound.Top + ScaleY(24);
+  lblKeyboardHook.Caption := 'Keyboard Combos (like ALT+TAB):';
+  lblKeyboardHook.AutoSize := True;
+
+  cboKeyboardHook := TComboBox.Create(ParentSurface);
+  cboKeyboardHook.Parent := ParentSurface;
+  cboKeyboardHook.Left := ScaleX(200);
+  cboKeyboardHook.Top := chkSound.Top + ScaleY(20);
+  cboKeyboardHook.Width := ScaleX(210);
+  cboKeyboardHook.Style := csDropDownList;
+  cboKeyboardHook.Items.Add('Send to the main/host PC');
+  cboKeyboardHook.Items.Add('Send to the RDP');
+  cboKeyboardHook.Items.Add('Send to the RDP, only if full-screen');
+  cboKeyboardHook.ItemIndex := 0;
+  MakeShortcutHelpButton(ParentSurface, lblKeyboardHook.Top, 5);
+
+  // Row 4 — Screen Size label
   lblScreenSize := TLabel.Create(ParentSurface);
   lblScreenSize.Parent := ParentSurface;
   lblScreenSize.Left := ScaleX(10);
-  lblScreenSize.Top := chkSound.Top + ScaleY(26);
+  lblScreenSize.Top := cboKeyboardHook.Top + ScaleY(26);
   lblScreenSize.Caption := 'Window Size:';
   lblScreenSize.AutoSize := True;
 
-  // Row 3 — Resolution drop-down
+  // Row 4 — Resolution drop-down
   cboResolution := TComboBox.Create(ParentSurface);
   cboResolution.Parent := ParentSurface;
   cboResolution.Left := lblScreenSize.Left + ScaleX(72);
@@ -4466,7 +4553,7 @@ begin
   cboResolution.ItemIndex := 1;  // default: 1366 x 768
   cboResolution.OnChange := @OnResolutionChange;
 
-  // Row 3 — Full Screen checkbox
+  // Row 4 — Full Screen checkbox
   chkFullScreen := TCheckBox.Create(ParentSurface);
   chkFullScreen.Parent := ParentSurface;
   chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
@@ -4477,7 +4564,7 @@ begin
   chkFullScreen.OnClick := @OnFullScreenClick;
   cboResolution.Enabled := True;
 
-  // Row 3 — Use All Monitors
+  // Row 4 — Use All Monitors
   chkUseAllMonitors := TCheckBox.Create(ParentSurface);
   chkUseAllMonitors.Parent := ParentSurface;
   chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
@@ -4488,7 +4575,7 @@ begin
   chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
   MakeShortcutHelpButton(ParentSurface, lblScreenSize.Top - ScaleY(1), 3);
 
-  // Row 3b — Custom resolution W/H inputs (hidden until "Custom" is selected)
+  // Row 4b — Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
   lblCustomWidth.Parent := ParentSurface;
   lblCustomWidth.Left := cboResolution.Left;
@@ -4521,7 +4608,7 @@ begin
   edtCustomHeight.Text := '1080';
   edtCustomHeight.Visible := False;
 
-  // Row 4 — Performance section header (offset by extra row to clear Custom resolution inputs)
+  // Row 5 — Performance section header (offset by extra row to clear Custom resolution inputs)
   TmpLabel := TLabel.Create(ParentSurface);
   TmpLabel.Parent := ParentSurface;
   TmpLabel.Left := ScaleX(10);
@@ -4531,7 +4618,7 @@ begin
   TmpLabel.AutoSize := True;
   MakeShortcutHelpButton(ParentSurface, TmpLabel.Top, 4);
 
-  // Row 5 — Experience checkboxes (2 columns, 3 rows)
+  // Row 6 — Experience checkboxes (2 columns, 3 rows)
   // Col 1, Row 1
   chkExpWallpaper := TCheckBox.Create(ParentSurface);
   chkExpWallpaper.Parent := ParentSurface;
@@ -4586,20 +4673,11 @@ begin
   chkExpVisualStyles.Caption := 'Visual themes';
   chkExpVisualStyles.Checked := True;
 
-  // Row 5 — Tips for editing more settings
-  lblShortcutTips := TLabel.Create(ParentSurface);
-  lblShortcutTips.Parent := ParentSurface;
-  lblShortcutTips.Left := ScaleX(10);
-  lblShortcutTips.Top := chkExpMenuAnim.Top + ScaleY(28);
-  lblShortcutTips.Caption := 'For more settings, run this app again and choose "Edit existing shortcut settings"';
-  lblShortcutTips.Font.Style := [fsItalic];
-  lblShortcutTips.AutoSize := True;
-
-  // Row 6 — Multi-user note (shown when 2+ shortcuts will be created, hidden otherwise)
+  // Multi-user note (shown on the same row as Shortcut Name when 2+ shortcuts will be created/edited)
   lblMultiShortcutEditingNote := TLabel.Create(ParentSurface);
   lblMultiShortcutEditingNote.Parent := ParentSurface;
   lblMultiShortcutEditingNote.Left := ScaleX(10);
-  lblMultiShortcutEditingNote.Top := lblShortcutTips.Top + ScaleY(26);
+  lblMultiShortcutEditingNote.Top := StartTop;
   lblMultiShortcutEditingNote.Font.Style := [fsBold];
   lblMultiShortcutEditingNote.AutoSize := True;
   lblMultiShortcutEditingNote.Visible := False;
@@ -4608,7 +4686,7 @@ begin
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
-  chkShowMoreShortcutOptions.Top := lblShortcutTips.Top + ScaleY(21);
+  chkShowMoreShortcutOptions.Top := chkExpMenuAnim.Top + ScaleY(49);
   chkShowMoreShortcutOptions.Width := ScaleX(260);
   chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
   chkShowMoreShortcutOptions.Checked := False;
@@ -5216,9 +5294,11 @@ begin
   Page_ShortcutSettings := CreateCustomPage(
     UserPage.ID,
     'Shortcut Settings',
-    'Configure the settings for your RDP desktop shortcuts.'
+    'Configure the settings for your RDP desktop shortcuts.' + #13#10 + 
+    'If you dont know what to choose here, just click [Next]'
   );
   BuildShortcutSettingsBlock(Page_ShortcutSettings.Surface, ScaleY(10));
+
 
   // Create Edit System-wide Settings page as a custom page.
   // Using a custom page avoids InputOptionPage's built-in checklist control,
@@ -5695,6 +5775,8 @@ var
   HasErrors: Boolean;
   RdpPortValue: Integer;
   PortError: string;
+  NewShortcutBase: string;
+  NewShortcutPath: string;
 begin
   Result := True;
 
@@ -5809,6 +5891,68 @@ begin
     begin
       // Remember whether the user wants to open the advanced mstsc editor
       DoShowMstscEdit := Assigned(chkShowMoreShortcutOptions) and chkShowMoreShortcutOptions.Checked;
+
+      // Handle shortcut file rename when the user changed the shortcut name
+      if (SelectedShortcutPath <> '') and Assigned(edtShortcutName) then
+      begin
+        NewShortcutBase := Trim(edtShortcutName.Text);
+        if NewShortcutBase <> '' then
+        begin
+          // Validate shortcut name — reject invalid Windows filename characters
+          if not IsValidShortcutName(NewShortcutBase) then
+          begin
+            MsgBox(
+              'The shortcut name contains invalid characters.' + #13#10#13#10 +
+              'Windows filenames cannot contain:  < > : " / \ | ? *' + #13#10#13#10 +
+              'Please remove those characters and try again.',
+              mbError, MB_OK);
+            Result := False;
+            exit;
+          end;
+          // Ensure .rdp extension
+          if CompareText(ExtractFileExt(NewShortcutBase), '.rdp') <> 0 then
+            NewShortcutBase := NewShortcutBase + '.rdp';
+          NewShortcutPath := ExpandConstant('{userdesktop}\' + NewShortcutBase);
+          // Only rename if the new path differs from the current one
+          if CompareText(NewShortcutPath, SelectedShortcutPath) <> 0 then
+          begin
+            WriteInstallerLog('Edit Shortcut: renaming "' + SelectedShortcutPath + '" to "' + NewShortcutPath + '"');
+            // Check if target already exists (user would be overwriting an existing file)
+            if FileExists(NewShortcutPath) then
+            begin
+              if MsgBox(
+                   'A shortcut named "' + NewShortcutBase + '" already exists on the Desktop.' + #13#10#13#10 +
+                   'Do you want to replace it?',
+                   mbConfirmation, MB_YESNO) = IDNO then
+              begin
+                // User chose not to overwrite; keep them on the page to make further edits
+                WriteInstallerLog('Edit Shortcut: user declined overwrite, staying on page');
+                Result := False;
+                exit;
+              end
+              else
+              begin
+                // User confirmed overwrite; delete the existing file first
+                if not DeleteFile(NewShortcutPath) then
+                  WriteInstallerLog('WARNING: Could not delete existing file at "' + NewShortcutPath + '"');
+              end;
+            end;
+            // Perform the rename (copy then delete original)
+            if CopyFile(SelectedShortcutPath, NewShortcutPath, False) then
+            begin
+              if not DeleteFile(SelectedShortcutPath) then
+                WriteInstallerLog('WARNING: Could not delete original file "' + SelectedShortcutPath + '" after copy');
+              SelectedShortcutPath := NewShortcutPath;
+              WriteInstallerLog('Edit Shortcut: renamed to "' + SelectedShortcutPath + '"');
+            end
+            else
+            begin
+              WriteInstallerLog('ERROR: Failed to rename shortcut to "' + NewShortcutPath + '"');
+            end;
+          end;
+        end;
+      end;
+
       // Apply the simple settings from this page to the selected .rdp file now,
       // before the installing step (mstsc /edit can then further edit it)
       if SelectedShortcutPath <> '' then
@@ -6713,6 +6857,20 @@ begin
   end;
 end;
 
+// Show or hide the shortcut name editing controls (label, edit box, extension).
+// When hiding, the multi-shortcut note label is shown in their place.
+procedure ShowShortcutNameEdit(const ShowNameEdit: Boolean);
+begin
+  if Assigned(lblShortcutName) then
+    lblShortcutName.Visible := ShowNameEdit;
+  if Assigned(edtShortcutName) then
+    edtShortcutName.Visible := ShowNameEdit;
+  if Assigned(lblShortcutExtension) then
+    lblShortcutExtension.Visible := ShowNameEdit;
+  if Assigned(lblMultiShortcutEditingNote) then
+    lblMultiShortcutEditingNote.Visible := not ShowNameEdit;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 var
   i: Integer;
@@ -6720,6 +6878,8 @@ var
   Entry: string;
   UserName: string;
   Password: string;
+  ParseUser: string;
+  ParsePass: string;
   NowTick: Cardinal;
   IsDuplicatePageEvent: Boolean;
   DeltaMs: Cardinal;
@@ -6812,52 +6972,56 @@ begin
       if Assigned(lblShortcutSection) then
       begin
         if SelectedShortcutPath <> '' then
-          lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: ' + ExtractFileName(SelectedShortcutPath) + ')'
-        else
-          lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: <>)';
+          lblShortcutSection.Caption := 'Basic Shortcut Settings';
       end;
-      // EditShortcuts path: hide multi-note and tips, show "more options" checkbox
-      if Assigned(lblMultiShortcutEditingNote) then lblMultiShortcutEditingNote.Visible := False;
-      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
+      // EditShortcuts path: always a single file, always show the shortcut name editor
+      ShowShortcutNameEdit(True);
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := True;
       // Pre-populate controls with the current settings from the selected .rdp file
       if SelectedShortcutPath <> '' then
+      begin
         ReadShortcutSettingsFromRdpFile(SelectedShortcutPath);
+        // Set shortcut name from the selected file name (strip .rdp for display)
+        if Assigned(edtShortcutName) then
+          edtShortcutName.Text := ChangeFileExt(ExtractFileName(SelectedShortcutPath), '');
+      end;
     end
     else if (SelectedInstallMode = installModeInstall) and (CreateUserMode = createUserModeNew) then
     begin
       if Assigned(lblShortcutSection) then
-        lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: New shortcut(s))';
-      // CreateUsers path: show tips, show multi-note only when 2+ users queued
+        lblShortcutSection.Caption := 'Basic Shortcut Settings';
+      // CreateUsers path: hide shortcut name editor when 2+ users, show multi-note instead
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
-      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := True;
-      if Assigned(lblMultiShortcutEditingNote) then
+      ShowShortcutNameEdit(UsersList.Count <= 1);
+      if (UsersList.Count > 1) and Assigned(lblMultiShortcutEditingNote) then
+        lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
+      // Set default shortcut name from the first user in the list
+      if Assigned(edtShortcutName) and (UsersList.Count > 0) then
       begin
-        if UsersList.Count > 1 then
-        begin
-          lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
-          lblMultiShortcutEditingNote.Visible := True;
-        end
-        else
-          lblMultiShortcutEditingNote.Visible := False;
+        ParseUser := '';
+        ParsePass := '';
+        ParseUserEntry(UsersList[0], ParseUser, ParsePass);
+        if ParseUser <> '' then
+          edtShortcutName.Text := ParseUser;
       end;
     end
     else
     begin
       if Assigned(lblShortcutSection) then
-        lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: Selected shortcut(s))';
-      // ExistingUsers path: hide tips, show multi-note only when 2+ shortcuts selected
+        lblShortcutSection.Caption := 'Basic Shortcut Settings';
+      // ExistingUsers path: hide shortcut name editor when 2+ shortcuts, show multi-note instead
       if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
-      if Assigned(lblShortcutTips) then lblShortcutTips.Visible := False;
-      if Assigned(lblMultiShortcutEditingNote) then
+      ShowShortcutNameEdit(ShortcutsList.Count <= 1);
+      if (ShortcutsList.Count > 1) and Assigned(lblMultiShortcutEditingNote) then
+        lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
+      // Set default shortcut name from the first shortcut entry
+      if Assigned(edtShortcutName) and (ShortcutsList.Count > 0) then
       begin
-        if ShortcutsList.Count > 1 then
-        begin
-          lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each shortcut';
-          lblMultiShortcutEditingNote.Visible := True;
-        end
-        else
-          lblMultiShortcutEditingNote.Visible := False;
+        ParseUser := '';
+        ParsePass := '';
+        ParseUserEntry(ShortcutsList[0], ParseUser, ParsePass);
+        if ParseUser <> '' then
+          edtShortcutName.Text := ParseUser;
       end;
     end;
   end;
