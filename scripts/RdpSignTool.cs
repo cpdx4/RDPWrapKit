@@ -115,14 +115,14 @@ namespace RdpWrapKit
         private const string CERT_SUBJECT = "CN=RDPWrapKit: Only trust if connecting to 127.0.0.2";
 
         private const string SIGNSCOPE =
-            "full address,alternate full address,use redirection server name," +
-            "negotiate security layer,enablecredsspsupport,disableconnectionsharing," +
-            "autoreconnection enabled,gatewayhostname,gatewayusagemethod," +
-            "gatewayprofileusagemethod,gatewaycredentialssource,promptcredentialonce," +
-            "alternate shell,shell working directory,remoteapplicationmode," +
-            "prompt for credentials,authentication level,audiomode,redirectdrives," +
-            "redirectprinters,redirectsmartcards,redirectclipboard,drivestoredirect," +
-            "redirectwebauthn";
+            "Full Address,Alternate Full Address,Use Redirection Server Name," +
+            "Negotiate Security Layer,EnableCredSspSupport,DisableConnectionSharing," +
+            "AutoReconnection Enabled,GatewayHostname,GatewayUsageMethod," +
+            "GatewayProfileUsageMethod,GatewayCredentialsSource,PromptCredentialOnce," +
+            "Alternate Shell,Shell Working Directory,RemoteApplicationMode," +
+            "Prompt For Credentials,Authentication Level,AudioMode,RedirectDrives," +
+            "RedirectPrinters,RedirectSmartCards,RedirectClipboard,DrivesToRedirect," +
+            "RedirectWebAuthn";
 
         // ---- Field type map (lower-case key -> 's' = string, 'i' = integer) ---
 
