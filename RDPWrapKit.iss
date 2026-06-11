@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.7"
-#define APP_VERSION_FILEINFO "0.5.7.0"
+#define APP_VERSION_STRING "0.5.8"
+#define APP_VERSION_FILEINFO "0.5.8.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
@@ -1292,14 +1292,42 @@ var
   OpTick: Cardinal;
   ExePath: string;
   CmdLine: string;
+  RdpFound: Boolean;
+  ExeFound: Boolean;
 begin
   LogEntry('SignRdpFile');
   OpTick := GetTickCount;
   LogDebug('SignRdpFile: RdpPath=''' + RdpPath + '''');
+
+  // ---- Pre-flight diagnostics: validate RDP file exists and is accessible ----
+  LogDebug('SignRdpFile: Pre-flight checking RDP file...');
+  RdpFound := FileExists(RdpPath);
+  LogDebug('SignRdpFile: FileExists(''' + RdpPath + ''')=' + BoolToStr(RdpFound));
+
+  if RdpFound then
+  begin
+    LogDebug('SignRdpFile: RDP file confirmed accessible at path');
+  end
+  else
+  begin
+    LogWarn('SignRdpFile: RDP file does NOT exist at: ' + RdpPath);
+    LogExit('SignRdpFile');
+    exit;
+  end;
+
+  // ---- Pre-flight diagnostics: validate RdpSignTool.exe exists ----
+  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  ExeFound := FileExists(ExePath);
+  LogDebug('SignRdpFile: FileExists(''' + ExePath + ''')=' + BoolToStr(ExeFound));
+  if not ExeFound then
+  begin
+    LogWarn('SignRdpFile: RdpSignTool.exe NOT FOUND at ' + ExePath);
+    LogExit('SignRdpFile');
+    exit;
+  end;
+
   // Ensure the signing certificate exists and is trusted before signing
   EnsureRDPSigningCert;
-
-  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
 
   // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
   // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
@@ -2208,46 +2236,67 @@ var
   SL: TStringList;
   j: Integer;
   RC: Integer;
+  ExecOk: Boolean;
+  FullCmd: string;
 begin
   LogEntry('RunCmdCapture');
   OutPath := TempFile('capture_' + SanitizeFileName(OutTag) + '.log');
   RC := 0;
-  LogDebug('RunCmdCapture: executing cmd /c "' + CmdLine + '"');
-  Exec(EXE_CMD, '/c "' + CmdLine + '" > "' + OutPath + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, RC);
-  LogDebug('RunCmdCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
 
-  if RC <> 0 then
+  // Build the full command: cmd /c "CmdLine > "OutPath" 2>&1"
+  // CRITICAL: cmd.exe /c quoting rules — when the first character after /c
+  // is a double-quote ("), cmd.exe strips the outermost quotes and also
+  // removes the LAST double-quote from the entire command string.
+  // If the redirection is placed OUTSIDE these outer quotes, the last " is
+  // the closing quote of the output path, munging the redirect target into
+  // an invalid filename (e.g. capture.log 2>&1 becomes part of the filename).
+  //
+  // The fix: place the redirection INSIDE the outer quotes so that after
+  // cmd.exe strips them, everything (command + redirection) is intact.
+  //
+  // BEFORE (broken):  /c ""C:\exe" "C:\file"" > "out.log" 2>&1
+  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    ← BAD: 2>&1 in filename
+  //
+  // AFTER (fixed):   /c ""C:\exe" "C:\file" > "out.log" 2>&1"
+  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    ← CORRECT
+  FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1"';
+  LogDebug('RunCmdCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
+
+  ExecOk := Exec(EXE_CMD, FullCmd, '', SW_HIDE, ewWaitUntilTerminated, RC);
+  LogDebug('RunCmdCapture: ExecOk=' + BoolToStr(ExecOk) + ' exit=' + IntToStr(RC) + ' tag=' + OutTag);
+
+  if not ExecOk then
+    LogWarn('RunCmdCapture: Exec() failed to launch! OS error=' + IntToStr(RC) + ' (' + SysErrorMessage(RC) + ')');
+
+  // Always dump output file if it exists (regardless of exit code)
+  if FileExists(OutPath) then
   begin
-    // On failure, dump output to log for diagnostics
-    if FileExists(OutPath) then
-    begin
-      SL := TStringList.Create;
+    SL := TStringList.Create;
+    try
       try
-        try
-          SL.LoadFromFile(OutPath);
-          if SL.Count > 0 then
-          begin
-            LogDebug('Command output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
-            for j := 0 to SL.Count - 1 do
-              LogDebug('  ' + SL[j]);
-          end;
-        except
-          LogWarn('RunCmdCapture: failed to read output file: ' + OutPath);
-        end;
-      finally
-        SL.Free;
+        SL.LoadFromFile(OutPath);
+        if SL.Count > 0 then
+        begin
+          LogDebug('Command output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+          for j := 0 to SL.Count - 1 do
+            LogDebug('  ' + SL[j]);
+        end
+        else
+          LogDebug('RunCmdCapture: output file empty for tag=' + OutTag);
+      except
+        LogWarn('RunCmdCapture: failed to read output file: ' + OutPath);
       end;
-    end
-    else
-      LogDebug('RunCmdCapture: no output file for tag=' + OutTag);
+    finally
+      SL.Free;
+    end;
+    DeleteFile(OutPath);
   end
   else
   begin
-    LogDebug('RunCmdCapture: command succeeded (exit=0) for tag=' + OutTag);
+    LogDebug('RunCmdCapture: no output file for tag=' + OutTag);
+    LogDebug('RunCmdCapture: full command for diagnosis: ' + FullCmd);
   end;
 
-  if FileExists(OutPath) then
-    DeleteFile(OutPath);
   Result := RC;
   LogExit('RunCmdCapture');
 end;

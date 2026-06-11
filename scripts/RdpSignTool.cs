@@ -16,6 +16,73 @@
 //
 // Build:
 //   csc.exe /target:exe /reference:System.dll /reference:System.Security.dll /reference:System.Core.dll /out:RdpSignTool.exe RdpSignTool.cs
+//
+// =============================================================================
+// DEBUGGING / MAINTENANCE NOTES
+// =============================================================================
+//
+// 1. ALTERNATE FULL ADDRESS MUST BE OVERRIDDEN IN CANONICAL SIGN SCOPE
+//    (Issue: signatures appeared valid in rdp1 but not rdp2)
+//
+//    The canonical signscope bytes MUST include alternate full address set to
+//    the value of full address, even when the input RDP file does NOT contain
+//    an alternate full address field.  This is done in Step 6 (see fieldMap
+//    override just below).
+//
+//    Root cause: when the old PowerShell signer (commit 93e0dbc) was ported
+//    to C# (commit d094bd2), the fieldMap override for alternate full address
+//    was omitted.  Newly-created shortcuts (first-time signing) lack the
+//    alternate full address field, so the C# code fell back to the default
+//    value "" for type 's'.  The signature was computed with an empty value,
+//    but the output file was written with alternate full address = full address.
+//    mstsc.exe then computed canonical bytes from the output file — getting the
+//    non-empty value — and signature verification failed.
+//
+//    Verification method (PowerShell + C# P/Invoke):
+//      - System.Security.Cryptography.Pkcs.SignedCms content + cms blob
+//      - Canonical bytes computed with/without the override
+//      - rdp0002 verified OK only with NO_OVERRIDE (empty value)
+//      - After fix: both rdp1 and rdp2 verify OK with OVERRIDE
+//      - Cross-verify: rdp1 CMS fails with NO_OVERRIDE (as expected)
+//      - Error code: STATUS_INVALID_SIGNATURE (0xC000A000, -1073700864)
+//
+// 2. WRITESHORTCUTSETTINGSTORDPFILE CHANGES FILE ENCODING/LINE ENDINGS
+//    The installer's WriteShortcutSettingsToRdpFile runs a PowerShell script
+//    that uses [IO.File]::ReadAllLines() then [IO.File]::WriteAllLines().
+//    This converts the RDP file from UTF-16LE+BOM+\r\r\n to UTF-8+\r\n.
+//    RdpSignTool.exe then reads the UTF-8 file and re-writes it as
+//    UTF-16LE+BOM+\r\r\n.  Both encodings are handled, so this is safe —
+//    the field values are pure ASCII, so no data is lost.
+//
+// 3. TESTING SIGNATURES (requires admin for cert private key access)
+//    To verify a signature from PowerShell (non-admin for CPS):
+//      Add-Type -AssemblyName System.Security
+//      $ci = New-Object Security.Cryptography.Pkcs.ContentInfo($canonBytes)
+//      $sc = New-Object Security.Cryptography.Pkcs.SignedCms($ci, $true)
+//      $sc.Decode($cmsBlob)
+//      $sc.CheckSignature($true)
+//    NOTE: The cert private key is in LocalMachine\My and requires
+//    elevated process to access for signing, but verification via
+//    SignedCms.CheckSignature() works without elevation.
+//
+// 4. CMS BLOB STRUCTURE IN RDP FILES
+//    The signature in the RDP file has this wrapping:
+//      [0-7]     Header: 01 00 01 00 01 00 00 00 (8 bytes)
+//      [8-11]    Length: little-endian uint32 = CMS blob size
+//      [12-end]  CMS/PKCS#7 detached SignedData blob
+//    Base64-encoded with two-space separators every 64 chars (on one line).
+//    The CMS blob contains the embedded signing certificate.
+//    A valid signature produces an RSA-2048 PKCS#1 v1.5 encrypted digest
+//    that exactly matches the SHA-256 hash of the canonical signscope bytes.
+//
+// 5. CANONICAL SIGN SCOPE FORMAT
+//    For each field in SIGNSCOPE constant:
+//      <lowercase-key>:<type>:<value>\r\n
+//    Then appended:
+//      signscope:s:<SIGNSCOPE>\r\n
+//      \0 (null terminator)
+//    Encoded as UTF-16LE (no BOM).
+// =============================================================================
 
 using System;
 using System.Collections.Generic;
@@ -35,9 +102,9 @@ using System.Text.RegularExpressions;
 [assembly: AssemblyCompany("RDPWrapKit")]
 [assembly: AssemblyProduct("RDPWrapKit Installer")]
 [assembly: AssemblyCopyright("Copyright © 2024-2026 RDPWrapKit Contributors")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 namespace RdpWrapKit
 {
@@ -291,6 +358,20 @@ namespace RdpWrapKit
 
                 // ---- Step 6: Build canonical signscope ------------------------
                 string altFullAddress = fieldMap["full address"].Value;
+
+                // Override alternate full address in the field map so the canonical
+                // signscope always includes the correct value, even when the input
+                // file is missing this field (e.g. newly-created shortcuts that
+                // have never been signed before).  This matches the legacy PS
+                // implementation and avoids a mismatch where the output file
+                // receives alternate full address = fullAddress but the signature
+                // was computed with alternate full address = "".
+                FieldEntry altEntry;
+                altEntry.Name = "alternate full address";
+                altEntry.Type = 's';
+                altEntry.Value = altFullAddress;
+                fieldMap["alternate full address"] = altEntry;
+
                 string[] scopeFields = SIGNSCOPE.Split(',');
 
                 StringBuilder sb = new StringBuilder();
