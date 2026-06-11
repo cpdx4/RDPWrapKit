@@ -334,7 +334,7 @@ const
   TXT_RestartSvc = 'Restart Remote Desktop Services';
   TXT_EnsureVC = 'Install VC++ Redistributable (2015-2022)';
   TXT_InstallTermWrap = 'Install TermWrap';
-  TXT_ConfigureService = 'Configure TermWrap service';
+  TXT_ConfigureService = 'Install and configure TermWrap';
   TXT_CreateUsers = 'Create user accounts';
   TXT_CreateShortcuts = 'Create RDP shortcuts for selected users';
   TXT_PreTrust = 'Pre-trust RDP certificate for current user';
@@ -2448,11 +2448,11 @@ begin
   RC := RunPSHiddenCode('Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop');
   LogDebug('Set-Service Automatic exit code=' + IntToStr(RC));
   
-  Sleep(SLEEP_MEDIUM);
+  SleepWithUI(SLEEP_MEDIUM);
   LogDebug('Executing Start-Service TermService');
   RC := RunPSHiddenCode('Start-Service -Name TermService -ErrorAction Stop');
   LogDebug('Start-Service exit code=' + IntToStr(RC));
-  Sleep(SLEEP_LONG);
+  SleepWithUI(SLEEP_LONG);
   LogInfo('StartTermServiceEx completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('StartTermServiceEx');
   Result := RC;
@@ -6204,10 +6204,8 @@ begin
         end;
       end;
 
-      // Apply the simple settings from this page to the selected .rdp file now,
-      // before the installing step (mstsc /edit can then further edit it)
-      if SelectedShortcutPath <> '' then
-        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+      // Settings will be applied during the installing step (after progress bar is visible)
+      // WriteShortcutSettingsToRdpFile moved to ssPostInstall to avoid blocking UI before progress bar shows
     end;
   end
   else if CurPageID = EditSystemwideSettingsPage.ID then
@@ -6548,7 +6546,6 @@ begin
         AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
         AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
         AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
-        AddStepPendingLabel(StepInstallTermWrap, TXT_InstallTermWrap);
         AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
       end;
       if DoCreateRdpShortcuts and (CreateUserMode = createUserModeNew) and (UsersList.Count > 0) then
@@ -6567,7 +6564,7 @@ begin
     else // SelectedInstallMode = installModeEditShortcuts (Edit Shortcut Settings)
     begin
       StepsHeaderLabel.Caption := 'Shortcut Settings:';
-      AddStepPendingLabel(StepCreateShortcuts, 'Open selected .rdp in editor');
+      AddStepPendingLabel(StepCreateShortcuts, 'Apply settings and open in editor');
     end;
 
     if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
@@ -6621,9 +6618,8 @@ begin
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      WizardForm.StatusLabel.Caption := 'Preparing shortcut editor completion...';
+      WizardForm.StatusLabel.Caption := 'Applying shortcut settings...';
       WizardForm.ProgressGauge.Style := npbstMarquee;
-      SetStepDone(StepCreateShortcuts, 'Open selected .rdp in editor');
     end
     // Only stop TermService when installing TermWrap
     else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
@@ -6807,8 +6803,14 @@ begin
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      // Apply settings to the .rdp file and optionally open mstsc /edit
-      SetStepInProgress(StepCreateShortcuts, 'Open selected .rdp in editor');
+      SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
+      WizardForm.StatusLabel.Caption := 'Applying shortcut settings...';
+      
+      // Write settings + sign the .rdp file (moved from NextButtonClick to here
+      // so the progress bar is visible during the potentially slow signing step)
+      if SelectedShortcutPath <> '' then
+        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+      
       if DoShowMstscEdit then
       begin
         WizardForm.StatusLabel.Caption := 'Opening selected .rdp in editor...';
@@ -6832,7 +6834,7 @@ begin
         WizardForm.StatusLabel.Caption := 'Shortcut settings applied.';
         WriteInstallerLog('Edit Shortcut: mstsc editor skipped by user choice');
       end;
-      SetStepDone(StepCreateShortcuts, 'Open selected .rdp in editor');
+      SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
     end
     // Install TermWrap: Download VC++, apply registry, start service
     else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
@@ -6895,15 +6897,11 @@ begin
       // VC++ ensured (installed or skipped)
       SetStepDone(StepEnsureVC, TXT_EnsureVC);
       
-      // Install TermWrap
-      SetStepInProgress(StepInstallTermWrap, TXT_InstallTermWrap);
-      WizardForm.StatusLabel.Caption := 'Installing TermWrap...';
+      // Install and configure TermWrap
+      SetStepInProgress(StepConfigureService, TXT_ConfigureService);
+      WizardForm.StatusLabel.Caption := 'Installing and configuring TermWrap...';
       // TermWrap files are bundled and copied earlier; no external installer to run.
       Sleep(SLEEP_SHORT);
-      SetStepDone(StepInstallTermWrap, TXT_InstallTermWrap);
-      
-      SetStepInProgress(StepConfigureService, TXT_ConfigureService);
-      WizardForm.StatusLabel.Caption := 'Configuring TermWrap service...';
       
       // Set ServiceDll to TermWrap
       LogSectionHeader('REGISTRY: TermWrap service configuration');
@@ -7002,14 +7000,14 @@ begin
       ResultCode := StartTermServiceEx;
       if ResultCode = 0 then
       begin
-        Sleep(SLEEP_EXTRALONG); // Wait for service to fully initialize and create certificate
+        SleepWithUI(SLEEP_EXTRALONG); // Wait for service to fully initialize and create certificate
         SetStepDone(StepStartSvc, TXT_StartSvc);
       end
       else
       begin
         Log('WARNING: TermService failed to start with exit code ' + IntToStr(ResultCode));
         SetStepDone(StepStartSvc, TXT_StartSvc); // Mark as done even if failed (might already be running)
-        Sleep(SLEEP_LONG); // Give extra time if service had issues
+        SleepWithUI(SLEEP_LONG); // Give extra time if service had issues
       end;
     end;
     
@@ -7023,9 +7021,13 @@ begin
       SetStepDone(StepPreTrust, TXT_PreTrust);
     end;
 
-    // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
-    if SelectedInstallMode = installModeInstall then
+    // Verify RDP is listening (only when TermWrap was installed)
+    if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
+      SetStepInProgress(StepCheckRDP, TXT_CheckRDP);
+      WizardForm.StatusLabel.Caption := 'Verifying RDP service...';
+
+      // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
       LogSectionHeader('RAZER CORTEX CHECK');
       ExecPowerShellHidden(
         '$ErrorActionPreference = ''SilentlyContinue''; ' +
@@ -7046,13 +7048,6 @@ begin
           'Razer Cortex detected on your device',
           MB_OK + $40);
       end;
-    end;
-
-    // Verify RDP is listening (only when TermWrap was installed)
-    if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
-    begin
-      SetStepInProgress(StepCheckRDP, TXT_CheckRDP);
-      WizardForm.StatusLabel.Caption := 'Verifying RDP service...';
       
       // Read the configured listening port from registry
       if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
