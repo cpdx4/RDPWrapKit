@@ -470,6 +470,9 @@ function GetSystemTime(var lpSystemTime: SYSTEMTIME): Boolean;
 function GetSysColor(nIndex: DWORD): DWORD;
   external 'GetSysColor@user32.dll stdcall';
 
+function MessageBox(hWnd: Integer; lpText, lpCaption: String; uType: Cardinal): Integer;
+  external 'MessageBoxW@user32.dll stdcall';
+
 // Compares two dotted version strings (e.g. "0.4.9" vs "0.4.10").
 // Returns 1 if A > B, -1 if A < B, 0 if equal.
 function CompareVersions(A, B: String): Integer;
@@ -6623,6 +6626,31 @@ begin
       PreTrustRDPCertCurrentUser;
       // Pre-trust is optional - don't fail install if cert doesn't exist yet
       SetStepDone(StepPreTrust, TXT_PreTrust);
+    end;
+
+    // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
+    if SelectedInstallMode = installModeInstall then
+    begin
+      LogSectionHeader('RAZER CORTEX CHECK');
+      ExecPowerShellHidden(
+        '$ErrorActionPreference = ''SilentlyContinue''; ' +
+        '$proc = Get-Process | Where-Object { $_.ProcessName -like ''*Cortex*'' }; ' +
+        'if ($proc) { exit 0 } else { exit 1 }',
+        ResultCode);
+      Log('Razer Cortex detection exit code = ' + IntToStr(ResultCode) + ' (0=found, 1=not found)');
+      if ResultCode = 0 then
+      begin
+        MessageBox(0,
+          'Razer Cortex "Boost" feature is known to cause RDP disconnects.' + #13#10#13#10 +
+          'Here are 3 ways to resolve this:' + #13#10 +
+          '  1. Uninstall Razer Cortex if it is not needed' + #13#10 +
+          '      OR' + #13#10#13#10 +
+          '  2. Open Razer Cortex: In ''Booster'', disable ''Auto-boost''' + #13#10 +
+          '      OR' + #13#10#13#10 +
+          '  3. Open Razer Cortex: In ''Booster'' > ''Services'', ensure ''TermService'' and ''UmRdpService'' are unchecked',
+          'Razer Cortex detected on your device',
+          MB_OK + $40);
+      end;
     end;
 
     // Verify RDP is listening (only when TermWrap was installed)
