@@ -7128,7 +7128,7 @@ begin
       begin
         // Encourage using shortcuts if any were created
         if (CreatedUsersList.Count + ShortcutsList.Count) > 0 then
-          CompletionText := CompletionText + 'You can now open RDP connections using the created shortcuts.';
+          CompletionText := CompletionText + 'You can now open RDP connections using the shortcuts created on your Desktop.';
       end;
     end;
 
