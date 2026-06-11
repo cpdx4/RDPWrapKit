@@ -32,6 +32,10 @@
 #define APP_VERSION_STRING "0.5.7"
 #define APP_VERSION_FILEINFO "0.5.7.0"
 
+; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
+#define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
+#define SourceTermWrapSize FileSize("third_party\termwrap_release\TermWrap.dll")
+
 [Setup]
 AppName=RDPWrapKit
 AppVersion={#APP_VERSION_STRING}
@@ -95,6 +99,8 @@ procedure OnFullScreenClick(Sender: TObject); forward;
 procedure OnUseAllMonitorsClick(Sender: TObject); forward;
 procedure OnResolutionChange(Sender: TObject); forward;
 function IsTermWrapInstalled(): Boolean; forward;
+function GetInstalledTermWrapVersion(): string; forward;
+function GetInstalledTermWrapSize(): string; forward;
 function BoolToStr(Value: Boolean): string; forward;
 procedure EnsureTermServiceRunsAsNetworkService; forward;
 procedure EnsureUmRdpServiceAutomatic; forward;
@@ -2845,6 +2851,38 @@ begin
 end;
 
 
+// Returns the version string of the installed TermWrap.dll (e.g. "0.0.6.0").
+// Uses PowerShell to read the FileVersionRaw from the file at the registry-configured path.
+// Returns empty string if TermWrap is not installed or the file cannot be read.
+function GetInstalledTermWrapVersion(): string;
+var
+  ServiceDllPath: string;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
+  begin
+    if (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0) and FileExists(ServiceDllPath) then
+      Result := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString()');
+  end;
+end;
+
+
+// Returns the file size (in bytes) of the installed TermWrap.dll as a string.
+// Uses PowerShell to read the Length property from the file at the registry-configured path.
+// Returns empty string if TermWrap is not installed or the file cannot be read.
+function GetInstalledTermWrapSize(): string;
+var
+  ServiceDllPath: string;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
+  begin
+    if (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0) and FileExists(ServiceDllPath) then
+      Result := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.Length.ToString()');
+  end;
+end;
+
+
 procedure OnViewLogButtonClick(Sender: TObject);
 var
   DestName: string;
@@ -4848,25 +4886,38 @@ begin
   chkInstallTermWrap.Width := ScaleX(420);
   TermWrapAlreadyInstalled := IsTermWrapInstalled();
   InstallHintOffset := 0;
-  chkInstallTermWrap.Caption := 'Install TermWrap';
   if TermWrapAlreadyInstalled then
   begin
-    chkInstallTermWrap.Checked := False;
+    // TermWrap is installed — check whether versions/sizes match (upgrade) or are identical (re-install)
+    if (GetInstalledTermWrapVersion() = '{#SourceTermWrapVersion}') and (GetInstalledTermWrapSize() = '{#SourceTermWrapSize}') then
+    begin
+      // Case 2: Same version and size — show "Re-install TermWrap", unchecked, with hint sub-label
+      chkInstallTermWrap.Caption := 'Re-install TermWrap';
+      chkInstallTermWrap.Checked := False;
 
-    chkInstallTermWrapHint := TLabel.Create(Page_InstallOptions);
-    chkInstallTermWrapHint.Parent := Page_InstallOptions.Surface;
-    chkInstallTermWrapHint.Left := ScaleX(46);
-    chkInstallTermWrapHint.Top := chkInstallTermWrap.Top + ScaleY(20);
-    chkInstallTermWrapHint.Width := ScaleX(390);
-    chkInstallTermWrapHint.AutoSize := False;
-    chkInstallTermWrapHint.WordWrap := True;
-    chkInstallTermWrapHint.Caption := '(Already installed. Selecting this will re-install it)';
-    chkInstallTermWrapHint.Font.Style := [fsItalic];
+      chkInstallTermWrapHint := TLabel.Create(Page_InstallOptions);
+      chkInstallTermWrapHint.Parent := Page_InstallOptions.Surface;
+      chkInstallTermWrapHint.Left := ScaleX(46);
+      chkInstallTermWrapHint.Top := chkInstallTermWrap.Top + ScaleY(20);
+      chkInstallTermWrapHint.Width := ScaleX(390);
+      chkInstallTermWrapHint.AutoSize := False;
+      chkInstallTermWrapHint.WordWrap := True;
+      chkInstallTermWrapHint.Caption := '(Already installed. Selecting this will re-install it)';
+      chkInstallTermWrapHint.Font.Style := [fsItalic];
 
-    InstallHintOffset := ScaleY(16);
+      InstallHintOffset := ScaleY(16);
+    end
+    else
+    begin
+      // Case 3: Different version or size — show "Upgrade TermWrap", checked, no sub-label
+      chkInstallTermWrap.Caption := 'Upgrade TermWrap';
+      chkInstallTermWrap.Checked := True;
+    end;
   end
   else
   begin
+    // Case 1: Not installed — show "Install TermWrap", checked, no sub-label
+    chkInstallTermWrap.Caption := 'Install TermWrap';
     chkInstallTermWrap.Checked := True;
   end;
 
