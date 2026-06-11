@@ -7131,10 +7131,6 @@ begin
           CompletionText := CompletionText + 'You can now open RDP connections using the created shortcuts.';
       end;
     end;
-    
-    // Add note about Windows security warning when connecting to remote PCs
-    CompletionText := CompletionText + #13#10#13#10 +
-      'Windows may show a security warning when you connect to remote PCs. This is normal. RDPWrapKit is local so the connection never leaves your network.';
 
     // If Smart App Control is enabled, add guidance and show a popup
     if SmartAppControlIsOn then
