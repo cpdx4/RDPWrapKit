@@ -6650,7 +6650,7 @@ var
   ServiceStatus: string;
   TermsrvVer: string;
   ServiceDllPath: string;
-  TermWrapVer: string;
+  WrapperVersion: string;
   PortNumber: Cardinal;
   ListenerStatus: string;
 begin
@@ -6831,25 +6831,59 @@ begin
     if TermsrvVer = '' then lblWinRDPVer.Caption := 'Unknown'
     else lblWinRDPVer.Caption := TermsrvVer;
 
-    ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
-    if FileExists(ServiceDllPath) then
+    // Read the actual ServiceDll path from registry to determine what DLL is configured
+    if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
     begin
-      TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
-      if TermWrapVer = '' then lblWrapperVer.Caption := 'TermWrap (unknown version)'
-      else lblWrapperVer.Caption := 'TermWrap ' + TermWrapVer;
+      // Check if registry path points to TermWrap.dll
+      if (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0) then
+      begin
+        // Try registry path first; if it fails (e.g. env vars not expanded), fall back to known install path
+        if not FileExists(ServiceDllPath) then
+          ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
+        if FileExists(ServiceDllPath) then
+        begin
+          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          if WrapperVersion = '' then lblWrapperVer.Caption := 'TermWrap (unknown version)'
+          else lblWrapperVer.Caption := 'TermWrap ' + WrapperVersion;
+        end
+        else
+          lblWrapperVer.Caption := 'TermWrap (file not found)';
+      end
+      // Check if registry path points to rdpwrap.dll (legacy)
+      else if (Pos('rdpwrap.dll', Lowercase(ServiceDllPath)) > 0) then
+      begin
+        // Try registry path first; if it fails, fall back to known legacy install path
+        if not FileExists(ServiceDllPath) then
+          ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
+        if FileExists(ServiceDllPath) then
+        begin
+          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          if WrapperVersion = '' then lblWrapperVer.Caption := 'RDPWrap (unknown version)'
+          else lblWrapperVer.Caption := 'RDPWrap ' + WrapperVersion;
+        end
+        else
+          lblWrapperVer.Caption := 'RDPWrap (file not found)';
+      end
+      // Check if registry path points to termsrv.dll (Windows default)
+      else if (Pos('termsrv.dll', Lowercase(ServiceDllPath)) > 0) then
+      begin
+        lblWrapperVer.Caption := 'None (Windows default)';
+      end
+      // Unknown/custom DLL - show its filename, version, and size
+      else
+      begin
+        if FileExists(ServiceDllPath) then
+        begin
+          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          if WrapperVersion = '' then lblWrapperVer.Caption := ExtractFileName(ServiceDllPath) + ' (unknown version)'
+          else lblWrapperVer.Caption := ExtractFileName(ServiceDllPath) + ' ' + WrapperVersion;
+        end
+        else
+          lblWrapperVer.Caption := ExtractFileName(ServiceDllPath) + ' (file not found)';
+      end;
     end
     else
-    begin
-      ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
-      if FileExists(ServiceDllPath) then
-      begin
-        TermWrapVer := GetPSOutput('(Get-Item -Path ''' + ServiceDllPath + ''').VersionInfo.FileVersion');
-        if TermWrapVer = '' then lblWrapperVer.Caption := 'RDPWrap (unknown version)'
-        else lblWrapperVer.Caption := 'RDPWrap ' + TermWrapVer;
-      end
-      else
-        lblWrapperVer.Caption := 'None (Windows default)';
-    end;
+      lblWrapperVer.Caption := 'None (Windows default)';
 
     // Check if RDP is currently listening on the configured port
     if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
