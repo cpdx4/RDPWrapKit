@@ -184,6 +184,8 @@ var
   lblWinRDPVerName: TLabel;
   lblWrapperVer: TLabel;
   lblWrapperVerName: TLabel;
+  lblListenerName: TLabel;
+  lblListener: TLabel;
 
   lblGenHeader: TLabel;
   chkEnableRDP: TCheckBox;
@@ -5461,6 +5463,24 @@ begin
     lblWrapperVer.ParentFont := False;
     lblWrapperVer.Font.Color := LabelColor;
     lblWrapperVer.Transparent := True;
+    topPos := topPos + ScaleY(18);
+
+    lblListenerName := TLabel.Create(Page_ShowRDPInfo);
+    lblListenerName.Parent := Page_ShowRDPInfo.Surface;
+    lblListenerName.Left := childLeft;
+    lblListenerName.Top := topPos;
+    lblListenerName.Caption := 'Listening Status:';
+    lblListenerName.ParentFont := False;
+    lblListenerName.Font.Color := LabelColor;
+    lblListenerName.Transparent := True;
+    lblListener := TLabel.Create(Page_ShowRDPInfo);
+    lblListener.Parent := Page_ShowRDPInfo.Surface;
+    lblListener.Left := valueLeft;
+    lblListener.Top := topPos;
+    lblListener.Caption := '...';
+    lblListener.ParentFont := False;
+    lblListener.Font.Color := LabelColor;
+    lblListener.Transparent := True;
     topPos := topPos + ScaleY(26);
 
   end;
@@ -6022,6 +6042,7 @@ var
   UserInfo: string;
   UserName: string;
   Password: string;
+  PortNumber: Cardinal;
 begin
   if CurStep = ssInstall then
   begin
@@ -6559,8 +6580,14 @@ begin
       SetStepInProgress(StepCheckRDP, TXT_CheckRDP);
       WizardForm.StatusLabel.Caption := 'Verifying RDP service...';
       
+      // Read the configured listening port from registry
+      if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
+        // PortNumber already set from registry
+      else
+        PortNumber := RDP_LISTEN_PORT;
+      
       ResultCode := 0;
-      Exec(EXE_POWERSHELL, BuildPowerShellArgs('try { if ((Get-NetTCPConnection -LocalPort ' + IntToStr(RDP_LISTEN_PORT) + ' -State Listen -ErrorAction SilentlyContinue).LocalPort -eq ' + IntToStr(RDP_LISTEN_PORT) + ') { exit 0 } else { exit 1 } } catch { exit 1 }', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(EXE_POWERSHELL, BuildPowerShellArgs('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) + ' -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { exit 0 } else { exit 1 }', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       
       if ResultCode = 0 then
       begin
@@ -6569,7 +6596,7 @@ begin
       else
       begin
         SetStepDone(StepCheckRDP, TXT_CheckRDP);
-        if MsgBox('RDP service is not detected as listening on port 3389.' + #13#10#13#10 +
+        if MsgBox('RDP service is not detected as listening on port ' + IntToStr(PortNumber) + '.' + #13#10#13#10 +
                   'A system restart usually resolves this issue.' + #13#10#13#10 +
                   'Would you like to restart your computer now?', mbConfirmation, MB_YESNO) = IDYES then
         begin
@@ -6625,6 +6652,7 @@ var
   ServiceDllPath: string;
   TermWrapVer: string;
   PortNumber: Cardinal;
+  ListenerStatus: string;
 begin
   NowTick := GetTickCount;
   IsDuplicatePageEvent := (CurPageID = LastLoggedPageId) and ((NowTick - LastLoggedPageTick) <= PAGE_LOG_DEDUPE_MS);
@@ -6772,6 +6800,7 @@ begin
     if Assigned(lblRDPService) then lblRDPService.Caption := '--';
     if Assigned(lblWinRDPVer) then lblWinRDPVer.Caption := '--';
     if Assigned(lblWrapperVer) then lblWrapperVer.Caption := '--';
+    if Assigned(lblListener) then lblListener.Caption := '--';
 
     // System Status — refresh live values each time the page is shown
     DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
@@ -6813,6 +6842,18 @@ begin
       else
         lblWrapperVer.Caption := 'None (Windows default)';
     end;
+
+    // Check if RDP is currently listening on the configured port
+    if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
+      // PortNumber already set from registry
+    else
+      PortNumber := RDP_LISTEN_PORT;
+
+    ListenerStatus := GetPSOutput('$( $p = ' + IntToStr(PortNumber) + '; if (@(Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { ''Listening on port '' + $p } else { ''Not Listening on port '' + $p } )');
+    if ListenerStatus = '' then
+      lblListener.Caption := 'Not Listening on port ' + IntToStr(PortNumber)
+    else
+      lblListener.Caption := ListenerStatus;
 
   end;
 
