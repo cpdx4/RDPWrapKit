@@ -1,4 +1,4 @@
-; =========================================================================
+﻿; =========================================================================
 ; RDPWrapKit - Local RDP Management Suite
 ; =========================================================================
 ; 
@@ -58,8 +58,10 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 RestartApplications=yes
 CloseApplicationsFilter=*.exe,*.chm
-WizardStyle=modern dynamic
+WizardStyle=modern dark
 SetupIconFile="assets\RDPWrapKitIcon.ico"
+WizardBackImageFile="assets\RDPWrapInstallerBG.bmp"
+WizardBackColor=#0b1018
 
 [Files]
 ; Icon file always extracted to temp for welcome page display.
@@ -68,6 +70,7 @@ Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion
 Source: "output\RdpSignTool.exe"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
+Source: "assets\RDPWrapInstallerBG.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 
 
 
@@ -312,6 +315,13 @@ var
   // Keyboard hook settings
   lblKeyboardHook: TLabel;
   cboKeyboardHook: TComboBox;
+  
+  // Transparent overlay for status text (replaces WizardForm.StatusLabel which can't be made transparent)
+  StatusOverlay: TLabel;
+  
+  // Determinate progress bar tracking
+  StepsTotal: Integer;
+  StepsDone: Integer;
   
   // Logger state globals for performance profiling and metadata
   LoggerProcId: DWORD;
@@ -1331,7 +1341,7 @@ begin
 
   // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
   // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
-  // via P/Invoke to crypt32.dll — no PowerShell involved, no C# JIT compilation,
+  // via P/Invoke to crypt32.dll â€” no PowerShell involved, no C# JIT compilation,
   // no -EncodedCommand overhead.  The EXE is ~20KB and completes in ~100-300ms.
   //
   // Exit codes:
@@ -1380,11 +1390,11 @@ begin
   // Single consolidated PowerShell script that performs all four steps:
   //   1. Find or create the cert in LocalMachine\My
   //   2. Import into Trusted Root (if not already there)
-  //   3. [implicit] verify — step 2 already checks existence
+  //   3. [implicit] verify â€” step 2 already checks existence
   //   4. Register thumbprint in TrustedCertThumbprints policy
   // Outputs thumbprint on success; any error triggers catch/throw.
   LogDebug('EnsureRDPSigningCert: Running consolidated PS cert setup');
-  // NOTE: PSCommand is a one-liner separated by ; — NO inline # comments
+  // NOTE: PSCommand is a one-liner separated by ; â€” NO inline # comments
   // because the PS script has no #13#10 line breaks and # would comment out
   // the rest of the line (all statements after it).
   PSCommand :=
@@ -2244,7 +2254,7 @@ begin
   RC := 0;
 
   // Build the full command: cmd /c "CmdLine > "OutPath" 2>&1"
-  // CRITICAL: cmd.exe /c quoting rules — when the first character after /c
+  // CRITICAL: cmd.exe /c quoting rules â€” when the first character after /c
   // is a double-quote ("), cmd.exe strips the outermost quotes and also
   // removes the LAST double-quote from the entire command string.
   // If the redirection is placed OUTSIDE these outer quotes, the last " is
@@ -2255,10 +2265,10 @@ begin
   // cmd.exe strips them, everything (command + redirection) is intact.
   //
   // BEFORE (broken):  /c ""C:\exe" "C:\file"" > "out.log" 2>&1
-  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    ← BAD: 2>&1 in filename
+  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    â† BAD: 2>&1 in filename
   //
   // AFTER (fixed):   /c ""C:\exe" "C:\file" > "out.log" 2>&1"
-  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    ← CORRECT
+  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    â† CORRECT
   FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1"';
   LogDebug('RunCmdCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
 
@@ -2574,7 +2584,7 @@ begin
   LogEntry('StopTermService');
   OpTick := GetTickCount;
   LogInfo('Stopping Remote Desktop Services...');
-  WizardForm.StatusLabel.Caption := 'Stopping Remote Desktop Services...';
+  StatusOverlay.Caption := 'Stopping Remote Desktop Services...';
   
   // Start with disable + stop attempts (no initial "normal" stop)
   ServiceRunning := True;
@@ -2622,7 +2632,7 @@ begin
   LogEntry('StartTermServiceEx');
   OpTick := GetTickCount;
   LogInfo('Starting Remote Desktop Services...');
-  WizardForm.StatusLabel.Caption := 'Restarting Remote Desktop Services...';
+  StatusOverlay.Caption := 'Restarting Remote Desktop Services...';
   
   LogDebug('Setting TermService to Automatic');
   RC := RunPSHiddenCode('Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop');
@@ -3589,7 +3599,7 @@ begin
     end
     else
     begin
-      // User was unchecked — clear any stale validation message
+      // User was unchecked â€” clear any stale validation message
       if Assigned(UserPasswordStatus[i]) then
       begin
         UserPasswordStatus[i].Caption := '';
@@ -3821,12 +3831,12 @@ begin
 end;
 
 // Read experience / performance checkboxes into RDP key integer values.
-// disable wallpaper: 0=show, 1=disable  — checkbox means "allow" so invert for disable key
-// allow font smoothing: 1=allow  — checkbox value maps directly
+// disable wallpaper: 0=show, 1=disable  â€” checkbox means "allow" so invert for disable key
+// allow font smoothing: 1=allow  â€” checkbox value maps directly
 // allow desktop composition: 1=allow
-// disable full window drag: 0=show contents, 1=hide  — inverted
-// disable menu anims: 0=show, 1=hide  — inverted
-// disable themes: 0=use themes, 1=disable  — inverted
+// disable full window drag: 0=show contents, 1=hide  â€” inverted
+// disable menu anims: 0=show, 1=hide  â€” inverted
+// disable themes: 0=use themes, 1=disable  â€” inverted
 procedure GetExperienceSettings(var DisableWallpaper, AllowFontSmooth, AllowComposition,
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer);
 begin
@@ -4273,7 +4283,7 @@ begin
       continue;
     end;
 
-    WizardForm.StatusLabel.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
+    StatusOverlay.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
     LogDebug('Creating user: ' + UserName + ' (user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count) + ')');
     UserCreateOutputAlreadyLogged := False;
     UserCreatePath := 'NET';
@@ -4527,7 +4537,7 @@ begin
     ParseUserEntry(Entry, UserName, Password);
     LogDebug('CreateShortcutsForExistingUsers: User=' + UserName + ' hasPassword=' + BoolToStr(Password <> ''));
 
-    WizardForm.StatusLabel.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
+    StatusOverlay.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
 
     // Create RDP shortcut using helper function
     CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
@@ -4546,7 +4556,7 @@ begin
   LogDebug('SetStepPending: ' + Text);
   if Assigned(L) then
   begin
-    L.Caption := '• ' + Text;
+    L.Caption := '>> ' + Text;
     L.Font.Color := clGray;
     L.Font.Style := [];
     L.Visible := True;
@@ -4558,7 +4568,7 @@ begin
   LogDebug('SetStepInProgress: ' + Text);
   if Assigned(L) then
   begin
-    L.Caption := '• ' + Text;
+    L.Caption := '>>> ' + Text;
     if IsDarkColor(WizardForm.Color) then
       L.Font.Color := clWhite
     else
@@ -4573,10 +4583,18 @@ begin
   LogDebug('SetStepDone: ' + Text);
   if Assigned(L) then
   begin
-    L.Caption := '✓ ' + Text;
+    L.Caption := '[x] ' + Text;
     L.ParentFont := False;
     L.StyleElements := L.StyleElements - [seFont];
     L.Font.Color := RGBToColor(0, 200, 0);
+    // Advance determinate progress bar
+    if StepsTotal > 0 then
+    begin
+      StepsDone := StepsDone + 1;
+      if StepsDone > StepsTotal then StepsDone := StepsTotal;
+      WizardForm.ProgressGauge.Position := StepsDone;
+      LogDebug('Progress: ' + IntToStr(StepsDone) + '/' + IntToStr(StepsTotal) + ' (' + IntToStr(StepsDone * 100 div StepsTotal) + '%) - ' + Text);
+    end;
     L.Font.Style := [];
     L.Visible := True;
   end;
@@ -4592,6 +4610,7 @@ begin
   L.Top := TopPos;
   L.Width := WidthVal;
   L.AutoSize := False;
+  L.Transparent := True;
   L.WordWrap := True;
   L.Visible := False;
   Result := L;
@@ -4623,7 +4642,7 @@ begin
   StepNextTop := StepTopBase;
 end;
 
-// Add a pending step label at the next position
+// Add a pending step label at the next position and counts it for the progress bar
 procedure AddStepPendingLabel(L: TLabel; const Text: string);
 begin
   if Assigned(L) then
@@ -4633,6 +4652,8 @@ begin
     L.Width := StepWidthVal;
     SetStepPending(L, Text);
     StepNextTop := StepNextTop + ScaleY(16);
+    StepsTotal := StepsTotal + 1;
+    WizardForm.ProgressGauge.Max := StepsTotal;
   end;
 end;
 
@@ -4730,7 +4751,7 @@ begin
     DeleteFile(OutPath);
   end;
 
-  // Apply to controls — Full Screen drives whether cboResolution is enabled
+  // Apply to controls â€” Full Screen drives whether cboResolution is enabled
   if Assigned(chkFullScreen) then chkFullScreen.Checked := (ScreenMode = 2);
 
   ResIndex := -1;  // -1 = no preset match yet
@@ -4743,7 +4764,7 @@ begin
 
   if ResIndex = -1 then
   begin
-    // Unknown resolution — select Custom and pre-fill the W/H boxes
+    // Unknown resolution â€” select Custom and pre-fill the W/H boxes
     ResIndex := 6;
     if Assigned(edtCustomWidth)  then edtCustomWidth.Text  := IntToStr(DesktopWidth);
     if Assigned(edtCustomHeight) then edtCustomHeight.Text := IntToStr(DesktopHeight);
@@ -4766,7 +4787,7 @@ begin
   end;
   if Assigned(chkSound)          then chkSound.Checked          := (AudioMode = 0);  // 0 = play on this PC
   if Assigned(chkCopyPaste)      then chkCopyPaste.Checked      := (RedirectClipboard = 1);
-  // Experience checkboxes — invert disable keys, pass-through allow keys
+  // Experience checkboxes â€” invert disable keys, pass-through allow keys
   if Assigned(chkExpWallpaper)    then chkExpWallpaper.Checked    := (DisableWallpaper = 0);
   if Assigned(chkExpFontSmooth)   then chkExpFontSmooth.Checked   := (AllowFontSmooth = 1);
   if Assigned(chkExpComposition)  then chkExpComposition.Checked  := (AllowComposition = 1);
@@ -4952,7 +4973,7 @@ begin
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
-  // Row 2 — Copy & Paste (1st column)
+  // Row 2 â€” Copy & Paste (1st column)
   chkCopyPaste := TCheckBox.Create(ParentSurface);
   chkCopyPaste.Parent := ParentSurface;
   chkCopyPaste.Left := ScaleX(10);
@@ -4961,7 +4982,7 @@ begin
   chkCopyPaste.Caption := 'Allow Copy && Paste';
   chkCopyPaste.Checked := True;
 
-  // Row 2 — Sound (2nd column)
+  // Row 2 â€” Sound (2nd column)
   chkSound := TCheckBox.Create(ParentSurface);
   chkSound.Parent := ParentSurface;
   chkSound.Left := ScaleX(180);
@@ -4971,7 +4992,7 @@ begin
   chkSound.Checked := True;
   MakeShortcutHelpButton(ParentSurface, chkSound.Top, 2);
 
-  // Row 3 — Keyboard Combos dropdown (after Sound)
+  // Row 3 â€” Keyboard Combos dropdown (after Sound)
   lblKeyboardHook := TLabel.Create(ParentSurface);
   lblKeyboardHook.Parent := ParentSurface;
   lblKeyboardHook.Left := ScaleX(10);
@@ -4991,15 +5012,15 @@ begin
   cboKeyboardHook.ItemIndex := 0;
   MakeShortcutHelpButton(ParentSurface, lblKeyboardHook.Top, 5);
 
-  // Row 4 — Screen Size label
+  // Row 4 â€” Screen Size label
   lblScreenSize := TLabel.Create(ParentSurface);
   lblScreenSize.Parent := ParentSurface;
   lblScreenSize.Left := ScaleX(10);
-  lblScreenSize.Top := cboKeyboardHook.Top + ScaleY(26);
+  lblScreenSize.Top := cboKeyboardHook.Top + ScaleY(28);
   lblScreenSize.Caption := 'Window Size:';
   lblScreenSize.AutoSize := True;
 
-  // Row 4 — Resolution drop-down
+  // Row 4 â€” Resolution drop-down
   cboResolution := TComboBox.Create(ParentSurface);
   cboResolution.Parent := ParentSurface;
   cboResolution.Left := lblScreenSize.Left + ScaleX(72);
@@ -5016,7 +5037,7 @@ begin
   cboResolution.ItemIndex := 1;  // default: 1366 x 768
   cboResolution.OnChange := @OnResolutionChange;
 
-  // Row 4 — Full Screen checkbox
+  // Row 4 â€” Full Screen checkbox
   chkFullScreen := TCheckBox.Create(ParentSurface);
   chkFullScreen.Parent := ParentSurface;
   chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
@@ -5027,7 +5048,7 @@ begin
   chkFullScreen.OnClick := @OnFullScreenClick;
   cboResolution.Enabled := True;
 
-  // Row 4 — Use All Monitors
+  // Row 4 â€” Use All Monitors
   chkUseAllMonitors := TCheckBox.Create(ParentSurface);
   chkUseAllMonitors.Parent := ParentSurface;
   chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
@@ -5038,7 +5059,7 @@ begin
   chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
   MakeShortcutHelpButton(ParentSurface, lblScreenSize.Top - ScaleY(1), 3);
 
-  // Row 4b — Custom resolution W/H inputs (hidden until "Custom" is selected)
+  // Row 4b â€” Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
   lblCustomWidth.Parent := ParentSurface;
   lblCustomWidth.Left := cboResolution.Left;
@@ -5071,7 +5092,7 @@ begin
   edtCustomHeight.Text := '1080';
   edtCustomHeight.Visible := False;
 
-  // Row 5 — Performance section header (offset by extra row to clear Custom resolution inputs)
+  // Row 5 â€” Performance section header (offset by extra row to clear Custom resolution inputs)
   TmpLabel := TLabel.Create(ParentSurface);
   TmpLabel.Parent := ParentSurface;
   TmpLabel.Left := ScaleX(10);
@@ -5081,7 +5102,7 @@ begin
   TmpLabel.AutoSize := True;
   MakeShortcutHelpButton(ParentSurface, TmpLabel.Top, 4);
 
-  // Row 6 — Experience checkboxes (2 columns, 3 rows)
+  // Row 6 â€” Experience checkboxes (2 columns, 3 rows)
   // Col 1, Row 1
   chkExpWallpaper := TCheckBox.Create(ParentSurface);
   chkExpWallpaper.Parent := ParentSurface;
@@ -5145,7 +5166,7 @@ begin
   lblMultiShortcutEditingNote.AutoSize := True;
   lblMultiShortcutEditingNote.Visible := False;
 
-  // Row 4 — "Open advanced shortcut options" checkbox (shown only in Edit Shortcuts mode)
+  // Row 4 â€” "Open advanced shortcut options" checkbox (shown only in Edit Shortcuts mode)
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
@@ -5309,6 +5330,17 @@ var
     radioSpacing: Integer;
     TmpLabel: TLabel;
 begin
+  // Create transparent label overlay for status text to prevent grey flash.
+  StatusOverlay := TLabel.Create(WizardForm);
+  StatusOverlay.Parent := WizardForm.StatusLabel.Parent;
+  StatusOverlay.SetBounds(WizardForm.StatusLabel.Left, WizardForm.StatusLabel.Top,
+    WizardForm.StatusLabel.Width, WizardForm.StatusLabel.Height);
+  StatusOverlay.Font := WizardForm.StatusLabel.Font;
+  StatusOverlay.Transparent := True;
+  StatusOverlay.Caption := '';
+  StatusOverlay.Show;
+  WizardForm.StatusLabel.Visible := False;
+
   InstallOptionsAutoUserSourceApplied := False;
 
   // Initialize installer log file
@@ -5415,6 +5447,7 @@ begin
     'Setup Options',
     'Select what you would like to do:'
   );
+  Page_InstallOptions.Surface.Color := RGBToColor(11, 16, 24);
 
   // Create top-level radio buttons: Install, Edit Shortcut, Uninstall
   rbInstall := TRadioButton.Create(Page_InstallOptions);
@@ -5436,10 +5469,10 @@ begin
   InstallHintOffset := 0;
   if TermWrapAlreadyInstalled then
   begin
-    // TermWrap is installed — check whether versions/sizes match (upgrade) or are identical (re-install)
+    // TermWrap is installed â€” check whether versions/sizes match (upgrade) or are identical (re-install)
     if (GetInstalledTermWrapVersion() = '{#SourceTermWrapVersion}') and (GetInstalledTermWrapSize() = '{#SourceTermWrapSize}') then
     begin
-      // Case 2: Same version and size — show "Re-install TermWrap", unchecked, with hint sub-label
+      // Case 2: Same version and size â€” show "Re-install TermWrap", unchecked, with hint sub-label
       chkInstallTermWrap.Caption := 'Re-install TermWrap';
       chkInstallTermWrap.Checked := False;
 
@@ -5449,6 +5482,7 @@ begin
       chkInstallTermWrapHint.Top := chkInstallTermWrap.Top + ScaleY(20);
       chkInstallTermWrapHint.Width := ScaleX(390);
       chkInstallTermWrapHint.AutoSize := False;
+      chkInstallTermWrapHint.Transparent := True;
       chkInstallTermWrapHint.WordWrap := True;
       chkInstallTermWrapHint.Caption := '(Already installed. Selecting this will re-install it)';
       chkInstallTermWrapHint.Font.Style := [fsItalic];
@@ -5457,14 +5491,14 @@ begin
     end
     else
     begin
-      // Case 3: Different version or size — show "Upgrade TermWrap", checked, no sub-label
+      // Case 3: Different version or size â€” show "Upgrade TermWrap", checked, no sub-label
       chkInstallTermWrap.Caption := 'Upgrade TermWrap';
       chkInstallTermWrap.Checked := True;
     end;
   end
   else
   begin
-    // Case 1: Not installed — show "Install TermWrap", checked, no sub-label
+    // Case 1: Not installed â€” show "Install TermWrap", checked, no sub-label
     chkInstallTermWrap.Caption := 'Install TermWrap';
     chkInstallTermWrap.Checked := True;
   end;
@@ -5514,6 +5548,7 @@ begin
   rbUseExistingUsersHint.Top := rbUseExistingUsers.Top + ScaleY(20);
   rbUseExistingUsersHint.Width := ScaleX(320);
   rbUseExistingUsersHint.AutoSize := False;
+  rbUseExistingUsersHint.Transparent := True;
   rbUseExistingUsersHint.WordWrap := True;
   rbUseExistingUsersHint.Caption := '(Selected because your desktop already has RDP+ shortcuts)';
   rbUseExistingUsersHint.Font.Style := [fsItalic];
@@ -5610,7 +5645,7 @@ begin
   lblBullet2.Parent := WelcomePage.Surface;
   lblBullet2.Left := CreditsText.Left;
   lblBullet2.Top := topPos;
-  lblBullet2.Caption := '• ';
+  lblBullet2.Caption := '> ';
   lblBullet2.Font.Color := CreditsText.Font.Color;
   lblBullet2.Transparent := True;
   lblBullet2.AutoSize := True;
@@ -5643,7 +5678,7 @@ begin
   lblBullet5.Parent := WelcomePage.Surface;
   lblBullet5.Left := CreditsText.Left;
   lblBullet5.Top := topPos;
-  lblBullet5.Caption := '• Special thanks to Bee Swarm Sim communities: ';
+  lblBullet5.Caption := '> Special thanks to Bee Swarm Sim communities: ';
   lblBullet5.Font.Color := CreditsText.Font.Color;
   lblBullet5.Transparent := True;
   lblBullet5.AutoSize := True;
@@ -5688,7 +5723,7 @@ begin
   lblBullet4.Parent := WelcomePage.Surface;
   lblBullet4.Left := CreditsText.Left;
   lblBullet4.Top := topPos;
-  lblBullet4.Caption := '• Assembled by cpdx4. Project Home: ';
+  lblBullet4.Caption := '> Assembled by cpdx4. Project Home: ';
   lblBullet4.Font.Color := CreditsText.Font.Color;
   lblBullet4.Transparent := True;
   lblBullet4.AutoSize := True;
@@ -5755,7 +5790,7 @@ begin
   except
   end;
 
-  // Shortcut Settings page — reachable from Create Users, Existing Users, and Edit Shortcuts.
+  // Shortcut Settings page â€” reachable from Create Users, Existing Users, and Edit Shortcuts.
   // Anchored to UserPage.ID so it physically follows UserPage (and therefore ExistingUsers/
   // EditShortcuts, which are all before UserPage in traversal order).
   Page_ShortcutSettings := CreateCustomPage(
@@ -6365,7 +6400,7 @@ begin
         NewShortcutBase := Trim(edtShortcutName.Text);
         if NewShortcutBase <> '' then
         begin
-          // Validate shortcut name — reject invalid Windows filename characters
+          // Validate shortcut name â€” reject invalid Windows filename characters
           if not IsValidShortcutName(NewShortcutBase) then
           begin
             MsgBox(
@@ -6717,6 +6752,12 @@ begin
     // Hide cancel button during installation to prevent confusion
     WizardForm.CancelButton.Visible := False;
     
+    // Initialize determinate progress bar
+    StepsTotal := 0;
+    StepsDone := 0;
+    WizardForm.ProgressGauge.Style := npbstNormal;
+    LogDebug('Progress: gauge initialized to Normal style');
+
     // Initialize and show relevant steps (pending state) with contiguous layout
     BeginStepLayout;
     if SelectedInstallMode = installModeUninstall then
@@ -6789,8 +6830,8 @@ begin
     // Handle uninstall cleanup
     if SelectedInstallMode = installModeUninstall then
     begin
-      WizardForm.StatusLabel.Caption := 'Preparing uninstallation...';
-      WizardForm.ProgressGauge.Style := npbstMarquee;
+      StatusOverlay.Caption := 'Preparing uninstallation...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
       
       SetStepInProgress(StepStopSvc, TXT_StopSvc);
       StopTermService;
@@ -6823,54 +6864,64 @@ begin
     // Edit System-wide settings: deferred to ssPostInstall
     else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
-      WizardForm.StatusLabel.Caption := 'Preparing Create Shortcuts...';
-      WizardForm.ProgressGauge.Style := npbstMarquee;
+      StatusOverlay.Caption := 'Preparing Create Shortcuts...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
     end
     // Tune performance: deferred to ssPostInstall
     else if SelectedInstallMode = installModeShowRDPInfo then
     begin
-      WizardForm.StatusLabel.Caption := 'Preparing to apply Group Policy settings...';
-      WizardForm.ProgressGauge.Style := npbstMarquee;
+      StatusOverlay.Caption := 'Preparing to apply Group Policy settings...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      WizardForm.StatusLabel.Caption := 'Applying shortcut settings...';
-      WizardForm.ProgressGauge.Style := npbstMarquee;
+      StatusOverlay.Caption := 'Applying shortcut settings...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
     end
     // Only stop TermService when installing TermWrap
     else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
-      WizardForm.StatusLabel.Caption := 'Preparing installation...';
-      WizardForm.ProgressGauge.Style := npbstMarquee;
+      StatusOverlay.Caption := 'Preparing installation...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
       
       // Now that UI is visible, safely stop the service (executes first, displays first)
       SetStepInProgress(StepStopSvc, TXT_StopSvc);
-      WizardForm.StatusLabel.Caption := 'Stopping Remote Desktop Services...';
+      StatusOverlay.Caption := 'Stopping Remote Desktop Services...';
       Log('[CurStepChanged-ssInstall] Stopping TermService for Install TermWrap');
       StopTermService;
       SetStepDone(StepStopSvc, TXT_StopSvc);
       
       SetStepInProgress(StepAddExcl, TXT_AddExcl);
-      WizardForm.StatusLabel.Caption := 'Adding Windows Defender exclusion...';
+      StatusOverlay.Caption := 'Adding Windows Defender exclusion...';
       AddDefenderExclusionForApp;
       SetStepDone(StepAddExcl, TXT_AddExcl);
+      // Hide gauge before Inno Setup's internal file copy paints its own progress
+      WizardForm.ProgressGauge.Visible := False;
     end;
   end;
   
   if CurStep = ssPostInstall then
   begin
     LogSectionHeader('STEP TRANSITION: ssPostInstall');
+    // Restore and show gauge after Inno Setup's internal file copying
+    if StepsTotal > 0 then
+    begin
+      WizardForm.ProgressGauge.Max := StepsTotal;
+      WizardForm.ProgressGauge.Position := StepsDone;
+      LogDebug('Progress: restored gauge after file copy - ' + IntToStr(StepsDone) + '/' + IntToStr(StepsTotal));
+    end;
+    WizardForm.ProgressGauge.Visible := True;
     // Handle uninstall completion
     if SelectedInstallMode = installModeUninstall then
     begin
-      WizardForm.StatusLabel.Caption := 'Uninstallation complete! TermWrap has been removed.';
+      StatusOverlay.Caption := 'Uninstallation complete! TermWrap has been removed.';
     end
     // Show RDP Info: display-only page, no settings to apply
     else if SelectedInstallMode = installModeShowRDPInfo then
     begin
       SetStepInProgress(StepShowRDPInfo, TXT_ShowRDPInfo);
       SetStepDone(StepShowRDPInfo, TXT_ShowRDPInfo);
-      WizardForm.StatusLabel.Caption := 'Done.';
+      StatusOverlay.Caption := 'Done.';
       WriteInstallerLog('ShowRDPInfo: no-op step complete.');
     end
     // Edit System-wide settings flow (apply queued registry/service changes)
@@ -7000,27 +7051,27 @@ begin
         SetStepDone(StepRestartRDP, 'Restart Remote Desktop Services');
       end;
 
-      WizardForm.StatusLabel.Caption := 'System changes applied.';
+      StatusOverlay.Caption := 'System changes applied.';
     end
     // Edit System-wide settings fallback (no changes queued): create shortcuts for existing users
     else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
       SetStepInProgress(StepCreateShortcuts, TXT_CreateShortcuts);
-      WizardForm.StatusLabel.Caption := 'Creating RDP shortcuts...';
+      StatusOverlay.Caption := 'Creating RDP shortcuts...';
       CreateShortcutsForExistingUsers;
       // Create Shortcuts path completed
       SetStepDone(StepCreateShortcuts, TXT_CreateShortcuts);
       SetStepInProgress(StepPreTrust, TXT_PreTrust);
-      WizardForm.StatusLabel.Caption := 'Pre-trusting Remote Desktop certificate...';
+      StatusOverlay.Caption := 'Pre-trusting Remote Desktop certificate...';
       PreTrustRDPCertCurrentUser;
       SetStepDone(StepPreTrust, TXT_PreTrust);
       ClearPasswordsFromMemory;
-      WizardForm.StatusLabel.Caption := 'Create Shortcuts executed.';
+      StatusOverlay.Caption := 'Create Shortcuts executed.';
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
       SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
-      WizardForm.StatusLabel.Caption := 'Applying shortcut settings...';
+      StatusOverlay.Caption := 'Applying shortcut settings...';
       
       // Write settings + sign the .rdp file (moved from NextButtonClick to here
       // so the progress bar is visible during the potentially slow signing step)
@@ -7029,7 +7080,7 @@ begin
       
       if DoShowMstscEdit then
       begin
-        WizardForm.StatusLabel.Caption := 'Opening selected .rdp in editor...';
+        StatusOverlay.Caption := 'Opening selected .rdp in editor...';
         if SelectedShortcutPath = '' then
         begin
           WriteInstallerLog('Edit Shortcut: no SelectedShortcutPath set');
@@ -7047,7 +7098,7 @@ begin
       end
       else
       begin
-        WizardForm.StatusLabel.Caption := 'Shortcut settings applied.';
+        StatusOverlay.Caption := 'Shortcut settings applied.';
         WriteInstallerLog('Edit Shortcut: mstsc editor skipped by user choice');
       end;
       SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
@@ -7063,8 +7114,7 @@ begin
         LogKeyValue('DebugMode', BoolToStr(DebugMode));
         LogKeyValue('SimulateNoVCRedist', BoolToStr(SimulateNoVCRedist));
         LogKeyValue('Download URL', URL_VCREDIST_X64);
-        WizardForm.StatusLabel.Caption := 'Downloading VC++ Redistributable from Microsoft...';
-        WizardForm.ProgressGauge.Style := npbstMarquee;
+        StatusOverlay.Caption := 'Downloading VC++ Redistributable from Microsoft...';
         
         // Download VC++ Redistributable from Microsoft
         VCRedistPath := TempFile('vc_redist.x64.exe');
@@ -7085,7 +7135,7 @@ begin
         LogKeyValue('Download exit code', IntToStr(ResultCode));
         LogKeyValue('Installer file exists after download', BoolToStr(FileExists(VCRedistPath)));
         
-        WizardForm.StatusLabel.Caption := 'Installing VC++ Redistributable (this may take a minute)...';
+        StatusOverlay.Caption := 'Installing VC++ Redistributable (this may take a minute)...';
         WizardForm.Update;
         
         // Validate publisher before running downloaded installer
@@ -7108,14 +7158,14 @@ begin
       begin
         LogSectionHeader('VC++ REDIST CHECK/INSTALL');
         Log('VC++ Redistributable detected. Skipping download/install.');
-        WizardForm.StatusLabel.Caption := 'VC++ Redistributable already installed, skipping...';
+        StatusOverlay.Caption := 'VC++ Redistributable already installed, skipping...';
       end;
       // VC++ ensured (installed or skipped)
       SetStepDone(StepEnsureVC, TXT_EnsureVC);
       
       // Install and configure TermWrap
       SetStepInProgress(StepConfigureService, TXT_ConfigureService);
-      WizardForm.StatusLabel.Caption := 'Installing and configuring TermWrap...';
+      StatusOverlay.Caption := 'Installing and configuring TermWrap...';
       // TermWrap files are bundled and copied earlier; no external installer to run.
       Sleep(SLEEP_SHORT);
       
@@ -7211,7 +7261,7 @@ begin
     if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       SetStepInProgress(StepStartSvc, TXT_StartSvc);
-      WizardForm.StatusLabel.Caption := 'Starting Remote Desktop Services...';
+      StatusOverlay.Caption := 'Starting Remote Desktop Services...';
       // Start TermService after all files and registry are done
       ResultCode := StartTermServiceEx;
       if ResultCode = 0 then
@@ -7231,7 +7281,7 @@ begin
     if SelectedInstallMode = installModeInstall then
     begin
       SetStepInProgress(StepPreTrust, TXT_PreTrust);
-      WizardForm.StatusLabel.Caption := 'Pre-trusting Remote Desktop certificate...';
+      StatusOverlay.Caption := 'Pre-trusting Remote Desktop certificate...';
       PreTrustRDPCertCurrentUser;
       // Pre-trust is optional - don't fail install if cert doesn't exist yet
       SetStepDone(StepPreTrust, TXT_PreTrust);
@@ -7241,7 +7291,7 @@ begin
     if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
     begin
       SetStepInProgress(StepCheckRDP, TXT_CheckRDP);
-      WizardForm.StatusLabel.Caption := 'Verifying RDP service...';
+      StatusOverlay.Caption := 'Verifying RDP service...';
 
       // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
       LogSectionHeader('RAZER CORTEX CHECK');
@@ -7355,6 +7405,36 @@ var
   PortNumber: Cardinal;
   ListenerStatus: string;
 begin
+  // Suppress grey flash by hiding page content during the VCL style paint cycle.
+  if (CurPageID = Page_InstallOptions.ID) or
+     (CurPageID = UserPage.ID) or
+     (CurPageID = Page_ShortcutSettings.ID) or
+     (CurPageID = EditSystemwideSettingsPage.ID) or
+     (CurPageID = Page_ShowRDPInfo.ID) or
+     (CurPageID = Page_CreateShortcutsForExistingUsers.ID) or
+     (CurPageID = EditShortcutPage.ID) then
+  begin
+    WizardForm.PageNameLabel.Visible := False;
+    WizardForm.PageDescriptionLabel.Visible := False;
+    if CurPageID = Page_InstallOptions.ID then
+      Page_InstallOptions.Surface.Visible := False;
+    StatusOverlay.Caption := 'Please wait...';
+    StatusOverlay.Visible := True;
+    SleepWithUI(50);
+    StatusOverlay.Visible := False;
+    if CurPageID = Page_InstallOptions.ID then
+      Page_InstallOptions.Surface.Visible := True;
+    WizardForm.PageNameLabel.Visible := True;
+    WizardForm.PageDescriptionLabel.Visible := True;
+  end;
+
+  // Ensure status overlay is visible on the Installing page (may have been hidden
+  // by the hide-reveal transition from the previous page).
+  if CurPageID = wpInstalling then
+  begin
+    StatusOverlay.Visible := True;
+  end;
+
   NowTick := GetTickCount;
   IsDuplicatePageEvent := (CurPageID = LastLoggedPageId) and ((NowTick - LastLoggedPageTick) <= PAGE_LOG_DEDUPE_MS);
 
@@ -7504,7 +7584,7 @@ begin
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
-    // Show RDP Info is a display-only status page — hide the Next button so the
+    // Show RDP Info is a display-only status page â€” hide the Next button so the
     // user views the info and closes the installer via Cancel when done.
     WizardForm.NextButton.Visible := False;
 
@@ -7515,7 +7595,7 @@ begin
     if Assigned(lblWrapperVer) then lblWrapperVer.Caption := '--';
     if Assigned(lblListener) then lblListener.Caption := '--';
 
-    // System Status — refresh live values each time the page is shown
+    // System Status â€” refresh live values each time the page is shown
     DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
     if DisplayVersion = '' then
       DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
