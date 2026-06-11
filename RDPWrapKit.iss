@@ -6680,8 +6680,12 @@ begin
   if CurPageID = EditShortcutPage.ID then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
 
+  // Ensure Next button is visible on the install options page (it may be hidden
+  // on the Show RDP Info page when navigated back from there).
   if CurPageID = Page_InstallOptions.ID then
   begin
+    WizardForm.NextButton.Visible := True;
+
     if not InstallOptionsAutoUserSourceApplied then
     begin
       InstallOptionsAutoUserSourceApplied := True;
@@ -6795,6 +6799,10 @@ begin
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
+    // Show RDP Info is a display-only status page — hide the Next button so the
+    // user views the info and closes the installer via Cancel when done.
+    WizardForm.NextButton.Visible := False;
+
     // Reset displayed values to indicate loading when page is shown again (e.g. after Back/Next)
     if Assigned(lblWinVer) then lblWinVer.Caption := '--';
     if Assigned(lblRDPService) then lblRDPService.Caption := '--';
