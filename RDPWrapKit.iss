@@ -555,8 +555,7 @@ begin
   // Only prompt when a version string was returned and it is strictly newer
   if (LatestVersion <> '') and (CompareVersions(LatestVersion, CurrentVersion) > 0) then
   begin
-    Msg := 'A newer version is available: ' + LatestVersion + #13#10
-         + 'You are about to install: ' + CurrentVersion + #13#10#13#10
+    Msg := 'A newer version (v' + LatestVersion + ') is available.' + #13#10#13#10
          + 'Open the latest release page instead?';
     Answer := MsgBox(Msg, mbConfirmation, MB_YESNOCANCEL);
     if Answer = IDYES then
