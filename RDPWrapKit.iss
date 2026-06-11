@@ -95,7 +95,8 @@ procedure OnNextUsersPageClick(Sender: TObject); forward;
 procedure UpdateUsersPageDisplay; forward;
 procedure OnPrevShortcutPageClick(Sender: TObject); forward;
 procedure OnNextShortcutPageClick(Sender: TObject); forward;
-procedure OnShortcutRadioClick(Sender: TObject); forward;
+procedure OnShortcutCheckBoxClick(Sender: TObject); forward;
+procedure BuildEditShortcutAdvancedControls; forward;
 procedure UpdateShortcutPageDisplay; forward;
 function IsValidPassword(const Password: string): String; forward;
 procedure OpenTermWrap(Sender: TObject); forward;
@@ -183,8 +184,9 @@ var
   CreateRdpShortcutsGroup: TPanel;
   EditShortcutPage: TWizardPage;
   Page_ShortcutSettings: TWizardPage;
+  Page_EditShortcutAdvanced: TWizardPage;
   DesktopRdpFiles: TStringList;
-  ShortcutRadioButtons: array of TRadioButton;
+  ShortcutCheckBoxes: array of TCheckBox;
   CurrentShortcutPage: Integer;
   ShortcutsPerPage: Integer;
   ShortcutPrevButton: TButton;
@@ -193,9 +195,13 @@ var
   ShortcutHeaderLabel: TLabel;
   ShortcutEmptyLabel: TLabel;
   EditShortcutControlsBuilt: Boolean;
+  EditShortcutAdvancedControlsBuilt: Boolean;
   SelectedShortcutIndex: Integer;
   SelectedShortcutPath: string;
+  SelectedShortcutPaths: TStringList;
   FinishedExampleImage: TBitmapImage;
+  EditShortcutAdvancedImage: TBitmapImage;
+  EditShortcutAdvancedLabel: TLabel;
   
   // Flags derived from welcome/options controls
   DoInstallTermWrap: Boolean;
@@ -1893,6 +1899,7 @@ begin
   else if Assigned(Page_ShortcutSettings) and (PageID = Page_ShortcutSettings.ID) then Result := 'Custom: Shortcut Settings'
   else if Assigned(Page_CreateShortcutsForExistingUsers) and (PageID = Page_CreateShortcutsForExistingUsers.ID) then Result := 'Custom: Create Shortcuts for Existing Users'
   else if Assigned(EditShortcutPage) and (PageID = EditShortcutPage.ID) then Result := 'Custom: Edit Existing Shortcut'
+  else if Assigned(Page_EditShortcutAdvanced) and (PageID = Page_EditShortcutAdvanced.ID) then Result := 'Custom: Advanced Shortcut Editing'
   else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide RDP Settings'
   else if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) then Result := 'Custom: Show RDP Info'
   else
@@ -2950,9 +2957,9 @@ begin
     Result := DesktopFolderHasRdpShortcut(CommonDesktop);
 end;
 
-procedure OnShortcutRadioClick(Sender: TObject);
+procedure OnShortcutCheckBoxClick(Sender: TObject);
 begin
-  SelectedShortcutIndex := TRadioButton(Sender).Tag;
+  // No action needed on click - validation happens in NextButtonClick
 end;
 
 procedure BuildShortcutEditorControls;
@@ -2969,7 +2976,7 @@ begin
   ShortcutHeaderLabel.Parent := EditShortcutPage.Surface;
   ShortcutHeaderLabel.Left := ScaleX(20);
   ShortcutHeaderLabel.Top := ScaleY(12);
-  ShortcutHeaderLabel.Caption := 'Desktop .rdp shortcuts';
+  ShortcutHeaderLabel.Caption := 'Desktop .rdp shortcuts (check one or more to edit)';
   ShortcutHeaderLabel.Font.Style := [fsBold];
 
   ShortcutEmptyLabel := TLabel.Create(EditShortcutPage);
@@ -2979,17 +2986,17 @@ begin
   ShortcutEmptyLabel.Caption := 'No .rdp files were found on your Desktop.';
   ShortcutEmptyLabel.Visible := False;
 
-  SetLength(ShortcutRadioButtons, DesktopRdpFiles.Count);
+  SetLength(ShortcutCheckBoxes, DesktopRdpFiles.Count);
   for i := 0 to DesktopRdpFiles.Count - 1 do
   begin
-    ShortcutRadioButtons[i] := TRadioButton.Create(EditShortcutPage);
-    ShortcutRadioButtons[i].Parent := EditShortcutPage.Surface;
-    ShortcutRadioButtons[i].Left := ScaleX(20);
-    ShortcutRadioButtons[i].Width := EditShortcutPage.SurfaceWidth - ScaleX(40);
-    ShortcutRadioButtons[i].Caption := ExtractFileName(DesktopRdpFiles[i]);
-    ShortcutRadioButtons[i].Tag := i;
-    ShortcutRadioButtons[i].OnClick := @OnShortcutRadioClick;
-    ShortcutRadioButtons[i].Visible := False;
+    ShortcutCheckBoxes[i] := TCheckBox.Create(EditShortcutPage);
+    ShortcutCheckBoxes[i].Parent := EditShortcutPage.Surface;
+    ShortcutCheckBoxes[i].Left := ScaleX(20);
+    ShortcutCheckBoxes[i].Width := EditShortcutPage.SurfaceWidth - ScaleX(40);
+    ShortcutCheckBoxes[i].Caption := ExtractFileName(DesktopRdpFiles[i]);
+    ShortcutCheckBoxes[i].Tag := i;
+    ShortcutCheckBoxes[i].OnClick := @OnShortcutCheckBoxClick;
+    ShortcutCheckBoxes[i].Visible := False;
   end;
 
   if DesktopRdpFiles.Count > ShortcutsPerPage then
@@ -3024,6 +3031,37 @@ begin
   EditShortcutControlsBuilt := True;
 end;
 
+procedure BuildEditShortcutAdvancedControls;
+begin
+  if EditShortcutAdvancedControlsBuilt then
+    exit;
+
+  // Instruction text explaining what to do
+  EditShortcutAdvancedLabel := TLabel.Create(Page_EditShortcutAdvanced);
+  EditShortcutAdvancedLabel.Parent := Page_EditShortcutAdvanced.Surface;
+  EditShortcutAdvancedLabel.Left := ScaleX(20);
+  EditShortcutAdvancedLabel.Top := ScaleY(12);
+  EditShortcutAdvancedLabel.Width := Page_EditShortcutAdvanced.SurfaceWidth - ScaleX(40);
+  EditShortcutAdvancedLabel.AutoSize := False;
+  EditShortcutAdvancedLabel.Height := ScaleY(80);
+  EditShortcutAdvancedLabel.WordWrap := True;
+  EditShortcutAdvancedLabel.Caption :=
+    'The shortcut was opened in the Remote Desktop Connection app. Make your changes there.' + #13#10#13#10 +
+    'Important: Always click [Save] on the General tab. Then click Next here to finalize the shortcut settings.';
+
+  // Screenshot image showing where to click Save
+  EditShortcutAdvancedImage := TBitmapImage.Create(Page_EditShortcutAdvanced);
+  EditShortcutAdvancedImage.Parent := Page_EditShortcutAdvanced.Surface;
+  EditShortcutAdvancedImage.Left := ScaleX(20);
+  EditShortcutAdvancedImage.Top := EditShortcutAdvancedLabel.Top + EditShortcutAdvancedLabel.Height + ScaleY(8);
+  EditShortcutAdvancedImage.Width := ScaleX(200);
+  EditShortcutAdvancedImage.Height := ScaleY(210);
+  EditShortcutAdvancedImage.Stretch := True;
+  EditShortcutAdvancedImage.Visible := False;
+
+  EditShortcutAdvancedControlsBuilt := True;
+end;
+
 procedure UpdateShortcutPageDisplay;
 var
   i, PageCount, StartIdx, EndIdx, VisIndex, BaseTop, RowHeight: Integer;
@@ -3053,11 +3091,10 @@ begin
   VisIndex := 0;
   for i := 0 to DesktopRdpFiles.Count - 1 do
   begin
-    ShortcutRadioButtons[i].Visible := (i >= StartIdx) and (i <= EndIdx);
-    if ShortcutRadioButtons[i].Visible then
+    ShortcutCheckBoxes[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+    if ShortcutCheckBoxes[i].Visible then
     begin
-      ShortcutRadioButtons[i].Top := BaseTop + VisIndex * RowHeight;
-      ShortcutRadioButtons[i].Checked := (i = SelectedShortcutIndex);
+      ShortcutCheckBoxes[i].Top := BaseTop + VisIndex * RowHeight;
       Inc(VisIndex);
     end;
   end;
@@ -3739,10 +3776,15 @@ begin
   if (PageID = UserPage.ID) and
      ((SelectedInstallMode <> installModeInstall) or (not DoCreateRdpShortcuts) or (CreateUserMode <> createUserModeNew)) then
     Result := True;
+// Show shortcut editing pages only for Edit Shortcut Settings mode
+if (PageID = EditShortcutPage.ID) and (SelectedInstallMode <> installModeEditShortcuts) then
+  Result := True;
 
-  // Show shortcut editing pages only for Edit Shortcut Settings mode
-  if (PageID = EditShortcutPage.ID) and (SelectedInstallMode <> installModeEditShortcuts) then
-    Result := True;
+// Show Advanced Editing page only when user chose the advanced option
+if Assigned(Page_EditShortcutAdvanced) and (PageID = Page_EditShortcutAdvanced.ID) then
+  Result := not ((SelectedInstallMode = installModeEditShortcuts) and
+                 Assigned(chkShowMoreShortcutOptions) and chkShowMoreShortcutOptions.Checked);
+
 
   // Skip Ready page - no need to show install path
   if PageID = wpReady then
@@ -6132,9 +6174,17 @@ begin
   EditShortcutPage := CreateCustomPage(
     Page_InstallOptions.ID,
     'Edit existing shortcut settings',
-    'Select one Desktop .rdp shortcut to edit.'
+    'Select one or more Desktop .rdp shortcuts to edit.'
   );
   
+  
+  // Advanced editing page (shown only when user checks "Open advanced shortcut options")
+  // Positioned after ShortcutSettings page so it appears just before the Installing page.
+  Page_EditShortcutAdvanced := CreateCustomPage(
+    Page_ShortcutSettings.ID,
+    'Advanced Shortcut Editing',
+    'Manual editing instructions for your RDP shortcut.'
+  );
   
   // Initialize lists for tracking
   LocalUsersList := TStringList.Create;        // Will be populated when Create Shortcuts page is shown
@@ -6143,12 +6193,14 @@ begin
   SetLength(UserCheckBoxes, 0);
   SetLength(UserPasswordEdits, 0);
   SetLength(UserPasswordStatus, 0);
-  SetLength(ShortcutRadioButtons, 0);
+  SetLength(ShortcutCheckBoxes, 0);
   CurrentShortcutPage := 0;
   ShortcutsPerPage := 8;
   SelectedShortcutIndex := -1;
   SelectedShortcutPath := '';
+  SelectedShortcutPaths := TStringList.Create;
   EditShortcutControlsBuilt := False;
+  EditShortcutAdvancedControlsBuilt := False;
   ShortcutsList := TStringList.Create;
   
 
@@ -6322,12 +6374,14 @@ begin
       if Assigned(ShortcutPrevButton)  then ShortcutPrevButton.Visible  := False;
       if Assigned(ShortcutNextButton)  then ShortcutNextButton.Visible  := False;
       if Assigned(ShortcutPageLabel)   then ShortcutPageLabel.Visible   := False;
-      for i := 0 to Length(ShortcutRadioButtons) - 1 do
-        if Assigned(ShortcutRadioButtons[i]) then ShortcutRadioButtons[i].Visible := False;
+      for i := 0 to Length(ShortcutCheckBoxes) - 1 do
+        if Assigned(ShortcutCheckBoxes[i]) then ShortcutCheckBoxes[i].Visible := False;
       EditShortcutControlsBuilt := False;
-      SetLength(ShortcutRadioButtons, 0);
+      SetLength(ShortcutCheckBoxes, 0);
       SelectedShortcutIndex := -1;
       SelectedShortcutPath := '';
+      if Assigned(SelectedShortcutPaths) then
+        SelectedShortcutPaths.Clear;
       Result := True;
       exit;
     end
@@ -6375,17 +6429,44 @@ begin
       exit;
     end;
 
-    if (SelectedShortcutIndex < 0) or (SelectedShortcutIndex >= DesktopRdpFiles.Count) then
+    // Count checked checkboxes and collect selected paths
+    if not Assigned(SelectedShortcutPaths) then
+      SelectedShortcutPaths := TStringList.Create;
+    SelectedShortcutPaths.Clear;
+    for i := 0 to DesktopRdpFiles.Count - 1 do
     begin
-      MsgBox('Select a shortcut to edit before continuing.', mbError, MB_OK);
+      if Assigned(ShortcutCheckBoxes[i]) and ShortcutCheckBoxes[i].Checked then
+        SelectedShortcutPaths.Add(DesktopRdpFiles[i]);
+    end;
+
+    if SelectedShortcutPaths.Count = 0 then
+    begin
+      MsgBox('Select at least one shortcut to edit before continuing.', mbError, MB_OK);
       Result := False;
       exit;
     end;
 
-    // Record the selected shortcut path; do not launch mstsc here.
-    // The editor will be launched as part of the Installing step to keep
-    // all external launches inside the install flow.
-    SelectedShortcutPath := DesktopRdpFiles[SelectedShortcutIndex];
+    // For single selection, use the existing single-shortcut flow
+    if SelectedShortcutPaths.Count = 1 then
+    begin
+      SelectedShortcutPath := SelectedShortcutPaths[0];
+      SelectedShortcutIndex := -1;
+      // Find the index
+      for i := 0 to DesktopRdpFiles.Count - 1 do
+      begin
+        if CompareText(DesktopRdpFiles[i], SelectedShortcutPath) = 0 then
+        begin
+          SelectedShortcutIndex := i;
+          break;
+        end;
+      end;
+    end
+    else
+    begin
+      // Multi-select: clear single path (will be handled in ssPostInstall)
+      SelectedShortcutPath := '';
+      SelectedShortcutIndex := -1;
+    end;
   end
   else if CurPageID = Page_ShortcutSettings.ID then
   begin
@@ -6458,6 +6539,22 @@ begin
       // Settings will be applied during the installing step (after progress bar is visible)
       // WriteShortcutSettingsToRdpFile moved to ssPostInstall to avoid blocking UI before progress bar shows
     end;
+  end
+  else if CurPageID = Page_EditShortcutAdvanced.ID then
+  begin
+    // User finished editing in mstsc - re-sign the shortcut(s)
+    if SelectedShortcutPath <> '' then
+    begin
+      WriteInstallerLog('Advanced Edit: Re-signing shortcut after manual edit: ' + SelectedShortcutPath);
+      SignRdpFile(SelectedShortcutPath);
+    end
+    else if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
+    begin
+      WriteInstallerLog('Advanced Edit: Re-signing ' + IntToStr(SelectedShortcutPaths.Count) + ' shortcuts after manual edit');
+      for i := 0 to SelectedShortcutPaths.Count - 1 do
+        SignRdpFile(SelectedShortcutPaths[i]);
+    end;
+    Result := True;
   end
   else if CurPageID = EditSystemwideSettingsPage.ID then
   begin
@@ -7070,37 +7167,35 @@ begin
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
+      SetStepInProgress(StepCreateShortcuts, 'Applying shortcut settings');
       StatusOverlay.Caption := 'Applying shortcut settings...';
-      
-      // Write settings + sign the .rdp file (moved from NextButtonClick to here
-      // so the progress bar is visible during the potentially slow signing step)
+
+      // Write settings + sign for ALL selected shortcuts
       if SelectedShortcutPath <> '' then
-        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
-      
-      if DoShowMstscEdit then
       begin
-        StatusOverlay.Caption := 'Opening selected .rdp in editor...';
-        if SelectedShortcutPath = '' then
+        // Single shortcut
+        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+      end
+      else if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
+      begin
+        // Multi-edit: write to all selected shortcuts
+        for i := 0 to SelectedShortcutPaths.Count - 1 do
         begin
-          WriteInstallerLog('Edit Shortcut: no SelectedShortcutPath set');
-        end
-        else
-        begin
-          // Try to launch mstsc to edit the selected shortcut
-          MstscPath := GetMstscPath;
-          if (MstscPath = '') or (not Exec(MstscPath, '/edit "' + SelectedShortcutPath + '"', '', SW_SHOW, ewNoWait, ResultCode)) then
-          begin
-            MsgBox('Failed to launch Remote Desktop editor. Verify mstsc is available and try again.', mbError, MB_OK);
-            WriteInstallerLog('Edit Shortcut: Exec(mstsc) failed exit=' + IntToStr(ResultCode));
-          end;
+          WriteInstallerLog('Edit Shortcut: Applying settings to (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
+          WriteShortcutSettingsToRdpFile(SelectedShortcutPaths[i]);
         end;
       end
       else
-      begin
-        StatusOverlay.Caption := 'Shortcut settings applied.';
-        WriteInstallerLog('Edit Shortcut: mstsc editor skipped by user choice');
-      end;
+        WriteInstallerLog('Edit Shortcut: No shortcut paths selected!');
+
+      // mstsc /edit is now launched on the Advanced page (CurPageChanged) so the
+      // editor opens while the user sees the screenshot and instructions.
+      // Re-sign happens when user clicks Next on the Advanced page.
+      if DoShowMstscEdit then
+        WriteInstallerLog('Edit Shortcut: Advanced mode - mstsc will open on Advanced page')
+      else
+        WriteInstallerLog('Edit Shortcut: mstsc editor skipped (non-advanced mode)');
+      StatusOverlay.Caption := 'Shortcut settings applied.';
       SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
     end
     // Install TermWrap: Download VC++, apply registry, start service
@@ -7392,6 +7487,8 @@ var
   Password: string;
   ParseUser: string;
   ParsePass: string;
+  MstscPath: string;
+  MstscResultCode: Integer;
   NowTick: Cardinal;
   IsDuplicatePageEvent: Boolean;
   DeltaMs: Cardinal;
@@ -7412,7 +7509,8 @@ begin
      (CurPageID = EditSystemwideSettingsPage.ID) or
      (CurPageID = Page_ShowRDPInfo.ID) or
      (CurPageID = Page_CreateShortcutsForExistingUsers.ID) or
-     (CurPageID = EditShortcutPage.ID) then
+     (CurPageID = EditShortcutPage.ID) or
+     (CurPageID = Page_EditShortcutAdvanced.ID) then
   begin
     WizardForm.PageNameLabel.Visible := False;
     WizardForm.PageDescriptionLabel.Visible := False;
@@ -7503,6 +7601,40 @@ begin
     end;
   end;
 
+  // Advanced Editing page: show instructions, screenshot, and launch mstsc editor
+  if CurPageID = Page_EditShortcutAdvanced.ID then
+  begin
+    if not EditShortcutAdvancedControlsBuilt then
+      BuildEditShortcutAdvancedControls;
+
+    // Load the screenshot image
+    if Assigned(EditShortcutAdvancedImage) then
+    begin
+      try
+        ExtractTemporaryFile(FILE_RDPEDITSAVE_BMP);
+        EditShortcutAdvancedImage.Bitmap.LoadFromFile(ExpandConstant(TEMP_RDPEDITSAVE_BMP));
+        EditShortcutAdvancedImage.Visible := True;
+      except
+        EditShortcutAdvancedImage.Visible := False;
+      end;
+    end;
+
+    // Launch mstsc /edit for the shortcut so the user can make changes while
+    // viewing the instructions and screenshot on this page.
+    if DoShowMstscEdit and (SelectedShortcutPath <> '') then
+    begin
+      MstscPath := GetMstscPath;
+      MstscResultCode := 0;
+      if (MstscPath = '') or (not Exec(MstscPath, '/edit "' + SelectedShortcutPath + '"', '', SW_SHOW, ewNoWait, MstscResultCode)) then
+      begin
+        MsgBox('Failed to launch Remote Desktop editor. Verify mstsc is available and try again.', mbError, MB_OK);
+        WriteInstallerLog('Edit Shortcut Advanced: Exec(mstsc) failed exit=' + IntToStr(MstscResultCode));
+      end
+      else
+        WriteInstallerLog('Edit Shortcut Advanced: mstsc /edit launched for ' + SelectedShortcutPath);
+    end;
+  end;
+
   // Configure shortcut settings page based on which flow is entering it
   if CurPageID = Page_ShortcutSettings.ID then
   begin
@@ -7512,20 +7644,27 @@ begin
     if SelectedInstallMode = installModeEditShortcuts then
     begin
       if Assigned(lblShortcutSection) then
-      begin
-        if SelectedShortcutPath <> '' then
-          lblShortcutSection.Caption := 'Basic Shortcut Settings';
-      end;
-      // EditShortcuts path: always a single file, always show the shortcut name editor
-      ShowShortcutNameEdit(True);
-      if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := True;
-      // Pre-populate controls with the current settings from the selected .rdp file
+        lblShortcutSection.Caption := 'Basic Shortcut Settings';
+
+      // Single shortcut: show name editor and Advanced checkbox
       if SelectedShortcutPath <> '' then
       begin
+        ShowShortcutNameEdit(True);
+        if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := True;
         ReadShortcutSettingsFromRdpFile(SelectedShortcutPath);
-        // Set shortcut name from the selected file name (strip .rdp for display)
         if Assigned(edtShortcutName) then
           edtShortcutName.Text := ChangeFileExt(ExtractFileName(SelectedShortcutPath), '');
+      end
+      else
+      begin
+        // Multi-edit (2+ shortcuts): hide name editor and Advanced checkbox
+        ShowShortcutNameEdit(False);
+        if Assigned(chkShowMoreShortcutOptions) then chkShowMoreShortcutOptions.Visible := False;
+        if Assigned(lblMultiShortcutEditingNote) then
+          lblMultiShortcutEditingNote.Caption := 'These settings will be applied to each selected shortcut';
+        // Pre-populate from the first selected shortcut
+        if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
+          ReadShortcutSettingsFromRdpFile(SelectedShortcutPaths[0]);
       end;
     end
     else if (SelectedInstallMode = installModeInstall) and (CreateUserMode = createUserModeNew) then
@@ -7747,37 +7886,37 @@ begin
     begin
       if DoShowMstscEdit then
       begin
-        WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Editor Complete';
+        WizardForm.FinishedHeadingLabel.Caption := 'Advanced Shortcut Editing Complete';
         CompletionText :=
-          'The shortcut was opened in the Remote Desktop Connection app. Make your changes there.' + #13#10#13#10 +
-          'Important: Always click [Save] on the General tab.';
-        WriteInstallerLog('CurPageChanged: Showing shortcut editor completion message');
-
-        if Assigned(FinishedExampleImage) then
-        begin
-          FinishedExampleImage.Top := FinishedText.Top + ScaleY(100);
-          FinishedExampleImage.Width := ScaleX(142);
-          FinishedExampleImage.Height := ScaleY(150);
-          FinishedExampleImage.Stretch := False;
-          // Load the rdp_edit_save.bmp image from temp
-          try
-            ExtractTemporaryFile(FILE_RDPEDITSAVE_BMP);
-            FinishedExampleImage.Bitmap.LoadFromFile(ExpandConstant(TEMP_RDPEDITSAVE_BMP));
-          except
-            // If image fails to load, hide the control
-            FinishedExampleImage.Visible := False;
-          end;
-          FinishedExampleImage.Visible := True;
-          
-        end;
+          'Your shortcut has been updated and re-signed.' + #13#10#13#10 +
+          'You can now test the connection by double-clicking the shortcut on your Desktop.';
+        WriteInstallerLog('CurPageChanged: Showing advanced shortcut editor completion message');
       end
       else
       begin
-        WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Settings Updated';
-        CompletionText := 'Your shortcut settings have been saved to the .rdp file.';
-        WriteInstallerLog('CurPageChanged: Showing shortcut settings saved message (no mstsc edit)');
-        if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
+        // List which shortcuts were updated (single or multi)
+        CompletionText := 'Updated shortcut settings for:' + #13#10;
+        if (SelectedShortcutPath <> '') then
+          CompletionText := CompletionText + '- ' + ExtractFileName(SelectedShortcutPath) + #13#10
+        else if Assigned(SelectedShortcutPaths) then
+        begin
+          for i := 0 to SelectedShortcutPaths.Count - 1 do
+            CompletionText := CompletionText + '- ' + ExtractFileName(SelectedShortcutPaths[i]) + #13#10;
+        end;
+        CompletionText := CompletionText + #13#10 + 'You can now test the connection by double-clicking the shortcut on your Desktop.';
+
+        if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 1) then
+        begin
+          WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Settings Updated';
+          WriteInstallerLog('CurPageChanged: Showing multi-shortcut settings saved message (' + IntToStr(SelectedShortcutPaths.Count) + ' shortcuts)');
+        end
+        else
+        begin
+          WizardForm.FinishedHeadingLabel.Caption := 'Shortcut Settings Updated';
+          WriteInstallerLog('CurPageChanged: Showing single-shortcut settings saved message');
+        end;
       end;
+      if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
     end
     else
     begin
