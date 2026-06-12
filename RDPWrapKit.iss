@@ -97,6 +97,7 @@ procedure OnPrevShortcutPageClick(Sender: TObject); forward;
 procedure OnNextShortcutPageClick(Sender: TObject); forward;
 procedure OnShortcutCheckBoxClick(Sender: TObject); forward;
 procedure BuildEditShortcutAdvancedControls; forward;
+procedure UnSignRdpFile(const RdpPath: string); forward;
 procedure UpdateShortcutPageDisplay; forward;
 function IsValidPassword(const Password: string): String; forward;
 procedure OpenTermWrap(Sender: TObject); forward;
@@ -484,7 +485,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = 'stabledebug-v21-ps-dquote-fix';
+  BUILD_FINGERPRINT = '2026-06-12-2-34-27';
 
 // External Windows API declarations
 
@@ -1373,6 +1374,89 @@ begin
   LogInfo('SignRdpFile total [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('SignRdpFile');
 end;
+
+procedure UnSignRdpFile(const RdpPath: string);
+// Strips all signature-related lines (signscope, signature, alternate full address,
+// and orphaned base64 artifacts) from an RDP file.
+// This allows mstsc /edit to modify every field without signature validation
+// interference. The file will be re-signed after the user finishes editing.
+var
+  Lines: TStringList;
+  OutLines: TStringList;
+  i: Integer;
+  Line: string;
+  LowerLine: string;
+  StrippedCount: Integer;
+  OpTick: Cardinal;
+begin
+  LogEntry('UnSignRdpFile');
+  OpTick := GetTickCount;
+
+  if not FileExists(RdpPath) then
+  begin
+    LogWarn('UnSignRdpFile: File not found: ' + RdpPath);
+    LogExit('UnSignRdpFile');
+    exit;
+  end;
+
+  LogDebug('UnSignRdpFile: Reading ' + RdpPath);
+  Lines := TStringList.Create;
+  OutLines := TStringList.Create;
+  try
+    Lines.LoadFromFile(RdpPath);
+    StrippedCount := 0;
+
+    for i := 0 to Lines.Count - 1 do
+    begin
+      Line := Trim(Lines[i]);
+      if Line = '' then
+        continue;
+
+      LowerLine := LowerCase(Line);
+
+      // Strip signscope, signature, and alternate full address lines
+      if (Pos('signscope:', LowerLine) = 1) or
+         (Pos('signature:', LowerLine) = 1) or
+         (Pos('alternate full address:', LowerLine) = 1) then
+      begin
+        Inc(StrippedCount);
+        LogDebug('UnSignRdpFile: Stripped line: ' + Copy(Line, 1, 60));
+      end
+      // Strip orphaned base64-only lines (no colon at all — leftover artifact
+      // from previous signatures that used a different wrapping format)
+      else if Pos(':', Line) = 0 then
+      begin
+        // Verify it looks like pure base64 (A-Za-z0-9+/=) before stripping
+        if Length(Line) > 16 then
+        begin
+          Inc(StrippedCount);
+          LogDebug('UnSignRdpFile: Stripped orphaned base64 line: ' + Copy(Line, 1, 60));
+        end
+        else
+          OutLines.Add(Line);
+      end
+      else
+        OutLines.Add(Line);
+    end;
+
+    if StrippedCount > 0 then
+    begin
+      OutLines.SaveToFile(RdpPath);
+      LogInfo('UnSignRdpFile: Stripped ' + IntToStr(StrippedCount) +
+        ' signature lines from ' + ExtractFileName(RdpPath) +
+        ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    end
+    else
+      LogDebug('UnSignRdpFile: No signature lines found in ' + ExtractFileName(RdpPath) +
+        ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  finally
+    Lines.Free;
+    OutLines.Free;
+  end;
+
+  LogExit('UnSignRdpFile');
+end;
+
 
 // Ensures the RDPWrapKit code-signing cert exists, is trusted, and is registered
 // as a trusted RDP publisher in the Terminal Services policy.
@@ -2537,7 +2621,10 @@ end;
 procedure PreTrustRDPCertCurrentUser;
 var
   ResultCode: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('PreTrustRDPCertCurrentUser');
+  OpTick := GetTickCount;
   // Value 76 (0x4C) represents the device/resource trust flags
   ExecPowerShellHidden(
     '$ErrorActionPreference = ''Stop''; ' +
@@ -2556,23 +2643,33 @@ end;
 procedure AddDefenderExclusionForApp;
 var
   ResultCode: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('AddDefenderExclusionForApp');
+  OpTick := GetTickCount;
   // Ensure Defender exclusions are scoped to the two runtime DLLs only
   ExecPowerShellHidden(
     '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
     'try { $p = Get-MpPreference; foreach ($path in $paths) { if (-not ($p.ExclusionPath -contains $path)) { Add-MpPreference -ExclusionPath $path } } } catch { }',
     ResultCode);
+  LogDebug('AddDefenderExclusionForApp: exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('AddDefenderExclusionForApp');
 end;
 
 procedure RemoveDefenderExclusionForApp;
 var
   ResultCode: Integer;
+  OpTick: Cardinal;
 begin
+  LogEntry('RemoveDefenderExclusionForApp');
+  OpTick := GetTickCount;
   // Remove Defender exclusions for the two runtime DLLs during uninstall
   ExecPowerShellHidden(
     '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
     'try { foreach ($path in $paths) { Remove-MpPreference -ExclusionPath $path } } catch { }',
     ResultCode);
+  LogDebug('RemoveDefenderExclusionForApp: exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('RemoveDefenderExclusionForApp');
 end;
 
 // -----------------------------------------------------------------------------
@@ -2867,6 +2964,7 @@ var
   FindRec: TFindRec;
   DesktopPattern: string;
 begin
+  LogEntry('GetDesktopRdpFiles');
   FilesList := TStringList.Create;
   DesktopPattern := ExpandConstant('{userdesktop}\*.rdp');
 
@@ -2959,15 +3057,21 @@ end;
 
 procedure OnShortcutCheckBoxClick(Sender: TObject);
 begin
+  LogEntry('OnShortcutCheckBoxClick');
   // No action needed on click - validation happens in NextButtonClick
+  LogExit('OnShortcutCheckBoxClick');
 end;
 
 procedure BuildShortcutEditorControls;
 var
   i: Integer;
 begin
+  LogEntry('BuildShortcutEditorControls');
   if EditShortcutControlsBuilt then
+  begin
+    LogExit('BuildShortcutEditorControls');
     exit;
+  end;
 
   if ShortcutsPerPage = 0 then
     ShortcutsPerPage := 8;
@@ -3033,8 +3137,12 @@ end;
 
 procedure BuildEditShortcutAdvancedControls;
 begin
+  LogEntry('BuildEditShortcutAdvancedControls');
   if EditShortcutAdvancedControlsBuilt then
+  begin
+    LogExit('BuildEditShortcutAdvancedControls');
     exit;
+  end;
 
   // Instruction text explaining what to do
   EditShortcutAdvancedLabel := TLabel.Create(Page_EditShortcutAdvanced);
@@ -3066,6 +3174,7 @@ procedure UpdateShortcutPageDisplay;
 var
   i, PageCount, StartIdx, EndIdx, VisIndex, BaseTop, RowHeight: Integer;
 begin
+  LogEntry('UpdateShortcutPageDisplay');
   BaseTop := ShortcutHeaderLabel.Top + ScaleY(26);
   RowHeight := ScaleY(24);
 
@@ -3116,19 +3225,23 @@ end;
 
 procedure OnPrevShortcutPageClick(Sender: TObject);
 begin
+  LogEntry('OnPrevShortcutPageClick');
   if CurrentShortcutPage > 0 then
     Dec(CurrentShortcutPage);
   UpdateShortcutPageDisplay;
+  LogExit('OnPrevShortcutPageClick');
 end;
 
 procedure OnNextShortcutPageClick(Sender: TObject);
 var
   PageCount: Integer;
 begin
+  LogEntry('OnNextShortcutPageClick');
   PageCount := (DesktopRdpFiles.Count + ShortcutsPerPage - 1) div ShortcutsPerPage;
   if CurrentShortcutPage < PageCount - 1 then
     Inc(CurrentShortcutPage);
   UpdateShortcutPageDisplay;
+  LogExit('OnNextShortcutPageClick');
 end;
 
 procedure SetUserControlsEnabled(Enabled: Boolean);
@@ -3188,15 +3301,18 @@ procedure OnPasswordEditChange(Sender: TObject);
 var
   idx: Integer;
 begin
+  LogEntry('OnPasswordEditChange');
   idx := FindUserIndexFromEdit(TEdit(Sender));
   if idx >= 0 then
     UserPasswordStatus[idx].Visible := False;
+  LogExit('OnPasswordEditChange');
 end;
 
 procedure OnUserCheckBoxClick(Sender: TObject);
 var
   idx: Integer;
 begin
+  LogEntry('OnUserCheckBoxClick');
   idx := FindUserIndexFromCheckBox(TCheckBox(Sender));
   if idx >= 0 then
   begin
@@ -3207,6 +3323,7 @@ begin
       UserPasswordStatus[idx].Visible := False;
     end;
   end;
+  LogExit('OnUserCheckBoxClick');
 end;
 
 procedure SyncSetupOptionHintStates();
@@ -3219,6 +3336,7 @@ end;
 
 procedure OnCreateRdpShortcutsClick(Sender: TObject);
 begin
+  LogEntry('OnCreateRdpShortcutsClick');
   if Assigned(rbCreateUsers) then
     rbCreateUsers.Enabled := chkCreateRdpShortcuts.Checked;
   if Assigned(rbUseExistingUsers) then
@@ -3233,6 +3351,8 @@ begin
       CreateUserMode := createUserModeExisting;
   end;
   SyncSetupOptionHintStates();
+  LogDebug('OnCreateRdpShortcutsClick: DoCreateRdpShortcuts=' + BoolToStr(DoCreateRdpShortcuts) + ' CreateUserMode=' + IntToStr(CreateUserMode));
+  LogExit('OnCreateRdpShortcutsClick');
 end;
 
   procedure OnInstallModeChange(Sender: TObject);
@@ -3248,6 +3368,8 @@ end;
 
 procedure OnUseAllMonitorsClick(Sender: TObject);
 begin
+  LogEntry('OnUseAllMonitorsClick');
+  LogDebug('OnUseAllMonitorsClick: checked=' + BoolToStr(Assigned(chkUseAllMonitors) and chkUseAllMonitors.Checked));
   if Assigned(chkFullScreen) then
   begin
     if chkUseAllMonitors.Checked then
@@ -3259,10 +3381,13 @@ begin
     else
       chkFullScreen.Enabled := True;
   end;
+  LogExit('OnUseAllMonitorsClick');
 end;
 
 procedure OnFullScreenClick(Sender: TObject);
 begin
+  LogEntry('OnFullScreenClick');
+  LogDebug('OnFullScreenClick: checked=' + BoolToStr(Assigned(chkFullScreen) and chkFullScreen.Checked));
   if Assigned(cboResolution) then
     cboResolution.Enabled := not chkFullScreen.Checked;
   // When full screen is forced, hide the custom size inputs; otherwise restore them
@@ -3275,19 +3400,28 @@ begin
   end
   else
     OnResolutionChange(nil);
+  LogExit('OnFullScreenClick');
 end;
 
 procedure OnResolutionChange(Sender: TObject);
 var
   IsCustom: Boolean;
 begin
-  if not Assigned(cboResolution) then exit;
+  LogEntry('OnResolutionChange');
+  if not Assigned(cboResolution) then
+  begin
+    LogDebug('OnResolutionChange: cboResolution not assigned, skipping');
+    LogExit('OnResolutionChange');
+    exit;
+  end;
   IsCustom := (cboResolution.ItemIndex >= 0) and
               (cboResolution.Items[cboResolution.ItemIndex] = 'Custom');
+  LogDebug('OnResolutionChange: IsCustom=' + BoolToStr(IsCustom));
   if Assigned(lblCustomWidth)  then lblCustomWidth.Visible  := IsCustom;
   if Assigned(edtCustomWidth)  then edtCustomWidth.Visible  := IsCustom;
   if Assigned(lblCustomHeight) then lblCustomHeight.Visible := IsCustom;
   if Assigned(edtCustomHeight) then edtCustomHeight.Visible := IsCustom;
+  LogExit('OnResolutionChange');
 end;
 
 function IsTermWrapInstalled(): Boolean;
@@ -3363,6 +3497,7 @@ var
   DestName: string;
   Saved: Boolean;
 begin
+  LogEntry('OnViewLogButtonClick');
   WriteInstallerLog('User clicked Save Install Log button');
   DestName := ExpandConstant('{userdesktop}\RDPWrapKit_install.log');
   Saved := CopyFile(InstallLogPath, DestName, False);
@@ -3370,13 +3505,17 @@ begin
     MsgBox('File RDPWrapKit_install.log was saved to your Desktop', mbInformation, MB_OK)
   else
     MsgBox('Failed to save install log to the Desktop location.', mbError, MB_OK);
+  LogExit('OnViewLogButtonClick');
 end;
 
 procedure OnPasswordResetLinkClick(Sender: TObject);
 var
   ResultCode: Integer;
 begin
+  LogEntry('OnPasswordResetLinkClick');
   Exec('control.exe', 'userpasswords2', '', SW_SHOW, ewNoWait, ResultCode);
+  LogDebug('OnPasswordResetLinkClick: launched, exit=' + IntToStr(ResultCode));
+  LogExit('OnPasswordResetLinkClick');
 end;
 
 procedure BuildCreateShortcutsControls;
@@ -3385,9 +3524,15 @@ var
   TopPos: Integer;
   BottomPos: Integer;
 begin
+  LogEntry('BuildCreateShortcutsControls');
   // Avoid building controls multiple times (prevents duplicate buttons/labels)
   if CreateShortcutsControlsBuilt then
+  begin
+    LogDebug('BuildCreateShortcutsControls: already built, skipping');
+    LogExit('BuildCreateShortcutsControls');
     exit;
+  end;
+  LogDebug('BuildCreateShortcutsControls: building for ' + IntToStr(LocalUsersList.Count) + ' users');
   TopPos := ScaleY(10);
 
   // Default users-per-page
@@ -3506,8 +3651,13 @@ procedure UpdateUsersPageDisplay;
 var
   i, PageCount, StartIdx, EndIdx, VisIndex, RowHeight, BaseTop: Integer;
 begin
+  LogEntry('UpdateUsersPageDisplay');
   if LocalUsersList.Count = 0 then
+  begin
+    LogDebug('UpdateUsersPageDisplay: no users, skipping');
+    LogExit('UpdateUsersPageDisplay');
     exit;
+  end;
 
   PageCount := (LocalUsersList.Count + UsersPerPage - 1) div UsersPerPage;
   if CurrentUserPage < 0 then CurrentUserPage := 0;
@@ -3564,9 +3714,11 @@ end;
 
 procedure OnPrevUsersPageClick(Sender: TObject);
 begin
+  LogEntry('OnPrevUsersPageClick');
   if CurrentUserPage > 0 then
     Dec(CurrentUserPage);
   UpdateUsersPageDisplay;
+  LogExit('OnPrevUsersPageClick');
 end;
 
 procedure OnNextUsersPageClick(Sender: TObject);
@@ -3578,6 +3730,8 @@ var
   HasErrors: Boolean;
   Password: string;
 begin
+  LogEntry('OnNextUsersPageClick');
+  LogDebug('OnNextUsersPageClick: currentPage=' + IntToStr(CurrentUserPage));
   PageCount := (LocalUsersList.Count + UsersPerPage - 1) div UsersPerPage;
 
   StartIdx := CurrentUserPage * UsersPerPage;
@@ -3663,6 +3817,7 @@ var
   CurrentUser: string;
   TempPassword: string;
 begin
+  LogEntry('UserAlreadyEntered');
   Result := False;
   for i := 0 to UsersList.Count - 1 do
   begin
@@ -3670,9 +3825,13 @@ begin
     if CompareText(CurrentUser, UserName) = 0 then
     begin
       Result := True;
+      LogDebug('UserAlreadyEntered: user=' + UserName + ' already entered at index ' + IntToStr(i));
+      LogExit('UserAlreadyEntered');
       exit;
     end;
   end;
+  LogDebug('UserAlreadyEntered: user=' + UserName + ' not found in list');
+  LogExit('UserAlreadyEntered');
 end;
 
 function IsValidUsername(const UserName: string): String;
@@ -3681,6 +3840,7 @@ var
   i: Integer;
   Ch: Char;
 begin
+  LogEntry('IsValidUsername');
   Result := '';  // Empty string means valid
   
   UserName := Trim(UserName);
@@ -3714,6 +3874,7 @@ var
   i: Integer;
   c: Char;
 begin
+  LogEntry('IsValidPassword');
   Result := '';  // Empty string means valid
   
   if Length(Password) = 0 then
@@ -3743,29 +3904,39 @@ function ValidateLocalCredential(const UserName, Password: string): Boolean;
 var
   Token: Cardinal;
 begin
+  LogEntry('ValidateLocalCredential');
   // Fast local credential check via LogonUser; avoids slow PowerShell/WinRM
   Token := 0;
   Result := LogonUser(UserName, '.', Password, 2, 0, Token);
   if Token <> 0 then
     CloseHandle(Token);
+  LogDebug('ValidateLocalCredential: user=' + UserName + ' result=' + BoolToStr(Result));
+  LogExit('ValidateLocalCredential');
 end;
 
 function ShouldInstallFiles: Boolean;
 begin
+  LogEntry('ShouldInstallFiles');
   // Only install bundled TermWrap files when Install TermWrap is selected or when the
   // user explicitly selected "Install TermWrap" on the welcome/options page.
   Result := DoInstallTermWrap;
+  LogDebug('ShouldInstallFiles: DoInstallTermWrap=' + BoolToStr(DoInstallTermWrap) + ' returning ' + BoolToStr(Result));
+  LogExit('ShouldInstallFiles');
 end;
 
 function ShouldApplyRegistryEntries: Boolean;
 begin
+  LogEntry('ShouldApplyRegistryEntries');
   // Edit Shortcut Settings mode should only launch mstsc /edit and avoid
   // unrelated installer-side registry changes.
   Result := SelectedInstallMode <> installModeEditShortcuts;
+  LogDebug('ShouldApplyRegistryEntries: SelectedInstallMode=' + IntToStr(SelectedInstallMode) + ' returning ' + BoolToStr(Result));
+  LogExit('ShouldApplyRegistryEntries');
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
+  LogEntry('ShouldSkipPage');
   Result := False;
   
   // Always skip directory selection page
@@ -3831,9 +4002,12 @@ end;
 
 procedure SecureCleanupTempFiles(const UserName: string);
 begin
+  LogEntry('SecureCleanupTempFiles');
   // Securely delete temporary files that contained sensitive data
   DeleteFile(TempFile('enc_' + UserName + '.txt'));
   DeleteFile(TempFile('create_rdp_' + UserName + '.ps1'));
+  LogDebug('SecureCleanupTempFiles: cleaned up for user=' + UserName);
+  LogExit('SecureCleanupTempFiles');
 end;
 
 function EncryptPasswordToFile(const Password, UserName: string): string;
@@ -3948,7 +4122,10 @@ var
   EncTextRaw: AnsiString;
   EncText: string;
   HasEnc: Boolean;
+  OpTick: Cardinal;
 begin
+  LogEntry('WriteRDPFileDirect');
+  OpTick := GetTickCount;
   Result := False;
   EncText := '';
   HasEnc := False;
@@ -4035,6 +4212,8 @@ var
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
 begin
+  LogEntry('GenerateRDPPowerShellScript');
+  LogDebug('GenerateRDPPowerShellScript: user=' + UserName + ' path=' + RDPPath);
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
@@ -4721,7 +4900,14 @@ var
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
   ResIndex, ResultCode: Integer;
 begin
-  if not FileExists(RdpPath) then exit;
+  LogEntry('ReadShortcutSettingsFromRdpFile');
+  LogDebug('ReadShortcutSettingsFromRdpFile: path=' + RdpPath);
+  if not FileExists(RdpPath) then
+  begin
+    LogDebug('ReadShortcutSettingsFromRdpFile: file not found, skipping');
+    LogExit('ReadShortcutSettingsFromRdpFile');
+    exit;
+  end;
 
   // Use PowerShell to read the file regardless of encoding (UTF-16 LE or UTF-8)
   // and emit key=value pairs for the settings we care about.
@@ -6332,6 +6518,8 @@ var
   NewShortcutBase: string;
   NewShortcutPath: string;
 begin
+  LogEntry('NextButtonClick');
+  LogDebug('NextButtonClick: CurPageID=' + IntToStr(CurPageID) + ' (' + GetPageNameById(CurPageID) + ')');
   Result := True;
 
   if CurPageID = wpFinished then
@@ -6536,8 +6724,36 @@ begin
         end;
       end;
 
-      // Settings will be applied during the installing step (after progress bar is visible)
-      // WriteShortcutSettingsToRdpFile moved to ssPostInstall to avoid blocking UI before progress bar shows
+      // Write shortcut settings NOW (NextButtonClick fires for all modes, unlike ssPostInstall
+      // which is skipped by Inno Setup when there are no files to install).
+      // Single shortcut: write + optionally strip signature for advanced mode
+      if SelectedShortcutPath <> '' then
+      begin
+        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+        WriteInstallerLog('Edit Shortcut: Settings written to ' + SelectedShortcutPath);
+        if DoShowMstscEdit then
+        begin
+          WriteInstallerLog('Edit Shortcut: Advanced mode - stripping signature for mstsc edit');
+          UnSignRdpFile(SelectedShortcutPath);
+        end;
+      end
+      else if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
+      begin
+        // Multi-edit: write to all selected shortcuts, then strip all if advanced
+        for i := 0 to SelectedShortcutPaths.Count - 1 do
+        begin
+          WriteInstallerLog('Edit Shortcut: Applying settings to (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
+          WriteShortcutSettingsToRdpFile(SelectedShortcutPaths[i]);
+        end;
+        if DoShowMstscEdit then
+        begin
+          for i := 0 to SelectedShortcutPaths.Count - 1 do
+          begin
+            WriteInstallerLog('Edit Shortcut: Stripping signature from (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
+            UnSignRdpFile(SelectedShortcutPaths[i]);
+          end;
+        end;
+      end;
     end;
   end
   else if CurPageID = Page_EditShortcutAdvanced.ID then
@@ -6782,6 +6998,8 @@ var
   UserName: string;
   Password: string;
 begin
+  LogEntry('BackButtonClick');
+  LogDebug('BackButtonClick: CurPageID=' + IntToStr(CurPageID) + ' (' + GetPageNameById(CurPageID) + ')');
   Result := True;
   
   // If user clicks Back on the UserPage and there are users in the list,
@@ -6832,13 +7050,18 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   VCRedistPath: string;
-  MstscPath: string;
   i: Integer;
   UserInfo: string;
   UserName: string;
   Password: string;
   PortNumber: Cardinal;
+  StepName: string;
 begin
+  if CurStep = ssInstall then StepName := 'ssInstall'
+  else if CurStep = ssPostInstall then StepName := 'ssPostInstall'
+  else StepName := 'ssDone';
+  LogEntry('CurStepChanged');
+  LogDebug('CurStepChanged: CurStep=' + StepName + ' SelectedInstallMode=' + IntToStr(SelectedInstallMode));
   if CurStep = ssInstall then
   begin
     LogSectionHeader('STEP TRANSITION: ssInstall');
@@ -7167,34 +7390,12 @@ begin
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      SetStepInProgress(StepCreateShortcuts, 'Applying shortcut settings');
-      StatusOverlay.Caption := 'Applying shortcut settings...';
-
-      // Write settings + sign for ALL selected shortcuts
-      if SelectedShortcutPath <> '' then
-      begin
-        // Single shortcut
-        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
-      end
-      else if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
-      begin
-        // Multi-edit: write to all selected shortcuts
-        for i := 0 to SelectedShortcutPaths.Count - 1 do
-        begin
-          WriteInstallerLog('Edit Shortcut: Applying settings to (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
-          WriteShortcutSettingsToRdpFile(SelectedShortcutPaths[i]);
-        end;
-      end
-      else
-        WriteInstallerLog('Edit Shortcut: No shortcut paths selected!');
-
-      // mstsc /edit is now launched on the Advanced page (CurPageChanged) so the
-      // editor opens while the user sees the screenshot and instructions.
-      // Re-sign happens when user clicks Next on the Advanced page.
-      if DoShowMstscEdit then
-        WriteInstallerLog('Edit Shortcut: Advanced mode - mstsc will open on Advanced page')
-      else
-        WriteInstallerLog('Edit Shortcut: mstsc editor skipped (non-advanced mode)');
+      // NOTE: WriteShortcutSettingsToRdpFile + UnSignRdpFile are now handled in
+      // NextButtonClick(Page_ShortcutSettings.ID) because CurStepChanged is NOT
+      // called by Inno Setup when no [Files] entries are selected (edit mode).
+      // This block only sets up the progress bar UI for the Installing page
+      // (which may still appear briefly during page transitions).
+      SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
       StatusOverlay.Caption := 'Shortcut settings applied.';
       SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
     end
@@ -7468,6 +7669,8 @@ end;
 // When hiding, the multi-shortcut note label is shown in their place.
 procedure ShowShortcutNameEdit(const ShowNameEdit: Boolean);
 begin
+  LogEntry('ShowShortcutNameEdit');
+  LogDebug('ShowShortcutNameEdit: ShowNameEdit=' + BoolToStr(ShowNameEdit));
   if Assigned(lblShortcutName) then
     lblShortcutName.Visible := ShowNameEdit;
   if Assigned(edtShortcutName) then
@@ -7476,6 +7679,7 @@ begin
     lblShortcutExtension.Visible := ShowNameEdit;
   if Assigned(lblMultiShortcutEditingNote) then
     lblMultiShortcutEditingNote.Visible := not ShowNameEdit;
+  LogExit('ShowShortcutNameEdit');
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -7501,7 +7705,11 @@ var
   WrapperVersion: string;
   PortNumber: Cardinal;
   ListenerStatus: string;
+  PageName: string;
 begin
+  LogEntry('CurPageChanged');
+  PageName := GetPageNameById(CurPageID);
+  LogDebug('CurPageChanged: CurPageID=' + IntToStr(CurPageID) + ' (' + PageName + ') SelectedInstallMode=' + IntToStr(SelectedInstallMode));
   // Suppress grey flash by hiding page content during the VCL style paint cycle.
   if (CurPageID = Page_InstallOptions.ID) or
      (CurPageID = UserPage.ID) or

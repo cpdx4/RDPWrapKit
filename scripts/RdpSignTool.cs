@@ -114,7 +114,8 @@ namespace RdpWrapKit
 
         private const string CERT_SUBJECT = "CN=RDPWrapKit: Only trust if connecting to 127.0.0.2";
 
-        private const string SIGNSCOPE =
+        // Base fields that always appear in the signscope (present in all RDP files).
+        private const string BASE_SIGNSCOPE =
             "Full Address,Alternate Full Address,Use Redirection Server Name," +
             "Negotiate Security Layer,EnableCredSspSupport,DisableConnectionSharing," +
             "AutoReconnection Enabled,GatewayHostname,GatewayUsageMethod," +
@@ -123,6 +124,13 @@ namespace RdpWrapKit
             "Prompt For Credentials,Authentication Level,AudioMode,RedirectDrives," +
             "RedirectPrinters,RedirectSmartCards,RedirectClipboard,DrivesToRedirect," +
             "RedirectWebAuthn";
+
+        // Extra fields that MSTSC adds when saving; only included in the signscope
+        // when they actually exist in the input RDP file.
+        private static readonly string[] ExtraScopeFields = {
+            "RedirectCOMPorts", "RedirectPOSDevices", "RDGIsKDCProxy",
+            "KDCProxyName", "EnableRdsAadAuth"
+        };
 
         // ---- Field type map (lower-case key -> 's' = string, 'i' = integer) ---
 
@@ -152,9 +160,14 @@ namespace RdpWrapKit
             FieldTypeMap.Add("audiomode", 'i');
             FieldTypeMap.Add("redirectdrives", 'i');
             FieldTypeMap.Add("redirectprinters", 'i');
+            FieldTypeMap.Add("redirectcomports", 'i');
             FieldTypeMap.Add("redirectsmartcards", 'i');
+            FieldTypeMap.Add("redirectposdevices", 'i');
             FieldTypeMap.Add("redirectclipboard", 'i');
             FieldTypeMap.Add("drivestoredirect", 's');
+            FieldTypeMap.Add("rdgiskdcproxy", 'i');
+            FieldTypeMap.Add("kdcproxyname", 's');
+            FieldTypeMap.Add("enablerdsaadauth", 'i');
             FieldTypeMap.Add("redirectwebauthn", 'i');
 
             StripKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -372,7 +385,20 @@ namespace RdpWrapKit
                 altEntry.Value = altFullAddress;
                 fieldMap["alternate full address"] = altEntry;
 
-                string[] scopeFields = SIGNSCOPE.Split(',');
+                // Dynamically build signscope: base fields always included,
+                // extra MSTSC-only fields included only if they exist in the file.
+                var effectiveScopeFields = new List<string>();
+                string[] baseFields = BASE_SIGNSCOPE.Split(',');
+                effectiveScopeFields.AddRange(baseFields);
+                foreach (string extraField in ExtraScopeFields)
+                {
+                    string extraKey = extraField.Trim().ToLowerInvariant();
+                    if (fieldMap.ContainsKey(extraKey))
+                        effectiveScopeFields.Add(extraField.Trim());
+                }
+                string effectiveSignscope = string.Join(",", effectiveScopeFields);
+
+                string[] scopeFields = effectiveSignscope.Split(',');
 
                 StringBuilder sb = new StringBuilder();
                 foreach (string sf in scopeFields)
@@ -401,7 +427,7 @@ namespace RdpWrapKit
 
                     sb.Append(key + ":" + typ + ":" + val + "\r\n");
                 }
-                sb.Append("signscope:s:" + SIGNSCOPE + "\r\n");
+                sb.Append("signscope:s:" + effectiveSignscope + "\r\n");
                 sb.Append('\0'); // null terminator
 
                 byte[] canonicalBytes = Encoding.Unicode.GetBytes(sb.ToString());
@@ -433,7 +459,7 @@ namespace RdpWrapKit
                 // Build output lines
                 var outLines = new List<string>(baseLines);
                 outLines.Add("alternate full address:s:" + altFullAddress);
-                outLines.Add("signscope:s:" + SIGNSCOPE);
+                outLines.Add("signscope:s:" + effectiveSignscope);
                 outLines.Add("signature:s:" + sigB64);
 
                 string outText = string.Join("\r\r\n", outLines) + "\r\r\n";
