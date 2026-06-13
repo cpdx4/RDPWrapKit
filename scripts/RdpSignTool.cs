@@ -114,22 +114,46 @@ namespace RdpWrapKit
 
         private const string CERT_SUBJECT = "CN=RDPWrapKit: Only trust if connecting to 127.0.0.2";
 
-        // Base fields that always appear in the signscope (present in all RDP files).
-        private const string BASE_SIGNSCOPE =
-            "Full Address,Alternate Full Address,Use Redirection Server Name," +
-            "Negotiate Security Layer,EnableCredSspSupport,DisableConnectionSharing," +
-            "AutoReconnection Enabled,GatewayHostname,GatewayUsageMethod," +
-            "GatewayProfileUsageMethod,GatewayCredentialsSource,PromptCredentialOnce," +
-            "Alternate Shell,Shell Working Directory,RemoteApplicationMode," +
-            "Prompt For Credentials,Authentication Level,AudioMode,RedirectDrives," +
-            "RedirectPrinters,RedirectSmartCards,RedirectClipboard,DrivesToRedirect," +
-            "RedirectWebAuthn";
-
-        // Extra fields that MSTSC adds when saving; only included in the signscope
-        // when they actually exist in the input RDP file.
-        private static readonly string[] ExtraScopeFields = {
-            "RedirectCOMPorts", "RedirectPOSDevices", "RDGIsKDCProxy",
-            "KDCProxyName", "EnableRdsAadAuth"
+        // Microsoft's canonical list of all signable RDP fields in their expected order.
+        // For each field that exists in the file body, include it in the signscope
+        // at this canonical position. Fields not in this list (e.g. redirectlocation,
+        // camerastoredirect) are never signed.
+        private static readonly CanonicalFieldInfo[] CANONICAL_SIGNSCOPE = {
+            new CanonicalFieldInfo("full address",               "Full Address"),
+            new CanonicalFieldInfo("alternate full address",      "Alternate Full Address"),
+            new CanonicalFieldInfo("use redirection server name", "Use Redirection Server Name"),
+            new CanonicalFieldInfo("negotiate security layer",    "Negotiate Security Layer"),
+            new CanonicalFieldInfo("enablecredsspsupport",        "EnableCredSspSupport"),
+            new CanonicalFieldInfo("disableconnectionsharing",    "DisableConnectionSharing"),
+            new CanonicalFieldInfo("autoreconnection enabled",    "AutoReconnection Enabled"),
+            new CanonicalFieldInfo("gatewayhostname",             "GatewayHostname"),
+            new CanonicalFieldInfo("gatewayusagemethod",          "GatewayUsageMethod"),
+            new CanonicalFieldInfo("gatewayprofileusagemethod",   "GatewayProfileUsageMethod"),
+            new CanonicalFieldInfo("gatewaycredentialssource",    "GatewayCredentialsSource"),
+            new CanonicalFieldInfo("promptcredentialonce",        "PromptCredentialOnce"),
+            new CanonicalFieldInfo("alternate shell",             "Alternate Shell"),
+            new CanonicalFieldInfo("shell working directory",     "Shell Working Directory"),
+            new CanonicalFieldInfo("remoteapplicationprogram",    "RemoteApplicationProgram"),
+            new CanonicalFieldInfo("remoteapplicationmode",       "RemoteApplicationMode"),
+            new CanonicalFieldInfo("remoteapplicationguid",       "RemoteApplicationGuid"),
+            new CanonicalFieldInfo("remoteapplicationname",       "RemoteApplicationName"),
+            new CanonicalFieldInfo("remoteapplicationcmdline",    "RemoteApplicationCmdLine"),
+            new CanonicalFieldInfo("prompt for credentials",      "Prompt For Credentials"),
+            new CanonicalFieldInfo("authentication level",        "Authentication Level"),
+            new CanonicalFieldInfo("audiomode",                   "AudioMode"),
+            new CanonicalFieldInfo("redirectdrives",              "RedirectDrives"),
+            new CanonicalFieldInfo("redirectprinters",            "RedirectPrinters"),
+            new CanonicalFieldInfo("redirectcomports",            "RedirectCOMPorts"),
+            new CanonicalFieldInfo("redirectsmartcards",          "RedirectSmartCards"),
+            new CanonicalFieldInfo("redirectposdevices",          "RedirectPOSDevices"),
+            new CanonicalFieldInfo("redirectclipboard",           "RedirectClipboard"),
+            new CanonicalFieldInfo("devicestoredirect",           "DevicesToRedirect"),
+            new CanonicalFieldInfo("drivestoredirect",            "DrivesToRedirect"),
+            new CanonicalFieldInfo("loadbalanceinfo",             "LoadBalanceInfo"),
+            new CanonicalFieldInfo("rdgiskdcproxy",               "RDGIsKDCProxy"),
+            new CanonicalFieldInfo("kdcproxyname",                "KDCProxyName"),
+            new CanonicalFieldInfo("enablerdsaadauth",            "EnableRdsAadAuth"),
+            new CanonicalFieldInfo("redirectwebauthn",            "RedirectWebAuthn"),
         };
 
         // ---- Field type map (lower-case key -> 's' = string, 'i' = integer) ---
@@ -154,7 +178,12 @@ namespace RdpWrapKit
             FieldTypeMap.Add("promptcredentialonce", 'i');
             FieldTypeMap.Add("alternate shell", 's');
             FieldTypeMap.Add("shell working directory", 's');
+            FieldTypeMap.Add("remoteapplicationprogram", 's');
             FieldTypeMap.Add("remoteapplicationmode", 'i');
+            FieldTypeMap.Add("remoteapplicationguid", 's');
+            FieldTypeMap.Add("remoteapplicationname", 's');
+            FieldTypeMap.Add("remoteapplicationcmdline", 's');
+            FieldTypeMap.Add("loadbalanceinfo", 's');
             FieldTypeMap.Add("prompt for credentials", 'i');
             FieldTypeMap.Add("authentication level", 'i');
             FieldTypeMap.Add("audiomode", 'i');
@@ -165,6 +194,7 @@ namespace RdpWrapKit
             FieldTypeMap.Add("redirectposdevices", 'i');
             FieldTypeMap.Add("redirectclipboard", 'i');
             FieldTypeMap.Add("drivestoredirect", 's');
+            FieldTypeMap.Add("devicestoredirect", 's');
             FieldTypeMap.Add("rdgiskdcproxy", 'i');
             FieldTypeMap.Add("kdcproxyname", 's');
             FieldTypeMap.Add("enablerdsaadauth", 'i');
@@ -326,6 +356,7 @@ namespace RdpWrapKit
                         string key = binaryMatch.Groups[1].Value.Trim().ToLowerInvariant();
                         if (!StripKeys.Contains(key))
                             baseLines.Add(binaryMatch.Groups[1].Value.Trim() + ":b:" + binaryMatch.Groups[2].Value.Trim().ToUpperInvariant());
+                        // Binary fields (password 51:b) are NEVER in signscope
                     }
                     else
                     {
@@ -385,16 +416,14 @@ namespace RdpWrapKit
                 altEntry.Value = altFullAddress;
                 fieldMap["alternate full address"] = altEntry;
 
-                // Dynamically build signscope: base fields always included,
-                // extra MSTSC-only fields included only if they exist in the file.
+                // Build signscope from Microsoft's canonical field list.
+                // Only include fields that actually exist in the file body.
+                // This matches rdpsign.exe behavior exactly — same fields, same canonical order.
                 var effectiveScopeFields = new List<string>();
-                string[] baseFields = BASE_SIGNSCOPE.Split(',');
-                effectiveScopeFields.AddRange(baseFields);
-                foreach (string extraField in ExtraScopeFields)
+                foreach (CanonicalFieldInfo cfi in CANONICAL_SIGNSCOPE)
                 {
-                    string extraKey = extraField.Trim().ToLowerInvariant();
-                    if (fieldMap.ContainsKey(extraKey))
-                        effectiveScopeFields.Add(extraField.Trim());
+                    if (fieldMap.ContainsKey(cfi.Key))
+                        effectiveScopeFields.Add(cfi.DisplayName);
                 }
                 string effectiveSignscope = string.Join(",", effectiveScopeFields);
 
@@ -598,6 +627,17 @@ namespace RdpWrapKit
             public string Name;
             public char Type;
             public string Value;
+        }
+
+        private struct CanonicalFieldInfo
+        {
+            public string Key;
+            public string DisplayName;
+            public CanonicalFieldInfo(string key, string displayName)
+            {
+                Key = key;
+                DisplayName = displayName;
+            }
         }
     }
 }
