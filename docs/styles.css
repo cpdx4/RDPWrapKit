@@ -41,7 +41,7 @@ a {
 
 .hero {
   position: relative;
-  min-height: 88vh;
+  min-height: 70vh;
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--border);
@@ -641,4 +641,34 @@ h2 {
 .quickstart-download-btn svg {
   width: 0.95rem;
   height: 0.95rem;
+}
+
+.antivirus-note {
+  margin: 1.8rem auto 0;
+  max-width: 620px;
+  padding: 0.7rem 1rem;
+  background: rgba(110, 125, 147, 0.06);
+  border: 1px solid rgba(110, 125, 147, 0.15);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.55;
+}
+
+.antivirus-note p {
+  margin: 0;
+}
+
+.antivirus-note a {
+  color: var(--muted);
+  text-decoration: underline;
+  text-decoration-color: rgba(110, 125, 147, 0.35);
+  text-underline-offset: 2px;
+  transition: color 0.2s ease, text-decoration-color 0.2s ease;
+}
+
+.antivirus-note a:hover {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
 }

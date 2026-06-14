@@ -2,12 +2,11 @@
 
 # RDPWrapKit
 
-### The all-in-one installer for local RDP setup
-
-**Problem:** Local RDP setups are complex, prone to errors, and require upkeep.  
-**Solution:** RDPWrapKit bundles the community's best tools into a single installer that just works.
+### Setting up local RDP is painful. I'm a dad who created this all-in-one installer that *even an 8-year-old can use.*
 
 [![Download RDPWrapKit](https://img.shields.io/badge/Download-RDPWrapKit-blue?style=for-the-badge)](https://github.com/cpdx4/RDPWrapKit/releases/latest/download/RDPWrapKit-Setup.exe)
+
+**Antivirus note:**<br>Small open source projects often trigger antivirus warnings due to low download counts. These typically resolve as adoption increases. You can verify safety via the [VirusTotal analysis](https://www.virustotal.com/gui/file/3047cbadfdf35da043125baed7a0700f02140e51115cc9c8a709bd0b04601ff5?nocache=1), review the [source code](https://github.com/cpdx4/RDPWrapKit/blob/main/RDPWrapKit.iss) directly, or report specific alerts as [issues](https://github.com/cpdx4/RDPWrapKit/issues).
 
 </div>
 
