@@ -1240,11 +1240,15 @@ end;
 
 // Execute a PowerShell command and capture stdout to a temp file, returning
 // the trimmed output as a string. Returns empty string on failure.
+// NOTE: Temp file usage is required because Exec() does not return stdout.
+// All captured output is logged to the main installer log before the file
+// is deleted, so no external log files remain.
 function GetPSOutput(const Command: string): string;
 var
   PSPath: string;
   RC: Integer;
   SL: TStringList;
+  j: Integer;
   OpTick: Cardinal;
 begin
   LogEntry('GetPSOutput');
@@ -1260,20 +1264,35 @@ begin
     try
       SL.LoadFromFile(PSPath);
       Result := Trim(SL.Text);
+      // Log captured output to main installer log
+      if Length(Result) > 0 then
+      begin
+        LogDebug('GetPSOutput (' + IntToStr(SL.Count) + ' lines):');
+        for j := 0 to SL.Count - 1 do
+          LogDebug('  ' + SL[j]);
+      end
+      else
+        LogDebug('GetPSOutput: output file empty');
     finally
       SL.Free;
       DeleteFile(PSPath);
     end;
-  end;
+  end
+  else
+    LogDebug('GetPSOutput: no output (RC=' + IntToStr(RC) + ')');
   LogDebug('GetPSOutput exit=' + IntToStr(RC) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('GetPSOutput');
 end;
 
 // Execute PowerShell and capture both stdout/stderr output regardless of exit code.
+// NOTE: Temp file usage is required because Exec() does not return stdout.
+// All captured output is logged to the main installer log before the file
+// is deleted, so no external log files remain.
 function ExecPSCaptureAll(const Command: string; var ResultCode: Integer): string;
 var
   PSPath: string;
   SL: TStringList;
+  j: Integer;
   WrappedCommand: string;
   OpTick: Cardinal;
 begin
@@ -1292,11 +1311,22 @@ begin
     try
       SL.LoadFromFile(PSPath);
       Result := Trim(SL.Text);
+      // Log captured output to main installer log
+      if Length(Result) > 0 then
+      begin
+        LogDebug('ExecPSCaptureAll (' + IntToStr(SL.Count) + ' lines):');
+        for j := 0 to SL.Count - 1 do
+          LogDebug('  ' + SL[j]);
+      end
+      else
+        LogDebug('ExecPSCaptureAll: output file empty');
     finally
       SL.Free;
       DeleteFile(PSPath);
     end;
-  end;
+  end
+  else
+    LogDebug('ExecPSCaptureAll: no output file');
   LogDebug('ExecPSCaptureAll exit=' + IntToStr(ResultCode) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('ExecPSCaptureAll');
 end;
