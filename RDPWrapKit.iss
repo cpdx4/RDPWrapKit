@@ -4507,84 +4507,96 @@ begin
     StatusOverlay.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
     LogDebug('Creating user: ' + UserName + ' (user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count) + ')');
     UserCreateOutputAlreadyLogged := False;
-    UserCreatePath := 'NET';
+    UserCreatePath := 'POWERSHELL';
     LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
 
-    // Create the user with NET USER (two-step to avoid 14-char LM password prompt),
-    // then PowerShell fallback.
-    // Step 1: create with short throwaway password (no LM prompt)
-    // Step 2: set real password (password change does not trigger the LM prompt)
-    // If either step fails, delete the user and fall through to PowerShell.
+    // PRIMARY PATH: Create user via PowerShell New-LocalUser with PasswordNeverExpires.
+    // PowerShell native cmdlets properly set the password-never-expires flag on the
+    // user account, unlike net.exe /expires:never which only controls account expiration.
+    // Falls back to net.exe on failure (with net accounts /maxpwage:unlimited).
     OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
-    // Use RunNetHiddenCapture to capture net.exe stdout/stderr for debugging
-    NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never', 'create_' + UserName);
-    if NetRc = 0 then
+    PSScript :=
+      'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
+      '$ErrorActionPreference = ''Stop''' + #13#10 +
+      'try {' + #13#10 +
+      '  $outDir = [System.IO.Path]::GetDirectoryName($OutPath)' + #13#10 +
+      '  if (-not [string]::IsNullOrWhiteSpace($outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }' + #13#10 +
+      '  $pw = ConvertTo-SecureString -String $Password -AsPlainText -Force' + #13#10 +
+      '  $existing = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue' + #13#10 +
+      '  if ($null -ne $existing) {' + #13#10 +
+      '    Set-LocalUser -Name $UserName -Password $pw -PasswordNeverExpires $true -ErrorAction Stop' + #13#10 +
+      '    @(''SETLOCALUSER_PASSWORD_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+      '    exit 0' + #13#10 +
+      '  }' + #13#10 +
+      '  New-LocalUser -Name $UserName -Password $pw -FullName $UserName -PasswordNeverExpires -ErrorAction Stop | Out-Null' + #13#10 +
+      '  @(''NEWLOCALUSER_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+      '  exit 0' + #13#10 +
+      '} catch {' + #13#10 +
+      '  @(' + #13#10 +
+      '    ''NEWLOCALUSER_FAIL'',' + #13#10 +
+      '    ''User='' + $UserName,' + #13#10 +
+      '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
+      '    ''Message='' + $_.Exception.Message,' + #13#10 +
+      '    ''HResult='' + $_.Exception.HResult,' + #13#10 +
+      '    ''CategoryInfo='' + $_.CategoryInfo.ToString(),' + #13#10 +
+      '    ''FullyQualifiedErrorId='' + $_.FullyQualifiedErrorId,' + #13#10 +
+      '    ''StackTrace:'',' + #13#10 +
+      '    ($_ | Out-String)' + #13#10 +
+      '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+      '  exit 1' + #13#10 +
+      '}';
+    ScriptPath := TempFile('create_local_user_script_' + SanitizeFileName(UserName) + '.ps1');
+    SaveStringToFile(ScriptPath, PSScript, False);
+    PSParams :=
+      BuildPSNamedParam('UserName', UserName) + ' ' +
+      BuildPSNamedParam('Password', Password) + ' ' +
+      BuildPSNamedParam('OutPath', OutPath);
+    WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
+    ExecOk := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if not ExecOk then
+      WriteInstallerLog('ERROR: Failed to launch PowerShell for user creation: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
+    WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
+    DeleteFile(ScriptPath);
+    if not FileExists(OutPath) then
     begin
-      NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password), 'setpwd_' + UserName);
-      if NetRc <> 0 then
-      begin
-        WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + ', deleting partial user');
-        RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /delete', 'del_' + UserName);
-      end;
+      WriteInstallerLog('WARNING: Missing user-create output file after PowerShell for ' + UserName + ': ' + OutPath);
+      SaveStringToFile(OutPath,
+        'NO_USER_CREATE_OUTPUT_FILE' + #13#10 +
+        'Method=' + UserCreatePath + #13#10 +
+        'ResultCode=' + IntToStr(ResultCode) + #13#10 +
+        'User=' + UserName + #13#10,
+        False);
     end;
-    ResultCode := NetRc;
 
+    // FALLBACK PATH: If PowerShell failed, fall back to net.exe.
+    // Sets system-wide max password age to unlimited via net accounts first.
     if ResultCode <> 0 then
     begin
-      UserCreatePath := 'POWERSHELL';
-      WriteInstallerLog('WARNING: NET user creation failed for ' + UserName + ', falling back to PowerShell New-LocalUser path');
-      PSScript :=
-        'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
-        '$ErrorActionPreference = ''Stop''' + #13#10 +
-        'try {' + #13#10 +
-        '  $outDir = [System.IO.Path]::GetDirectoryName($OutPath)' + #13#10 +
-        '  if (-not [string]::IsNullOrWhiteSpace($outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }' + #13#10 +
-        '  $pw = ConvertTo-SecureString -String $Password -AsPlainText -Force' + #13#10 +
-        '  $existing = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue' + #13#10 +
-        '  if ($null -ne $existing) {' + #13#10 +
-        '    Set-LocalUser -Name $UserName -Password $pw -ErrorAction Stop' + #13#10 +
-        '    @(''SETLOCALUSER_PASSWORD_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-        '    exit 0' + #13#10 +
-        '  }' + #13#10 +
-        '  New-LocalUser -Name $UserName -Password $pw -FullName $UserName -PasswordNeverExpires -ErrorAction Stop | Out-Null' + #13#10 +
-        '  @(''NEWLOCALUSER_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-        '  exit 0' + #13#10 +
-        '} catch {' + #13#10 +
-        '  @(' + #13#10 +
-        '    ''NEWLOCALUSER_FAIL'',' + #13#10 +
-        '    ''User='' + $UserName,' + #13#10 +
-        '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
-        '    ''Message='' + $_.Exception.Message,' + #13#10 +
-        '    ''HResult='' + $_.Exception.HResult,' + #13#10 +
-        '    ''CategoryInfo='' + $_.CategoryInfo.ToString(),' + #13#10 +
-        '    ''FullyQualifiedErrorId='' + $_.FullyQualifiedErrorId,' + #13#10 +
-        '    ''StackTrace:'',' + #13#10 +
-        '    ($_ | Out-String)' + #13#10 +
-        '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-        '  exit 1' + #13#10 +
-        '}';
-      ScriptPath := TempFile('create_local_user_script_' + SanitizeFileName(UserName) + '.ps1');
-      SaveStringToFile(ScriptPath, PSScript, False);
-      PSParams :=
-        BuildPSNamedParam('UserName', UserName) + ' ' +
-        BuildPSNamedParam('Password', Password) + ' ' +
-        BuildPSNamedParam('OutPath', OutPath);
-      WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
-      ExecOk := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      if not ExecOk then
-        WriteInstallerLog('ERROR: Failed to launch PowerShell for user creation: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
-      WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-      DeleteFile(ScriptPath);
-      if not FileExists(OutPath) then
+      UserCreatePath := 'NET';
+      WriteInstallerLog('WARNING: PowerShell user creation failed for ' + UserName + ', falling back to net.exe path');
+
+      // Set system-wide maximum password age to unlimited (all passwords
+      // will not expire). Combined with /expires:never below, this ensures the user
+      // account and its password never expire.
+      RunNetHiddenCapture('accounts /maxpwage:unlimited', 'maxpwage_' + UserName);
+
+      // Two-step net.exe creation (avoids 14-char LM password prompt).
+      // Step 1: create with short throwaway password (no LM prompt)
+      // Step 2: set real password (password change does not trigger the LM prompt)
+      // If either step fails, delete the partial user.
+      NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never', 'create_' + UserName);
+      if NetRc = 0 then
       begin
-        WriteInstallerLog('WARNING: Missing user-create output file after PowerShell for ' + UserName + ': ' + OutPath);
-        SaveStringToFile(OutPath,
-          'NO_USER_CREATE_OUTPUT_FILE' + #13#10 +
-          'Method=' + UserCreatePath + #13#10 +
-          'ResultCode=' + IntToStr(ResultCode) + #13#10 +
-          'User=' + UserName + #13#10,
-          False);
+        NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password), 'setpwd_' + UserName);
+        if NetRc <> 0 then
+        begin
+          WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + ', deleting partial user');
+          RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /delete', 'del_' + UserName);
+        end;
       end;
+      // Only overwrite ResultCode if net.exe succeeded (otherwise preserve PS error code)
+      if NetRc = 0 then
+        ResultCode := 0;
     end;
 
     CredentialMatchesEnteredPassword := ValidateLocalCredential(UserName, Password);
