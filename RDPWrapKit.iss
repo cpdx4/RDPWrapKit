@@ -997,19 +997,21 @@ begin
   LogExit('ExecSavedPowerShellDebugScriptParams');
 end;
 
-function BuildAddGroupMemberPowerShellScript(const GroupName, UserName, OutPath, SuccessTag: string): string;
+function BuildAddGroupMemberPowerShellScript(const GroupSid, UserName, OutPath, SuccessTag: string): string;
 begin
   Result :=
-    'param([string]$GroupName, [string]$UserName, [string]$OutPath, [string]$SuccessTag)' + #13#10 +
+    'param([string]$GroupSid, [string]$UserName, [string]$OutPath, [string]$SuccessTag)' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
-    '  Add-LocalGroupMember -Group $GroupName -Member $UserName -ErrorAction Stop' + #13#10 +
-    '  @($SuccessTag, (''Group={0}'' -f $GroupName), (''User={0}'' -f $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  $group = Get-LocalGroup -SID $GroupSid -ErrorAction Stop' + #13#10 +
+    '  $resolvedName = $group.Name' + #13#10 +
+    '  Add-LocalGroupMember -Group $group -Member $UserName -ErrorAction Stop' + #13#10 +
+    '  @($SuccessTag, (''Group={0}'' -f $resolvedName), (''GroupSid={0}'' -f $GroupSid), (''User={0}'' -f $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
     '  exit 0' + #13#10 +
     '} catch {' + #13#10 +
     '  @(' + #13#10 +
     '    ''ADD_GROUP_FAIL'',' + #13#10 +
-    '    (''Group={0}'' -f $GroupName),' + #13#10 +
+    '    (''GroupSid={0}'' -f $GroupSid),' + #13#10 +
     '    (''User={0}'' -f $UserName),' + #13#10 +
     '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
     '    ''Message='' + $_.Exception.Message,' + #13#10 +
@@ -4694,10 +4696,10 @@ begin
     ResultCode := NetRc;
     if ResultCode <> 0 then
     begin
-      PSScript := BuildAddGroupMemberPowerShellScript(GroupAdministratorsName, UserName, OutPath, 'ADD_ADMIN_OK');
-      WriteInstallerLog('DEBUG: Fallback: Adding user to Administrators via PowerShell: Add-LocalGroupMember -Group ' + GroupAdministratorsName + ' -Member ' + UserName);
+      PSScript := BuildAddGroupMemberPowerShellScript('S-1-5-32-544', UserName, OutPath, 'ADD_ADMIN_OK');
+      WriteInstallerLog('DEBUG: Fallback: Adding user to Administrators via PowerShell (SID: S-1-5-32-544) - resolved name=' + GroupAdministratorsName + ' user=' + UserName);
       PSParams :=
-        BuildPSNamedParam('GroupName', GroupAdministratorsName) + ' ' +
+        BuildPSNamedParam('GroupSid', 'S-1-5-32-544') + ' ' +
         BuildPSNamedParam('UserName', UserName) + ' ' +
         BuildPSNamedParam('OutPath', OutPath) + ' ' +
         BuildPSNamedParam('SuccessTag', 'ADD_ADMIN_OK');
@@ -4745,10 +4747,10 @@ begin
       ResultCode := NetRc;
       if ResultCode <> 0 then
       begin
-        PSScript := BuildAddGroupMemberPowerShellScript(GroupRDPUsersName, UserName, OutPath, 'ADD_RDP_OK');
-        WriteInstallerLog('DEBUG: Fallback: Adding user to Remote Desktop Users via PowerShell: Add-LocalGroupMember -Group ' + GroupRDPUsersName + ' -Member ' + UserName);
+        PSScript := BuildAddGroupMemberPowerShellScript('S-1-5-32-555', UserName, OutPath, 'ADD_RDP_OK');
+        WriteInstallerLog('DEBUG: Fallback: Adding user to Remote Desktop Users via PowerShell (SID: S-1-5-32-555) - resolved name=' + GroupRDPUsersName + ' user=' + UserName);
         PSParams :=
-          BuildPSNamedParam('GroupName', GroupRDPUsersName) + ' ' +
+          BuildPSNamedParam('GroupSid', 'S-1-5-32-555') + ' ' +
           BuildPSNamedParam('UserName', UserName) + ' ' +
           BuildPSNamedParam('OutPath', OutPath) + ' ' +
           BuildPSNamedParam('SuccessTag', 'ADD_RDP_OK');
