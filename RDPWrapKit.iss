@@ -71,6 +71,7 @@ Source: "output\RdpSignTool.exe"; DestDir: "{tmp}"; Flags: ignoreversion dontcop
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 Source: "assets\RDPWrapInstallerBG.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
+Source: "assets\restore_term_service.reg"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 
 
 
@@ -147,6 +148,7 @@ var
   UserPage: TInputQueryWizardPage;
   // AdvancedPage removed - single create-shortcuts page retained
   EditSystemwideSettingsPage: TWizardPage;  // Main Edit System-wide settings page
+  QuickFixesPage: TWizardPage;              // Quick Fixes page
   Page_CreateShortcutsForExistingUsers: TWizardPage;  // Create RDP desktop shortcuts
   LocalUsersList: TStringList;        // login usernames
   LocalUserDisplayList: TStringList;  // display labels (email if online account, else same as username)
@@ -168,6 +170,7 @@ var
   rbInstall: TRadioButton;
   rbEditSystemwideSettings: TRadioButton;
   rbShowRDPInfo: TRadioButton;
+  rbQuickFixes: TRadioButton;
   rbUninstall: TRadioButton;
   Page_ShowRDPInfo: TWizardPage;
   // Show RDP Info page controls
@@ -218,6 +221,12 @@ var
   Tool1UsersHeaderLabel: TLabel;  // "Users found" header
   Tool1PasswordHeaderLabel: TLabel;  // "Password" header
   Tool1PasswordResetLink: TLabel;  // Password reset link at bottom
+  // Controls for Quick Fixes page
+  lblQFHeader: TLabel;
+  rbQFRestartRDP: TRadioButton;
+  rbQFAccountNeverExpires: TRadioButton;
+  rbQFRestoreTermService: TRadioButton;
+
   // Controls for Edit System-wide Settings page
   lblSysHeader: TLabel;
   lblWinVer: TLabel;
@@ -265,6 +274,7 @@ var
   StepPreventDuplicate: TLabel;
   StepSetRdpPort: TLabel;
   StepRestartRDP: TLabel;
+  StepQuickFixes: TLabel;
   StepAccountNeverExpires: TLabel;
   SelectedInstallMode: Integer;  // installModeInstall, installModeEditShortcuts, installModeEditSystemwideSettings, installModeUninstall
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
@@ -464,6 +474,7 @@ const
   installModeEditSystemwideSettings = 2;         // Edit system-wide RDP settings
   installModeUninstall = 3;                      // Uninstall everything
   installModeShowRDPInfo = 4;               // Show RDP Info + configure RemoteFX/startup settings
+  installModeQuickFixes = 5;                     // Quick Fixes page
 
   // CREATE USER MODE CONSTANTS (only relevant when DoCreateRdpShortcuts = True)
   createUserModeNew = 0;                         // Create new local user accounts
@@ -1990,6 +2001,8 @@ begin
       Result := 'Uninstall';
     installModeShowRDPInfo:
       Result := 'Show RDP Info';
+    installModeQuickFixes:
+      Result := 'Quick Fixes';
   else
     Result := 'Unknown(' + IntToStr(SelectedInstallMode) + ')';
   end;
@@ -2019,6 +2032,7 @@ begin
   else if Assigned(EditShortcutPage) and (PageID = EditShortcutPage.ID) then Result := 'Custom: Edit Existing Shortcut'
   else if Assigned(Page_EditShortcutAdvanced) and (PageID = Page_EditShortcutAdvanced.ID) then Result := 'Custom: Advanced Shortcut Editing'
   else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide RDP Settings'
+  else if Assigned(QuickFixesPage) and (PageID = QuickFixesPage.ID) then Result := 'Custom: Quick Fixes'
   else if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) then Result := 'Custom: Show RDP Info'
   else
     Result := 'Custom/Unknown';
@@ -2040,6 +2054,8 @@ begin
     ChosenAction := 'Edit System-wide RDP Settings'
   else if Assigned(rbShowRDPInfo) and rbShowRDPInfo.Checked then
     ChosenAction := 'Tune System Performance'
+  else if Assigned(rbQuickFixes) and rbQuickFixes.Checked then
+    ChosenAction := 'Quick Fixes'
   else if Assigned(rbUninstall) and rbUninstall.Checked then
     ChosenAction := 'Uninstall'
   else
@@ -4003,6 +4019,10 @@ if Assigned(Page_EditShortcutAdvanced) and (PageID = Page_EditShortcutAdvanced.I
   if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) and (SelectedInstallMode <> installModeShowRDPInfo) then
     Result := True;
 
+  // Show Quick Fixes page only in that mode
+  if Assigned(QuickFixesPage) and (PageID = QuickFixesPage.ID) and (SelectedInstallMode <> installModeQuickFixes) then
+    Result := True;
+
   // Show Create Shortcuts for Existing Users page only when:
   //   Install mode + Create RDP shortcuts + Use existing users
   if PageID = Page_CreateShortcutsForExistingUsers.ID then
@@ -4926,6 +4946,7 @@ begin
   if Assigned(StepCheckRDP) then StepCheckRDP.Visible := False;
   if Assigned(StepUninstallTermWrap) then StepUninstallTermWrap.Visible := False;
   if Assigned(StepRemoveFolder) then StepRemoveFolder.Visible := False;
+  if Assigned(StepQuickFixes) then StepQuickFixes.Visible := False;
   if Assigned(StepShowRDPInfo) then StepShowRDPInfo.Visible := False;
 end;
 
@@ -5573,10 +5594,21 @@ begin
       'this can suppress warnings, which may have security implications. Files created by RDPWrapKit ' +
       'are safe because they are Local RDP files.' + #13#10#13#10 +
       'Exercise caution if you use RDP to connect to untrusted remote machines.';
-    9: HelpText :=
+    10: HelpText :=
+      'Restart RDP Service' + #13#10#13#10 +
+      'Stops and restarts the Windows Remote Desktop service (TermService).' + #13#10#13#10 +
+      'Active RDP sessions will be disconnected. Use this fix if RDP is not working properly ' +
+      'or if you have made changes that require a service restart.';
+    11: HelpText :=
       'Set all Local Accounts to Never Expire' + #13#10#13#10 +
       'Stops Windows from forcing a password change every 42 days or getting Account Expiration reminders' + #13#10#13#10 +
       'This is useful for RDP accounts that should remain permanently accessible without requiring password rotation.';
+    12: HelpText :=
+      'Restore deleted Remote Desktop Service' + #13#10#13#10 +
+      'Re-imports the Registry keys for the Remote Desktop Service (TermService) using a backup .reg file.' + #13#10#13#10 +
+      'Use this if antivirus software or a system cleanup tool has accidentally removed the ' +
+      'TermService registry entries, preventing RDP from functioning. This will restore the ' +
+      'service configuration, image path, and required privileges to their default values.';
   else
     HelpText := 'No additional information available for this setting.';
   end;
@@ -5901,10 +5933,19 @@ begin
   rbShowRDPInfo.Checked := False;
   rbShowRDPInfo.OnClick := @OnInstallModeChange;
 
+  rbQuickFixes := TRadioButton.Create(Page_InstallOptions);
+  rbQuickFixes.Parent := Page_InstallOptions.Surface;
+  rbQuickFixes.Left := ScaleX(10);
+  rbQuickFixes.Top := radioTopBase + radioSpacing * 3;
+  rbQuickFixes.Width := ScaleX(420);
+  rbQuickFixes.Caption := 'Quick Fixes';
+  rbQuickFixes.Checked := False;
+  rbQuickFixes.OnClick := @OnInstallModeChange;
+
   rbUninstall := TRadioButton.Create(Page_InstallOptions);
   rbUninstall.Parent := Page_InstallOptions.Surface;
   rbUninstall.Left := ScaleX(10);
-  rbUninstall.Top := radioTopBase + radioSpacing * 3;
+  rbUninstall.Top := radioTopBase + radioSpacing * 4;
   rbUninstall.Width := ScaleX(420);
   rbUninstall.Caption := 'Uninstall (keeps users)';
   rbUninstall.Checked := False;
@@ -6300,17 +6341,72 @@ begin
     chkRestartRDP.Font.Color := LabelColor;
     MakeHelpButton(EditSystemwideSettingsPage, topPos, 7);
     topPos := topPos + ScaleY(20);
+  end
 
-    chkAccountNeverExpires := TCheckBox.Create(EditSystemwideSettingsPage);
-    chkAccountNeverExpires.Parent := EditSystemwideSettingsPage.Surface;
-    chkAccountNeverExpires.Left := childLeft;
-    chkAccountNeverExpires.Top := topPos;
-    chkAccountNeverExpires.Width := ScaleX(420) - childIndent;
-    chkAccountNeverExpires.Caption := 'Set all Local Accounts to Never Expire';
-    chkAccountNeverExpires.Checked := False;
-    chkAccountNeverExpires.ParentFont := False;
-    chkAccountNeverExpires.Font.Color := LabelColor;
-    MakeHelpButton(EditSystemwideSettingsPage, topPos, 9);
+  // -------------------------------------------------------------------------
+  // Create "Quick Fixes" page
+  // Provides quick one-click fixes for common RDP-related issues.
+  // -------------------------------------------------------------------------
+  QuickFixesPage := CreateCustomPage(
+    Page_InstallOptions.ID,
+    'Quick Fixes',
+    'Select a quick fix to apply, then click [Next] to execute it.'
+  );
+  if IsDarkColor(QuickFixesPage.Surface.Color) then
+    LabelColor := clWhite
+  else
+    LabelColor := clBlack;
+  begin
+    leftPos := ScaleX(20);
+    topPos := ScaleY(12);
+    childIndent := ScaleX(16);
+    childLeft := leftPos + childIndent;
+
+    lblQFHeader := TLabel.Create(QuickFixesPage);
+    lblQFHeader.Parent := QuickFixesPage.Surface;
+    lblQFHeader.Left := leftPos;
+    lblQFHeader.Top := topPos;
+    lblQFHeader.Caption := 'Select a fix:';
+    lblQFHeader.Font.Style := [fsBold];
+    lblQFHeader.ParentFont := False;
+    lblQFHeader.Font.Color := LabelColor;
+    lblQFHeader.Transparent := True;
+    topPos := topPos + ScaleY(24);
+
+    rbQFRestartRDP := TRadioButton.Create(QuickFixesPage);
+    rbQFRestartRDP.Parent := QuickFixesPage.Surface;
+    rbQFRestartRDP.Left := childLeft;
+    rbQFRestartRDP.Top := topPos;
+    rbQFRestartRDP.Width := ScaleX(420) - childIndent;
+    rbQFRestartRDP.Caption := 'Restart RDP Service';
+    rbQFRestartRDP.Checked := True;
+    rbQFRestartRDP.ParentFont := False;
+    rbQFRestartRDP.Font.Color := LabelColor;
+    MakeHelpButton(QuickFixesPage, topPos, 10);
+    topPos := topPos + ScaleY(24);
+
+    rbQFAccountNeverExpires := TRadioButton.Create(QuickFixesPage);
+    rbQFAccountNeverExpires.Parent := QuickFixesPage.Surface;
+    rbQFAccountNeverExpires.Left := childLeft;
+    rbQFAccountNeverExpires.Top := topPos;
+    rbQFAccountNeverExpires.Width := ScaleX(420) - childIndent;
+    rbQFAccountNeverExpires.Caption := 'Set all Local Accounts to Never Expire';
+    rbQFAccountNeverExpires.Checked := False;
+    rbQFAccountNeverExpires.ParentFont := False;
+    rbQFAccountNeverExpires.Font.Color := LabelColor;
+    MakeHelpButton(QuickFixesPage, topPos, 11);
+    topPos := topPos + ScaleY(24);
+
+    rbQFRestoreTermService := TRadioButton.Create(QuickFixesPage);
+    rbQFRestoreTermService.Parent := QuickFixesPage.Surface;
+    rbQFRestoreTermService.Left := childLeft;
+    rbQFRestoreTermService.Top := topPos;
+    rbQFRestoreTermService.Width := ScaleX(420) - childIndent;
+    rbQFRestoreTermService.Caption := 'Restore deleted Remote Desktop Service';
+    rbQFRestoreTermService.Checked := False;
+    rbQFRestoreTermService.ParentFont := False;
+    rbQFRestoreTermService.Font.Color := LabelColor;
+    MakeHelpButton(QuickFixesPage, topPos, 12);
   end
 
   // -------------------------------------------------------------------------
@@ -6558,6 +6654,7 @@ begin
   StepPreventDuplicate := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepSetRdpPort := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
   StepRestartRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
+  StepQuickFixes := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);      topPos := topPos + ScaleY(16);
   StepAccountNeverExpires := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepShowRDPInfo := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   // Create a label on the Finished page to show completion messages (positioned right below header)
@@ -6627,7 +6724,11 @@ begin
     CreateUserMode := createUserModeNew;
     DoEditSystemWideSettings := False;
 
-    if rbUninstall.Checked then
+    if Assigned(rbQuickFixes) and rbQuickFixes.Checked then
+    begin
+      SelectedInstallMode := installModeQuickFixes;
+    end
+    else if rbUninstall.Checked then
     begin
       SelectedInstallMode := installModeUninstall;
     end
@@ -7191,8 +7292,6 @@ begin
         AddStepPendingLabel(StepSetRdpPort, 'Set RDP listening port to ' + edtRdpPort.Text);
       if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
         AddStepPendingLabel(StepRestartRDP, 'Restart Remote Desktop Services');
-      if Assigned(chkAccountNeverExpires) and chkAccountNeverExpires.Checked then
-        AddStepPendingLabel(StepAccountNeverExpires, 'Set all Local Accounts to Never Expire');
     end
     else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
@@ -7204,6 +7303,16 @@ begin
     begin
       StepsHeaderLabel.Caption := 'RDP Settings:';
       AddStepPendingLabel(StepShowRDPInfo, TXT_ShowRDPInfo);
+    end
+    else if SelectedInstallMode = installModeQuickFixes then
+    begin
+      StepsHeaderLabel.Caption := 'Quick Fixes:';
+      if Assigned(rbQFRestartRDP) and rbQFRestartRDP.Checked then
+        AddStepPendingLabel(StepQuickFixes, 'Restart Remote Desktop Services')
+      else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
+        AddStepPendingLabel(StepQuickFixes, 'Set all Local Accounts to Never Expire')
+      else if Assigned(rbQFRestoreTermService) and rbQFRestoreTermService.Checked then
+        AddStepPendingLabel(StepQuickFixes, 'Restore deleted Remote Desktop Service');
     end
     else if SelectedInstallMode = installModeInstall then
     begin
@@ -7283,6 +7392,11 @@ begin
     else if SelectedInstallMode = installModeShowRDPInfo then
     begin
       StatusOverlay.Caption := 'Preparing to apply Group Policy settings...';
+      WizardForm.ProgressGauge.Style := npbstNormal;
+    end
+    else if SelectedInstallMode = installModeQuickFixes then
+    begin
+      StatusOverlay.Caption := 'Applying Quick Fix...';
       WizardForm.ProgressGauge.Style := npbstNormal;
     end
     else if SelectedInstallMode = installModeEditShortcuts then
@@ -7463,17 +7577,6 @@ begin
         SetStepDone(StepRestartRDP, 'Restart Remote Desktop Services');
       end;
 
-      // Set all Local Accounts to Never Expire if requested
-      if Assigned(chkAccountNeverExpires) and chkAccountNeverExpires.Checked then
-      begin
-        SetStepInProgress(StepAccountNeverExpires, 'Setting all Local Accounts to Never Expire');
-        LogDebug('AccountNeverExpires: Running Get-LocalUser | Set-LocalUser -AccountNeverExpires');
-        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -AccountNeverExpires', ResultCode);
-        LogDebug('AccountNeverExpires: PowerShell exit=' + IntToStr(ResultCode));
-        WriteInstallerLog('Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
-        SetStepDone(StepAccountNeverExpires, 'Set all Local Accounts to Never Expire');
-      end;
-
       StatusOverlay.Caption := 'System changes applied.';
     end
     // Edit System-wide settings fallback (no changes queued): create shortcuts for existing users
@@ -7490,6 +7593,41 @@ begin
       SetStepDone(StepPreTrust, TXT_PreTrust);
       ClearPasswordsFromMemory;
       StatusOverlay.Caption := 'Create Shortcuts executed.';
+    end
+    // Quick Fixes execution
+    else if SelectedInstallMode = installModeQuickFixes then
+    begin
+      if Assigned(rbQFRestartRDP) and rbQFRestartRDP.Checked then
+      begin
+        SetStepInProgress(StepQuickFixes, 'Restarting Remote Desktop Services');
+        LogDebug('QuickFixes: Restarting RDP Service');
+        StopTermService;
+        StartTermService;
+        SetStepDone(StepQuickFixes, 'Restart Remote Desktop Services');
+        StatusOverlay.Caption := 'RDP Service restarted.';
+        WriteInstallerLog('QuickFixes: Restart RDP Service completed.');
+      end
+      else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
+      begin
+        SetStepInProgress(StepQuickFixes, 'Setting all Local Accounts to Never Expire');
+        LogDebug('QuickFixes: Running Get-LocalUser | Set-LocalUser -AccountNeverExpires');
+        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -AccountNeverExpires', ResultCode);
+        LogDebug('QuickFixes: AccountNeverExpires PowerShell exit=' + IntToStr(ResultCode));
+        WriteInstallerLog('QuickFixes: Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
+        SetStepDone(StepQuickFixes, 'Set all Local Accounts to Never Expire');
+        StatusOverlay.Caption := 'Accounts never expire applied.';
+      end
+      else if Assigned(rbQFRestoreTermService) and rbQFRestoreTermService.Checked then
+      begin
+        SetStepInProgress(StepQuickFixes, 'Restoring deleted Remote Desktop Service');
+        LogDebug('QuickFixes: Restoring TermService registry keys');
+        ExtractTemporaryFile('restore_term_service.reg');
+        ResultCode := RunCmdHidden('reg.exe import "' + ExpandConstant('{tmp}\restore_term_service.reg') + '"');
+        LogDebug('QuickFixes: reg.exe import exit=' + IntToStr(ResultCode));
+        WriteInstallerLog('QuickFixes: Restore TermService (exit=' + IntToStr(ResultCode) + ')');
+        SetStepDone(StepQuickFixes, 'Restore deleted Remote Desktop Service');
+        StatusOverlay.Caption := 'Remote Desktop Service restored.';
+      end;
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
@@ -8031,6 +8169,12 @@ begin
     BuildCreateShortcutsControls;
   end;
 
+  // Quick Fixes page: no dynamic data to load
+  if Assigned(QuickFixesPage) and (CurPageID = QuickFixesPage.ID) then
+  begin
+    LogDebug('CurPageChanged: Quick Fixes page shown');
+  end;
+
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
@@ -8192,6 +8336,12 @@ begin
         'RDP settings have been applied.' + #13#10#13#10 +
         'Some settings take effect immediately; others require a restart of the Remote Desktop service or a new RDP session.';
       WriteInstallerLog('CurPageChanged: Showing Show RDP Info completion message');
+    end
+    else if SelectedInstallMode = installModeQuickFixes then
+    begin
+      WizardForm.FinishedHeadingLabel.Caption := 'Quick Fix Applied';
+      CompletionText := 'The selected quick fix has been applied successfully.';
+      WriteInstallerLog('CurPageChanged: Showing Quick Fixes completion message');
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
