@@ -4139,6 +4139,18 @@ begin
     KeyboardHook := 0;
 end;
 
+function GetCurrentRdpPort: Integer;
+// Reads the configured RDP listening port from the registry.
+// Returns the default RDP_LISTEN_PORT (3389) if the registry value is absent.
+var
+  PortNumber: Cardinal;
+begin
+  if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
+    Result := PortNumber
+  else
+    Result := RDP_LISTEN_PORT;
+end;
+
 function WriteRDPFileDirect(const UserName, RDPPath, EncPath: string): Boolean;
 var
   ScreenModeId: Integer;
@@ -4150,6 +4162,7 @@ var
   KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
+  RdpPort: Integer;
   SL: TStringList;
   EncTextRaw: AnsiString;
   EncText: string;
@@ -4176,7 +4189,6 @@ begin
 
   SL := TStringList.Create;
   try
-    SL.Add('full address:s:' + RDP_LOOPBACK_IP);
     SL.Add('username:s:' + UserName);
     SL.Add('screen mode id:i:' + IntToStr(ScreenModeId));
     SL.Add('desktopwidth:i:' + IntToStr(DesktopWidth));
@@ -4185,6 +4197,12 @@ begin
     SL.Add('session bpp:i:32');
     SL.Add('smart sizing:i:1');
     SL.Add('dynamic resolution:i:1');
+    // Append port if non-default (e.g. 127.0.0.2:3390), otherwise use bare IP
+    RdpPort := GetCurrentRdpPort;
+    if RdpPort = RDP_LISTEN_PORT then
+      SL.Add('full address:s:' + RDP_LOOPBACK_IP)
+    else
+      SL.Add('full address:s:' + RDP_LOOPBACK_IP + ':' + IntToStr(RdpPort));
     SL.Add('autoreconnection enabled:i:1');
     SL.Add('compression:i:1');
     SL.Add('keyboardhook:i:' + IntToStr(KeyboardHook));
@@ -4243,11 +4261,20 @@ var
   KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer;
+  FullAddressLine: string;
+  RdpPort: Integer;
 begin
   LogEntry('GenerateRDPPowerShellScript');
   LogDebug('GenerateRDPPowerShellScript: user=' + UserName + ' path=' + RDPPath);
   GetShortcutDisplaySettings(ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook);
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
+
+  // Append port if non-default (e.g. 127.0.0.2:3390), otherwise use bare IP
+  RdpPort := GetCurrentRdpPort;
+  if RdpPort = RDP_LISTEN_PORT then
+    FullAddressLine := 'full address:s:' + RDP_LOOPBACK_IP
+  else
+    FullAddressLine := 'full address:s:' + RDP_LOOPBACK_IP + ':' + IntToStr(RdpPort);
 
   Result :=
     'param([string]$EncPath = '''')' + #13#10 +
@@ -4263,7 +4290,7 @@ begin
     '    Write-Host "No encrypted password available; shortcut will prompt for password"' + #13#10 +
     '  }' + #13#10 +
     '  $rdp = @()' + #13#10 +
-    '  $rdp += "full address:s:' + RDP_LOOPBACK_IP + '"' + #13#10 +
+    '  $rdp += "' + FullAddressLine + '"' + #13#10 +
     '  $rdp += "username:s:' + UserName + '"' + #13#10 +
     '  $rdp += "screen mode id:i:' + IntToStr(ScreenModeId) + '"' + #13#10 +
     '  $rdp += "desktopwidth:i:' + IntToStr(DesktopWidth) + '"' + #13#10 +
