@@ -242,6 +242,7 @@ var
 
   lblActionsHeader: TLabel;
   chkRestartRDP: TCheckBox;
+  chkAccountNeverExpires: TCheckBox;
   // Progress UI on Installing page
   StepsHeaderLabel: TLabel;
   StepAddExcl: TLabel;
@@ -264,6 +265,7 @@ var
   StepPreventDuplicate: TLabel;
   StepSetRdpPort: TLabel;
   StepRestartRDP: TLabel;
+  StepAccountNeverExpires: TLabel;
   SelectedInstallMode: Integer;  // installModeInstall, installModeEditShortcuts, installModeEditSystemwideSettings, installModeUninstall
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
   DoShowMstscEdit: Boolean;  // True = open mstsc /edit after writing settings (EditShortcuts path)
@@ -5542,6 +5544,10 @@ begin
       'this can suppress warnings, which may have security implications. Files created by RDPWrapKit ' +
       'are safe because they are Local RDP files.' + #13#10#13#10 +
       'Exercise caution if you use RDP to connect to untrusted remote machines.';
+    9: HelpText :=
+      'Set all Local Accounts to Never Expire' + #13#10#13#10 +
+      'Stops Windows from forcing a password change every 42 days or getting Account Expiration reminders' + #13#10#13#10 +
+      'This is useful for RDP accounts that should remain permanently accessible without requiring password rotation.';
   else
     HelpText := 'No additional information available for this setting.';
   end;
@@ -6264,6 +6270,18 @@ begin
     chkRestartRDP.ParentFont := False;
     chkRestartRDP.Font.Color := LabelColor;
     MakeHelpButton(EditSystemwideSettingsPage, topPos, 7);
+    topPos := topPos + ScaleY(20);
+
+    chkAccountNeverExpires := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkAccountNeverExpires.Parent := EditSystemwideSettingsPage.Surface;
+    chkAccountNeverExpires.Left := childLeft;
+    chkAccountNeverExpires.Top := topPos;
+    chkAccountNeverExpires.Width := ScaleX(420) - childIndent;
+    chkAccountNeverExpires.Caption := 'Set all Local Accounts to Never Expire';
+    chkAccountNeverExpires.Checked := False;
+    chkAccountNeverExpires.ParentFont := False;
+    chkAccountNeverExpires.Font.Color := LabelColor;
+    MakeHelpButton(EditSystemwideSettingsPage, topPos, 9);
   end
 
   // -------------------------------------------------------------------------
@@ -6511,6 +6529,7 @@ begin
   StepPreventDuplicate := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepSetRdpPort := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
   StepRestartRDP := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
+  StepAccountNeverExpires := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepShowRDPInfo := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   // Create a label on the Finished page to show completion messages (positioned right below header)
   FinishedText := TLabel.Create(WizardForm.FinishedLabel.Parent);
@@ -7143,6 +7162,8 @@ begin
         AddStepPendingLabel(StepSetRdpPort, 'Set RDP listening port to ' + edtRdpPort.Text);
       if Assigned(chkRestartRDP) and chkRestartRDP.Checked then
         AddStepPendingLabel(StepRestartRDP, 'Restart Remote Desktop Services');
+      if Assigned(chkAccountNeverExpires) and chkAccountNeverExpires.Checked then
+        AddStepPendingLabel(StepAccountNeverExpires, 'Set all Local Accounts to Never Expire');
     end
     else if SelectedInstallMode = installModeEditSystemwideSettings then
     begin
@@ -7411,6 +7432,17 @@ begin
         StopTermService;
         StartTermService;
         SetStepDone(StepRestartRDP, 'Restart Remote Desktop Services');
+      end;
+
+      // Set all Local Accounts to Never Expire if requested
+      if Assigned(chkAccountNeverExpires) and chkAccountNeverExpires.Checked then
+      begin
+        SetStepInProgress(StepAccountNeverExpires, 'Setting all Local Accounts to Never Expire');
+        LogDebug('AccountNeverExpires: Running Get-LocalUser | Set-LocalUser -AccountNeverExpires');
+        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -AccountNeverExpires', ResultCode);
+        LogDebug('AccountNeverExpires: PowerShell exit=' + IntToStr(ResultCode));
+        WriteInstallerLog('Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
+        SetStepDone(StepAccountNeverExpires, 'Set all Local Accounts to Never Expire');
       end;
 
       StatusOverlay.Caption := 'System changes applied.';
