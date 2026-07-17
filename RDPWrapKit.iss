@@ -7613,6 +7613,9 @@ begin
         LogDebug('QuickFixes: Running Get-LocalUser | Set-LocalUser -AccountNeverExpires');
         ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -AccountNeverExpires', ResultCode);
         LogDebug('QuickFixes: AccountNeverExpires PowerShell exit=' + IntToStr(ResultCode));
+        LogDebug('QuickFixes: Running Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true');
+        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true', ResultCode);
+        LogDebug('QuickFixes: PasswordNeverExpires PowerShell exit=' + IntToStr(ResultCode));
         WriteInstallerLog('QuickFixes: Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
         SetStepDone(StepQuickFixes, 'Set all Local Accounts to Never Expire');
         StatusOverlay.Caption := 'Accounts never expire applied.';
