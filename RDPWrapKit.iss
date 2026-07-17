@@ -1,4 +1,4 @@
-﻿; =========================================================================
+; =========================================================================
 ; RDPWrapKit - Local RDP Management Suite
 ; =========================================================================
 ; 
@@ -1393,7 +1393,7 @@ begin
 
   // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
   // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
-  // via P/Invoke to crypt32.dll â€” no PowerShell involved, no C# JIT compilation,
+  // via P/Invoke to crypt32.dll — no PowerShell involved, no C# JIT compilation,
   // no -EncodedCommand overhead.  The EXE is ~20KB and completes in ~100-300ms.
   //
   // Exit codes:
@@ -1467,7 +1467,7 @@ begin
         Inc(StrippedCount);
         LogDebug('UnSignRdpFile: Stripped line: ' + Copy(Line, 1, 60));
       end
-      // Strip orphaned base64-only lines (no colon at all — leftover artifact
+      // Strip orphaned base64-only lines (no colon at all � leftover artifact
       // from previous signatures that used a different wrapping format)
       else if Pos(':', Line) = 0 then
       begin
@@ -1525,11 +1525,11 @@ begin
   // Single consolidated PowerShell script that performs all four steps:
   //   1. Find or create the cert in LocalMachine\My
   //   2. Import into Trusted Root (if not already there)
-  //   3. [implicit] verify â€” step 2 already checks existence
+  //   3. [implicit] verify — step 2 already checks existence
   //   4. Register thumbprint in TrustedCertThumbprints policy
   // Outputs thumbprint on success; any error triggers catch/throw.
   LogDebug('EnsureRDPSigningCert: Running consolidated PS cert setup');
-  // NOTE: PSCommand is a one-liner separated by ; â€” NO inline # comments
+  // NOTE: PSCommand is a one-liner separated by ; — NO inline # comments
   // because the PS script has no #13#10 line breaks and # would comment out
   // the rest of the line (all statements after it).
   PSCommand :=
@@ -2395,7 +2395,7 @@ begin
   RC := 0;
 
   // Build the full command: cmd /c "CmdLine > "OutPath" 2>&1"
-  // CRITICAL: cmd.exe /c quoting rules â€” when the first character after /c
+  // CRITICAL: cmd.exe /c quoting rules — when the first character after /c
   // is a double-quote ("), cmd.exe strips the outermost quotes and also
   // removes the LAST double-quote from the entire command string.
   // If the redirection is placed OUTSIDE these outer quotes, the last " is
@@ -2406,10 +2406,10 @@ begin
   // cmd.exe strips them, everything (command + redirection) is intact.
   //
   // BEFORE (broken):  /c ""C:\exe" "C:\file"" > "out.log" 2>&1
-  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    â† BAD: 2>&1 in filename
+  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    ← BAD: 2>&1 in filename
   //
   // AFTER (fixed):   /c ""C:\exe" "C:\file" > "out.log" 2>&1"
-  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    â† CORRECT
+  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    ← CORRECT
   FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1"';
   LogDebug('RunCmdCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
 
@@ -3840,7 +3840,7 @@ begin
     end
     else
     begin
-      // User was unchecked â€” clear any stale validation message
+      // User was unchecked — clear any stale validation message
       if Assigned(UserPasswordStatus[i]) then
       begin
         UserPasswordStatus[i].Caption := '';
@@ -4101,12 +4101,12 @@ begin
 end;
 
 // Read experience / performance checkboxes into RDP key integer values.
-// disable wallpaper: 0=show, 1=disable  â€” checkbox means "allow" so invert for disable key
-// allow font smoothing: 1=allow  â€” checkbox value maps directly
+// disable wallpaper: 0=show, 1=disable  — checkbox means "allow" so invert for disable key
+// allow font smoothing: 1=allow  — checkbox value maps directly
 // allow desktop composition: 1=allow
-// disable full window drag: 0=show contents, 1=hide  â€” inverted
-// disable menu anims: 0=show, 1=hide  â€” inverted
-// disable themes: 0=use themes, 1=disable  â€” inverted
+// disable full window drag: 0=show contents, 1=hide  — inverted
+// disable menu anims: 0=show, 1=hide  — inverted
+// disable themes: 0=use themes, 1=disable  — inverted
 procedure GetExperienceSettings(var DisableWallpaper, AllowFontSmooth, AllowComposition,
   DisableFullWindowDrag, DisableMenuAnims, DisableThemes: Integer);
 begin
@@ -5073,7 +5073,7 @@ begin
     DeleteFile(OutPath);
   end;
 
-  // Apply to controls â€” Full Screen drives whether cboResolution is enabled
+  // Apply to controls — Full Screen drives whether cboResolution is enabled
   if Assigned(chkFullScreen) then chkFullScreen.Checked := (ScreenMode = 2);
 
   ResIndex := -1;  // -1 = no preset match yet
@@ -5086,7 +5086,7 @@ begin
 
   if ResIndex = -1 then
   begin
-    // Unknown resolution â€” select Custom and pre-fill the W/H boxes
+    // Unknown resolution — select Custom and pre-fill the W/H boxes
     ResIndex := 6;
     if Assigned(edtCustomWidth)  then edtCustomWidth.Text  := IntToStr(DesktopWidth);
     if Assigned(edtCustomHeight) then edtCustomHeight.Text := IntToStr(DesktopHeight);
@@ -5109,7 +5109,7 @@ begin
   end;
   if Assigned(chkSound)          then chkSound.Checked          := (AudioMode = 0);  // 0 = play on this PC
   if Assigned(chkCopyPaste)      then chkCopyPaste.Checked      := (RedirectClipboard = 1);
-  // Experience checkboxes â€” invert disable keys, pass-through allow keys
+  // Experience checkboxes — invert disable keys, pass-through allow keys
   if Assigned(chkExpWallpaper)    then chkExpWallpaper.Checked    := (DisableWallpaper = 0);
   if Assigned(chkExpFontSmooth)   then chkExpFontSmooth.Checked   := (AllowFontSmooth = 1);
   if Assigned(chkExpComposition)  then chkExpComposition.Checked  := (AllowComposition = 1);
@@ -5295,7 +5295,7 @@ begin
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
 
-  // Row 2 â€” Copy & Paste (1st column)
+  // Row 2 — Copy & Paste (1st column)
   chkCopyPaste := TCheckBox.Create(ParentSurface);
   chkCopyPaste.Parent := ParentSurface;
   chkCopyPaste.Left := ScaleX(10);
@@ -5304,7 +5304,7 @@ begin
   chkCopyPaste.Caption := 'Allow Copy && Paste';
   chkCopyPaste.Checked := True;
 
-  // Row 2 â€” Sound (2nd column)
+  // Row 2 — Sound (2nd column)
   chkSound := TCheckBox.Create(ParentSurface);
   chkSound.Parent := ParentSurface;
   chkSound.Left := ScaleX(180);
@@ -5314,7 +5314,7 @@ begin
   chkSound.Checked := True;
   MakeShortcutHelpButton(ParentSurface, chkSound.Top, 2);
 
-  // Row 3 â€” Keyboard Combos dropdown (after Sound)
+  // Row 3 — Keyboard Combos dropdown (after Sound)
   lblKeyboardHook := TLabel.Create(ParentSurface);
   lblKeyboardHook.Parent := ParentSurface;
   lblKeyboardHook.Left := ScaleX(10);
@@ -5334,7 +5334,7 @@ begin
   cboKeyboardHook.ItemIndex := 0;
   MakeShortcutHelpButton(ParentSurface, lblKeyboardHook.Top, 5);
 
-  // Row 4 â€” Screen Size label
+  // Row 4 — Screen Size label
   lblScreenSize := TLabel.Create(ParentSurface);
   lblScreenSize.Parent := ParentSurface;
   lblScreenSize.Left := ScaleX(10);
@@ -5342,7 +5342,7 @@ begin
   lblScreenSize.Caption := 'Window Size:';
   lblScreenSize.AutoSize := True;
 
-  // Row 4 â€” Resolution drop-down
+  // Row 4 — Resolution drop-down
   cboResolution := TComboBox.Create(ParentSurface);
   cboResolution.Parent := ParentSurface;
   cboResolution.Left := lblScreenSize.Left + ScaleX(72);
@@ -5359,7 +5359,7 @@ begin
   cboResolution.ItemIndex := 1;  // default: 1366 x 768
   cboResolution.OnChange := @OnResolutionChange;
 
-  // Row 4 â€” Full Screen checkbox
+  // Row 4 — Full Screen checkbox
   chkFullScreen := TCheckBox.Create(ParentSurface);
   chkFullScreen.Parent := ParentSurface;
   chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
@@ -5370,7 +5370,7 @@ begin
   chkFullScreen.OnClick := @OnFullScreenClick;
   cboResolution.Enabled := True;
 
-  // Row 4 â€” Use All Monitors
+  // Row 4 — Use All Monitors
   chkUseAllMonitors := TCheckBox.Create(ParentSurface);
   chkUseAllMonitors.Parent := ParentSurface;
   chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
@@ -5381,7 +5381,7 @@ begin
   chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
   MakeShortcutHelpButton(ParentSurface, lblScreenSize.Top - ScaleY(1), 3);
 
-  // Row 4b â€” Custom resolution W/H inputs (hidden until "Custom" is selected)
+  // Row 4b — Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
   lblCustomWidth.Parent := ParentSurface;
   lblCustomWidth.Left := cboResolution.Left;
@@ -5414,7 +5414,7 @@ begin
   edtCustomHeight.Text := '1080';
   edtCustomHeight.Visible := False;
 
-  // Row 5 â€” Performance section header (offset by extra row to clear Custom resolution inputs)
+  // Row 5 — Performance section header (offset by extra row to clear Custom resolution inputs)
   TmpLabel := TLabel.Create(ParentSurface);
   TmpLabel.Parent := ParentSurface;
   TmpLabel.Left := ScaleX(10);
@@ -5424,7 +5424,7 @@ begin
   TmpLabel.AutoSize := True;
   MakeShortcutHelpButton(ParentSurface, TmpLabel.Top, 4);
 
-  // Row 6 â€” Experience checkboxes (2 columns, 3 rows)
+  // Row 6 — Experience checkboxes (2 columns, 3 rows)
   // Col 1, Row 1
   chkExpWallpaper := TCheckBox.Create(ParentSurface);
   chkExpWallpaper.Parent := ParentSurface;
@@ -5488,7 +5488,7 @@ begin
   lblMultiShortcutEditingNote.AutoSize := True;
   lblMultiShortcutEditingNote.Visible := False;
 
-  // Row 4 â€” "Open advanced shortcut options" checkbox (shown only in Edit Shortcuts mode)
+  // Row 4 — "Open advanced shortcut options" checkbox (shown only in Edit Shortcuts mode)
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
@@ -5806,10 +5806,10 @@ begin
   InstallHintOffset := 0;
   if TermWrapAlreadyInstalled then
   begin
-    // TermWrap is installed â€” check whether versions/sizes match (upgrade) or are identical (re-install)
+    // TermWrap is installed — check whether versions/sizes match (upgrade) or are identical (re-install)
     if (GetInstalledTermWrapVersion() = '{#SourceTermWrapVersion}') and (GetInstalledTermWrapSize() = '{#SourceTermWrapSize}') then
     begin
-      // Case 2: Same version and size â€” show "Re-install TermWrap", unchecked, with hint sub-label
+      // Case 2: Same version and size — show "Re-install TermWrap", unchecked, with hint sub-label
       chkInstallTermWrap.Caption := 'Re-install TermWrap';
       chkInstallTermWrap.Checked := False;
 
@@ -5828,14 +5828,14 @@ begin
     end
     else
     begin
-      // Case 3: Different version or size â€” show "Upgrade TermWrap", checked, no sub-label
+      // Case 3: Different version or size — show "Upgrade TermWrap", checked, no sub-label
       chkInstallTermWrap.Caption := 'Upgrade TermWrap';
       chkInstallTermWrap.Checked := True;
     end;
   end
   else
   begin
-    // Case 1: Not installed â€” show "Install TermWrap", checked, no sub-label
+    // Case 1: Not installed — show "Install TermWrap", checked, no sub-label
     chkInstallTermWrap.Caption := 'Install TermWrap';
     chkInstallTermWrap.Checked := True;
   end;
@@ -6136,7 +6136,7 @@ begin
   except
   end;
 
-  // Shortcut Settings page â€” reachable from Create Users, Existing Users, and Edit Shortcuts.
+  // Shortcut Settings page — reachable from Create Users, Existing Users, and Edit Shortcuts.
   // Anchored to UserPage.ID so it physically follows UserPage (and therefore ExistingUsers/
   // EditShortcuts, which are all before UserPage in traversal order).
   Page_ShortcutSettings := CreateCustomPage(
@@ -6798,6 +6798,50 @@ begin
         BuildCreateShortcutsControls;
       end;
     end;
+
+    // Log detailed user selections on the Install Options page
+    LogSectionHeader('USER SELECTIONS');
+    if Assigned(rbInstall) and rbInstall.Checked then
+    begin
+      LogInfo('  (x) Install');
+      if Assigned(chkInstallTermWrap) then
+      begin
+        if chkInstallTermWrap.Checked then
+          LogInfo('       [x] Install TermWrap')
+        else
+          LogInfo('       [ ] Install TermWrap');
+      end;
+      if Assigned(chkCreateRdpShortcuts) then
+      begin
+        if chkCreateRdpShortcuts.Checked then
+          LogInfo('       [x] Create Shortcuts')
+        else
+          LogInfo('       [ ] Create Shortcuts');
+      end;
+      if DoCreateRdpShortcuts then
+      begin
+        if Assigned(rbCreateUsers) and rbCreateUsers.Checked then
+        begin
+          LogInfo('          (x) Create New Users');
+          LogInfo('          ( ) Use Existing Users');
+        end
+        else if Assigned(rbUseExistingUsers) and rbUseExistingUsers.Checked then
+        begin
+          LogInfo('          ( ) Create New Users');
+          LogInfo('          (x) Use Existing Users');
+        end;
+      end;
+    end
+    else if Assigned(rbEditShortcutSettings) and rbEditShortcutSettings.Checked then
+      LogInfo('  (x) Edit Shortcut Settings')
+    else if Assigned(rbEditSystemwideSettings) and rbEditSystemwideSettings.Checked then
+      LogInfo('  (x) Edit System-wide RDP Settings')
+    else if Assigned(rbShowRDPInfo) and rbShowRDPInfo.Checked then
+      LogInfo('  (x) Tune System Performance')
+    else if Assigned(rbQuickFixes) and rbQuickFixes.Checked then
+      LogInfo('  (x) Quick Fixes')
+    else if Assigned(rbUninstall) and rbUninstall.Checked then
+      LogInfo('  (x) Uninstall');
   end
   else if CurPageID = EditShortcutPage.ID then
   begin
@@ -6817,6 +6861,11 @@ begin
       if Assigned(ShortcutCheckBoxes[i]) and ShortcutCheckBoxes[i].Checked then
         SelectedShortcutPaths.Add(DesktopRdpFiles[i]);
     end;
+
+    // Log which shortcuts the user selected
+    LogDebug('EditShortcutPage: ' + IntToStr(SelectedShortcutPaths.Count) + ' shortcut(s) selected:');
+    for i := 0 to SelectedShortcutPaths.Count - 1 do
+      LogDebug('  [x] ' + ExtractFileName(SelectedShortcutPaths[i]));
 
     if SelectedShortcutPaths.Count = 0 then
     begin
@@ -6860,7 +6909,7 @@ begin
         NewShortcutBase := Trim(edtShortcutName.Text);
         if NewShortcutBase <> '' then
         begin
-          // Validate shortcut name â€” reject invalid Windows filename characters
+          // Validate shortcut name — reject invalid Windows filename characters
           if not IsValidShortcutName(NewShortcutBase) then
           begin
             MsgBox(
@@ -6913,6 +6962,59 @@ begin
             end;
           end;
         end;
+      end;
+
+      // Log the shortcut settings being applied
+      LogSectionHeader('SHORTCUT SETTINGS');
+      if Assigned(edtShortcutName) and edtShortcutName.Visible then
+        LogKeyValue('Shortcut name', edtShortcutName.Text);
+      if Assigned(chkFullScreen) then
+      begin
+        if chkFullScreen.Checked then LogInfo('  [x] Full Screen') else LogInfo('  [ ] Full Screen');
+      end;
+      if Assigned(chkUseAllMonitors) then
+      begin
+        if chkUseAllMonitors.Checked then LogInfo('  [x] Use All Monitors') else LogInfo('  [ ] Use All Monitors');
+      end;
+      if Assigned(cboResolution) and (cboResolution.ItemIndex >= 0) then
+        LogKeyValue('Resolution', cboResolution.Items[cboResolution.ItemIndex]);
+      if Assigned(chkCopyPaste) then
+      begin
+        if chkCopyPaste.Checked then LogInfo('  [x] Redirect Clipboard') else LogInfo('  [ ] Redirect Clipboard');
+      end;
+      if Assigned(chkSound) then
+      begin
+        if chkSound.Checked then LogInfo('  [x] Play Sounds') else LogInfo('  [ ] Play Sounds');
+      end;
+      if Assigned(cboKeyboardHook) then
+        LogKeyValue('Keyboard hook mode', IntToStr(cboKeyboardHook.ItemIndex));
+      if Assigned(chkShowMoreShortcutOptions) then
+      begin
+        if chkShowMoreShortcutOptions.Checked then LogInfo('  [x] Advanced mstsc editor') else LogInfo('  [ ] Advanced mstsc editor');
+      end;
+      if Assigned(chkExpWallpaper) then
+      begin
+        if chkExpWallpaper.Checked then LogInfo('  [x] Experience: Wallpaper') else LogInfo('  [ ] Experience: Wallpaper');
+      end;
+      if Assigned(chkExpFontSmooth) then
+      begin
+        if chkExpFontSmooth.Checked then LogInfo('  [x] Experience: Font Smoothing') else LogInfo('  [ ] Experience: Font Smoothing');
+      end;
+      if Assigned(chkExpComposition) then
+      begin
+        if chkExpComposition.Checked then LogInfo('  [x] Experience: Desktop Composition') else LogInfo('  [ ] Experience: Desktop Composition');
+      end;
+      if Assigned(chkExpDragContents) then
+      begin
+        if chkExpDragContents.Checked then LogInfo('  [x] Experience: Drag Contents') else LogInfo('  [ ] Experience: Drag Contents');
+      end;
+      if Assigned(chkExpMenuAnim) then
+      begin
+        if chkExpMenuAnim.Checked then LogInfo('  [x] Experience: Menu Animations') else LogInfo('  [ ] Experience: Menu Animations');
+      end;
+      if Assigned(chkExpVisualStyles) then
+      begin
+        if chkExpVisualStyles.Checked then LogInfo('  [x] Experience: Visual Styles') else LogInfo('  [ ] Experience: Visual Styles');
       end;
 
       // Write shortcut settings NOW (NextButtonClick fires for all modes, unlike ssPostInstall
@@ -7030,6 +7132,20 @@ begin
         end;
       end;
 
+      // Log which existing users were selected
+      LogSectionHeader('USER SELECTIONS - Existing Users');
+      LogKeyValue('Selected users', IntToStr(SelectedCount));
+      for i := 0 to High(UserCheckBoxes) do
+      begin
+        if Assigned(UserCheckBoxes[i]) then
+        begin
+          if UserCheckBoxes[i].Checked then
+            LogInfo('  [x] ' + LocalUserDisplayList[i])
+          else
+            LogInfo('  [ ] ' + LocalUserDisplayList[i]);
+        end;
+      end;
+
       if SelectedCount = 0 then
       begin
         MsgBox('Select at least one user to create a shortcut.', mbError, MB_OK);
@@ -7058,6 +7174,23 @@ begin
     Password := UserPage.Values[1];
     
     // Check if user selected "I'm done creating users"
+    // Log the current user creation state
+    LogSectionHeader('USER SELECTIONS - New Users');
+    if Assigned(AddMoreRadio) and Assigned(DoneRadio) then
+    begin
+      if AddMoreRadio.Checked then
+        LogInfo('  (x) Add more users')
+      else
+        LogInfo('  ( ) Add more users');
+      if DoneRadio.Checked then
+        LogInfo('  (x) Done creating users')
+      else
+        LogInfo('  ( ) Done creating users');
+    end;
+    if UserName <> '' then
+      LogInfo('  Current user: ' + UserName);
+    LogKeyValue('Users entered so far', IntToStr(UsersList.Count));
+
     if DoneRadio.Checked then
     begin
       // If current fields have data, validate and add before counting
@@ -7175,6 +7308,8 @@ begin
     UserPage.Values[0] := '';
     UserPage.Values[1] := '';
     
+    LogInfo('Added user ' + UserName + ' to list; staying on page for more entries');
+
     // Default to "I'm done adding users" for the next entry
     DoneRadio.Checked := True;
     AddMoreRadio.Checked := False;
@@ -8181,7 +8316,7 @@ begin
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
-    // Show RDP Info is a display-only status page â€” hide the Next button so the
+    // Show RDP Info is a display-only status page — hide the Next button so the
     // user views the info and closes the installer via Cancel when done.
     WizardForm.NextButton.Visible := False;
 
@@ -8192,7 +8327,7 @@ begin
     if Assigned(lblWrapperVer) then lblWrapperVer.Caption := '--';
     if Assigned(lblListener) then lblListener.Caption := '--';
 
-    // System Status â€” refresh live values each time the page is shown
+    // System Status — refresh live values each time the page is shown
     DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
     if DisplayVersion = '' then
       DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId', '');
