@@ -7073,6 +7073,31 @@ begin
       exit;
     end;
     edtRdpPort.Text := IntToStr(RdpPortValue);
+
+    // Log the system-wide settings being applied
+    LogSectionHeader('USER SELECTIONS - System-wide RDP Settings');
+    if Assigned(chkEnableRDP) then
+    begin
+      if chkEnableRDP.Checked then LogInfo('  [x] Enable Remote Desktop') else LogInfo('  [ ] Enable Remote Desktop');
+    end;
+    if Assigned(chkShowUsers) then
+    begin
+      if chkShowUsers.Checked then LogInfo('  [x] Show users on logon screen') else LogInfo('  [ ] Show users on logon screen');
+    end;
+    if Assigned(chkPreventDuplicate) then
+    begin
+      if chkPreventDuplicate.Checked then LogInfo('  [x] Prevent duplicate connections per user') else LogInfo('  [ ] Prevent duplicate connections per user');
+    end;
+    if Assigned(chkHideSecurityWarnings) then
+    begin
+      if chkHideSecurityWarnings.Checked then LogInfo('  [x] Hide most security warnings') else LogInfo('  [ ] Hide most security warnings');
+    end;
+    if Assigned(edtRdpPort) then
+      LogKeyValue('RDP Port', edtRdpPort.Text);
+    if Assigned(chkRestartRDP) then
+    begin
+      if chkRestartRDP.Checked then LogInfo('  [x] Restart RDP Service') else LogInfo('  [ ] Restart RDP Service');
+    end;
   end
   else if CurPageID = Page_CreateShortcutsForExistingUsers.ID then
   begin
@@ -7159,6 +7184,29 @@ begin
       end;
 
       Result := True;
+  end
+  else if CurPageID = QuickFixesPage.ID then
+  begin
+    // Log the Quick Fixes selection
+    LogSectionHeader('USER SELECTIONS - Quick Fixes');
+    if Assigned(rbQFRestartRDP) and rbQFRestartRDP.Checked then
+    begin
+      LogInfo('  (x) Restart RDP Service');
+      LogInfo('  ( ) Set all Local Accounts to Never Expire');
+      LogInfo('  ( ) Restore deleted Remote Desktop Service');
+    end
+    else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
+    begin
+      LogInfo('  ( ) Restart RDP Service');
+      LogInfo('  (x) Set all Local Accounts to Never Expire');
+      LogInfo('  ( ) Restore deleted Remote Desktop Service');
+    end
+    else if Assigned(rbQFRestoreTermService) and rbQFRestoreTermService.Checked then
+    begin
+      LogInfo('  ( ) Restart RDP Service');
+      LogInfo('  ( ) Set all Local Accounts to Never Expire');
+      LogInfo('  (x) Restore deleted Remote Desktop Service');
+    end;
   end
   else if CurPageID = UserPage.ID then
   begin
