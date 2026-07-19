@@ -4,3 +4,4 @@ scripts/*.exe
 
 # Local / user-specific settings
 settings.local.json
+.roo/
