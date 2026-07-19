@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.5.9"
-#define APP_VERSION_FILEINFO "0.5.9.0"
+#define APP_VERSION_STRING "0.6.0"
+#define APP_VERSION_FILEINFO "0.6.0.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
@@ -251,7 +251,6 @@ var
 
   lblActionsHeader: TLabel;
   chkRestartRDP: TCheckBox;
-  chkAccountNeverExpires: TCheckBox;
   // Progress UI on Installing page
   StepsHeaderLabel: TLabel;
   StepAddExcl: TLabel;
@@ -498,7 +497,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = '2026-06-12-2-34-27';
+  BUILD_FINGERPRINT = '2026-07-19-0-6-0';
 
 // External Windows API declarations
 
