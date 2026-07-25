@@ -46,13 +46,14 @@
 //      - Cross-verify: rdp1 CMS fails with NO_OVERRIDE (as expected)
 //      - Error code: STATUS_INVALID_SIGNATURE (0xC000A000, -1073700864)
 //
-// 2. WRITESHORTCUTSETTINGSTORDPFILE CHANGES FILE ENCODING/LINE ENDINGS
-//    The installer's WriteShortcutSettingsToRdpFile runs a PowerShell script
-//    that uses [IO.File]::ReadAllLines() then [IO.File]::WriteAllLines().
-//    This converts the RDP file from UTF-16LE+BOM+\r\r\n to UTF-8+\r\n.
-//    RdpSignTool.exe then reads the UTF-8 file and re-writes it as
-//    UTF-16LE+BOM+\r\r\n.  Both encodings are handled, so this is safe —
-//    the field values are pure ASCII, so no data is lost.
+// 2. LINE ENDINGS AND ENCODING
+//    RdpSignTool.exe always writes output files as UTF-16LE+BOM with \r\n
+//    line endings.  On input, both UTF-16LE+BOM and UTF-8 are detected
+//    automatically, and line terminators \r\r\n, \r\n, \r, and \n are all
+//    handled correctly.  This ensures round-trip safety when the installer's
+//    WriteShortcutSettingsToRdpFile (which uses PowerShell [IO.File]::ReadAllLines
+//    and WriteAllLines, converting to UTF-8+\r\n) processes a file before
+//    RdpSignTool does.
 //
 // 3. TESTING SIGNATURES (requires admin for cert private key access)
 //    To verify a signature from PowerShell (non-admin for CPS):
@@ -491,7 +492,7 @@ namespace RdpWrapKit
                 outLines.Add("signscope:s:" + effectiveSignscope);
                 outLines.Add("signature:s:" + sigB64);
 
-                string outText = string.Join("\r\r\n", outLines) + "\r\r\n";
+                string outText = string.Join("\r\n", outLines) + "\r\n";
                 byte[] outBytes = Combine(
                     new byte[] { 0xFF, 0xFE },  // UTF-16LE BOM
                     Encoding.Unicode.GetBytes(outText));
