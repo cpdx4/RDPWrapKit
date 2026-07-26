@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.6.0"
-#define APP_VERSION_FILEINFO "0.6.0.0"
+#define APP_VERSION_STRING "0.6.1"
+#define APP_VERSION_FILEINFO "0.6.1.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
