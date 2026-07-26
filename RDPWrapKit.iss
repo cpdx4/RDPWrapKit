@@ -110,6 +110,8 @@ procedure OnInstallModeChange(Sender: TObject); forward;
 procedure OnFullScreenClick(Sender: TObject); forward;
 procedure OnUseAllMonitorsClick(Sender: TObject); forward;
 procedure OnResolutionChange(Sender: TObject); forward;
+procedure OnPerformanceHeaderClick(Sender: TObject); forward;
+procedure OnBasicHeaderClick(Sender: TObject); forward;
 function IsTermWrapInstalled(): Boolean; forward;
 function GetInstalledTermWrapVersion(): string; forward;
 function GetInstalledTermWrapSize(): string; forward;
@@ -202,6 +204,8 @@ var
   EditShortcutControlsBuilt: Boolean;
   EditShortcutAdvancedControlsBuilt: Boolean;
   CreateShortcutAdvancedControlsBuilt: Boolean;
+  ShowPerformanceSettings: Boolean;
+  ShowBasicSettings: Boolean;
   Page_CreateShortcutAdvanced: TWizardPage;
   CreateShortcutAdvancedLabel: TLabel;
   CreateShortcutAdvancedImage: TBitmapImage;
@@ -332,10 +336,15 @@ var
   chkExpDragContents: TCheckBox;
   chkExpMenuAnim: TCheckBox;
   chkExpVisualStyles: TCheckBox;
+  PerformancePanel: TPanel;
+  lblPerformanceHeader: TLabel;
+  lblBasicHeader: TLabel;
+  BasicPanel: TPanel;
   // New shortcut name customization
   lblShortcutName: TLabel;
   edtShortcutName: TEdit;
   lblShortcutExtension: TLabel;
+  lblInstructional: TLabel;
   // Keyboard hook settings
   lblKeyboardHook: TLabel;
   cboKeyboardHook: TComboBox;
@@ -3516,6 +3525,50 @@ begin
   LogExit('OnResolutionChange');
 end;
 
+procedure OnPerformanceHeaderClick(Sender: TObject);
+begin
+  ShowPerformanceSettings := not ShowPerformanceSettings;
+  // Update the header label caption with arrow indicator
+  if ShowPerformanceSettings then
+    lblPerformanceHeader.Caption := '▼ Quality vs Performance (unchecked = better perf)'
+  else
+    lblPerformanceHeader.Caption := '▶ Quality vs Performance';
+  // Toggle visibility of the performance panel (contains all 6 checkboxes)
+  if Assigned(PerformancePanel) then
+    PerformancePanel.Visible := ShowPerformanceSettings
+  else
+  begin
+    // Fallback: toggle individual checkboxes (should not be needed, but safe)
+    if Assigned(chkExpWallpaper) then chkExpWallpaper.Visible := ShowPerformanceSettings;
+    if Assigned(chkExpFontSmooth) then chkExpFontSmooth.Visible := ShowPerformanceSettings;
+    if Assigned(chkExpComposition) then chkExpComposition.Visible := ShowPerformanceSettings;
+    if Assigned(chkExpDragContents) then chkExpDragContents.Visible := ShowPerformanceSettings;
+    if Assigned(chkExpMenuAnim) then chkExpMenuAnim.Visible := ShowPerformanceSettings;
+    if Assigned(chkExpVisualStyles) then chkExpVisualStyles.Visible := ShowPerformanceSettings;
+  end;
+end;
+
+procedure OnBasicHeaderClick(Sender: TObject);
+begin
+  ShowBasicSettings := not ShowBasicSettings;
+  // Update the header label caption with arrow indicator
+  if ShowBasicSettings then
+    lblBasicHeader.Caption := '▼ Basic Shortcut Settings'
+  else
+    lblBasicHeader.Caption := '▶ Basic Shortcut Settings';
+  // Toggle visibility of the basic settings panel
+  if Assigned(BasicPanel) then
+    BasicPanel.Visible := ShowBasicSettings
+  else
+  begin
+    // Fallback: toggle individual controls (should not be needed, but safe)
+    if Assigned(chkCopyPaste) then chkCopyPaste.Visible := ShowBasicSettings;
+    if Assigned(chkSound) then chkSound.Visible := ShowBasicSettings;
+    if Assigned(lblKeyboardHook) then lblKeyboardHook.Visible := ShowBasicSettings;
+    if Assigned(cboKeyboardHook) then cboKeyboardHook.Visible := ShowBasicSettings;
+  end;
+end;
+
 function IsTermWrapInstalled(): Boolean;
 var
   TermWrapPath, ZydisPath: string;
@@ -5248,7 +5301,7 @@ begin
 end;
 
 // Displays help for a setting on the Shortcut Settings page.
-// Tag 1=Shortcut Name, 2=Copy&Paste & Sound, 3=Monitor settings (Window Size/Full Screen/All Monitors), 4=Performance vs Quality checkboxes
+// Tag 1=Shortcut Name, 3=Monitor settings (Window Size/Full Screen/All Monitors), 4=Performance vs Quality checkboxes, 6=Basic Shortcut Settings (combined)
 procedure ShowShortcutHelpInfo(Sender: TObject);
 var
   HelpText: string;
@@ -5257,15 +5310,6 @@ begin
     1: HelpText :=
          'Shortcut Name' + #13#10#13#10 +
          'This is the name of the RDP shortcut file that will be created on the Desktop. ';
-    2: HelpText :=
-         'Allow Copy & Paste' + #13#10#13#10 +
-         'Enables clipboard sharing between the remote session and the local PC.' + #13#10#13#10 +
-         'When checked, you can copy text, images, and files on one side and paste them on the other. ' +
-         'When unchecked, the clipboard is isolated. Nothing can be transferred between the two sides.' + #13#10#13#10 +        
-         'Allow Sound' + #13#10#13#10 +
-         'Controls whether audio from the remote session plays on the local PC.' + #13#10#13#10 +
-         'When checked, sounds (system alerts, media playback, etc.) from the remote session are ' +
-         'redirected to and played through the local PC''s speakers. ';
     3: HelpText :=
          'Window Size / Full Screen / Use All Monitors' + #13#10#13#10 +
          'Window Size: sets the resolution of the remote desktop window.' + #13#10 +
@@ -5284,15 +5328,13 @@ begin
          'Show contents while dragging: renders window contents as you drag them.' + #13#10 +
          'Animated menus & transitions: enables fade/slide animations on menus.' + #13#10 +
          'Visual themes: enables Windows visual styling (disabling gives a classic look).';
-    5: HelpText :=
-        'Apply Keyboard Combos' + #13#10#13#10 +
-        'Controls how Windows key combinations (like ALT+TAB) are handled:' + #13#10#13#10 +
-        'To the main/host PC:' + #13#10 +
-        '  Windows key combinations (like ALT+TAB) are processed outside of RDPs on your main/host PC' + #13#10#13#10 +
-        'To the RDP:' + #13#10 +
-        '  Windows key combinations (like ALT+TAB) are processed by the RDP window' + #13#10#13#10 +
-        'To the RDP, only if full-screen:' + #13#10 +
-        '  Windows key combinations (like ALT+TAB) are processed by the RDP window only if it is full-screen';
+    6: HelpText :=
+        'Allow Copy & Paste' + #13#10#13#10 +
+        'Enables clipboard sharing between your PC and the RDP session.' + #13#10#13#10 +
+        'Allow Sound' + #13#10#13#10 +
+        'Plays audio from the RDP session on your device.' + #13#10#13#10 +
+        'Keyboard Combos' + #13#10#13#10 +
+        'Controls where keyboard shortcuts like ALT+TAB are sent (host PC or RDP session).';
  else
     HelpText := 'No additional information available for this setting.';
   end;
@@ -5318,22 +5360,32 @@ begin
 end;
 
 procedure BuildShortcutSettingsBlock(ParentSurface: TWinControl; StartTop: Integer);
-var
-  TmpLabel: TLabel;
 begin
 
-  // Shortcut Name field at top
+  // Green instructional label at the very top (where Shortcut Name used to be)
+  lblInstructional := TLabel.Create(ParentSurface);
+  lblInstructional.Parent := ParentSurface;
+  lblInstructional.Left := ScaleX(10);
+  lblInstructional.Top := StartTop;
+  lblInstructional.Caption := 'If you don''t know what to choose here, just click [Next]';
+  lblInstructional.ParentFont := False;
+  lblInstructional.StyleElements := lblInstructional.StyleElements - [seFont];
+  lblInstructional.Font.Style := [fsBold];
+  lblInstructional.Font.Color := RGBToColor(0, 200, 0);
+  lblInstructional.AutoSize := True;
+
+  // Shortcut Name field (moved down below the instructional label)
   lblShortcutName := TLabel.Create(ParentSurface);
   lblShortcutName.Parent := ParentSurface;
   lblShortcutName.Left := ScaleX(10);
-  lblShortcutName.Top := StartTop;
+  lblShortcutName.Top := StartTop + ScaleY(22);
   lblShortcutName.Caption := 'Shortcut Name:';
   lblShortcutName.AutoSize := True;
 
   edtShortcutName := TEdit.Create(ParentSurface);
   edtShortcutName.Parent := ParentSurface;
   edtShortcutName.Left := lblShortcutName.Left + ScaleX(84);
-  edtShortcutName.Top := StartTop - ScaleY(2);
+  edtShortcutName.Top := lblShortcutName.Top - ScaleY(2);
   edtShortcutName.Width := ScaleX(120);
   edtShortcutName.Text := 'macro1';
 
@@ -5346,63 +5398,17 @@ begin
 
   MakeShortcutHelpButton(ParentSurface, lblShortcutName.Top, 1);
 
-  // Section separator label
-  lblShortcutSection := TLabel.Create(ParentSurface);
-  lblShortcutSection.Parent := ParentSurface;
-  lblShortcutSection.Left := ScaleX(10);
-  lblShortcutSection.Top := lblShortcutName.Top + ScaleY(22);
-  lblShortcutSection.Caption := 'Basic Shortcut Settings (editing: <>)';
-  lblShortcutSection.Font.Style := [fsBold];
-  lblShortcutSection.AutoSize := True;
+  // --- Window Size row moved up (always visible, right after Shortcut Name) ---
 
-  // Row 2 — Copy & Paste (1st column)
-  chkCopyPaste := TCheckBox.Create(ParentSurface);
-  chkCopyPaste.Parent := ParentSurface;
-  chkCopyPaste.Left := ScaleX(10);
-  chkCopyPaste.Top := lblShortcutSection.Top + ScaleY(24);
-  chkCopyPaste.Width := ScaleX(150);
-  chkCopyPaste.Caption := 'Allow Copy && Paste';
-  chkCopyPaste.Checked := True;
-
-  // Row 2 — Sound (2nd column)
-  chkSound := TCheckBox.Create(ParentSurface);
-  chkSound.Parent := ParentSurface;
-  chkSound.Left := ScaleX(180);
-  chkSound.Top := lblShortcutSection.Top + ScaleY(24);
-  chkSound.Width := ScaleX(180);
-  chkSound.Caption := 'Allow Sound';
-  chkSound.Checked := True;
-  MakeShortcutHelpButton(ParentSurface, chkSound.Top, 2);
-
-  // Row 3 — Keyboard Combos dropdown (after Sound)
-  lblKeyboardHook := TLabel.Create(ParentSurface);
-  lblKeyboardHook.Parent := ParentSurface;
-  lblKeyboardHook.Left := ScaleX(10);
-  lblKeyboardHook.Top := chkSound.Top + ScaleY(24);
-  lblKeyboardHook.Caption := 'Keyboard Combos (like ALT+TAB):';
-  lblKeyboardHook.AutoSize := True;
-
-  cboKeyboardHook := TComboBox.Create(ParentSurface);
-  cboKeyboardHook.Parent := ParentSurface;
-  cboKeyboardHook.Left := ScaleX(200);
-  cboKeyboardHook.Top := chkSound.Top + ScaleY(20);
-  cboKeyboardHook.Width := ScaleX(210);
-  cboKeyboardHook.Style := csDropDownList;
-  cboKeyboardHook.Items.Add('Send to the main/host PC');
-  cboKeyboardHook.Items.Add('Send to the RDP');
-  cboKeyboardHook.Items.Add('Send to the RDP, only if full-screen');
-  cboKeyboardHook.ItemIndex := 0;
-  MakeShortcutHelpButton(ParentSurface, lblKeyboardHook.Top, 5);
-
-  // Row 4 — Screen Size label
+  // Row — Screen Size label
   lblScreenSize := TLabel.Create(ParentSurface);
   lblScreenSize.Parent := ParentSurface;
   lblScreenSize.Left := ScaleX(10);
-  lblScreenSize.Top := cboKeyboardHook.Top + ScaleY(28);
+  lblScreenSize.Top := lblShortcutName.Top + ScaleY(26);
   lblScreenSize.Caption := 'Window Size:';
   lblScreenSize.AutoSize := True;
 
-  // Row 4 — Resolution drop-down
+  // Row — Resolution drop-down
   cboResolution := TComboBox.Create(ParentSurface);
   cboResolution.Parent := ParentSurface;
   cboResolution.Left := lblScreenSize.Left + ScaleX(72);
@@ -5419,7 +5425,7 @@ begin
   cboResolution.ItemIndex := 1;  // default: 1366 x 768
   cboResolution.OnChange := @OnResolutionChange;
 
-  // Row 4 — Full Screen checkbox
+  // Row — Full Screen checkbox
   chkFullScreen := TCheckBox.Create(ParentSurface);
   chkFullScreen.Parent := ParentSurface;
   chkFullScreen.Left := cboResolution.Left + cboResolution.Width + ScaleX(10);
@@ -5430,7 +5436,7 @@ begin
   chkFullScreen.OnClick := @OnFullScreenClick;
   cboResolution.Enabled := True;
 
-  // Row 4 — Use All Monitors
+  // Row — Use All Monitors
   chkUseAllMonitors := TCheckBox.Create(ParentSurface);
   chkUseAllMonitors.Parent := ParentSurface;
   chkUseAllMonitors.Left := chkFullScreen.Left + chkFullScreen.Width + ScaleX(20);
@@ -5441,7 +5447,7 @@ begin
   chkUseAllMonitors.OnClick := @OnUseAllMonitorsClick;
   MakeShortcutHelpButton(ParentSurface, lblScreenSize.Top - ScaleY(1), 3);
 
-  // Row 4b — Custom resolution W/H inputs (hidden until "Custom" is selected)
+  // Row — Custom resolution W/H inputs (hidden until "Custom" is selected)
   lblCustomWidth := TLabel.Create(ParentSurface);
   lblCustomWidth.Parent := ParentSurface;
   lblCustomWidth.Left := cboResolution.Left;
@@ -5473,68 +5479,151 @@ begin
   edtCustomHeight.Width := ScaleX(45);
   edtCustomHeight.Text := '1080';
   edtCustomHeight.Visible := False;
+// --- Basic Shortcut Settings accordion (NEW — collapsed by default) ---
+lblBasicHeader := TLabel.Create(ParentSurface);
+lblBasicHeader.Parent := ParentSurface;
+lblBasicHeader.Left := ScaleX(10);
+lblBasicHeader.Top := lblScreenSize.Top + ScaleY(52);
+lblBasicHeader.Caption := '▶ Basic Shortcut Settings';
+lblBasicHeader.Font.Style := [fsBold];
+lblBasicHeader.AutoSize := True;
+lblBasicHeader.Cursor := crHandPoint;
+lblBasicHeader.OnClick := @OnBasicHeaderClick;
+// Single help button for the entire Basic accordion (replaces individual per-setting buttons)
+MakeShortcutHelpButton(ParentSurface, lblBasicHeader.Top, 6);
 
-  // Row 5 — Performance section header (offset by extra row to clear Custom resolution inputs)
-  TmpLabel := TLabel.Create(ParentSurface);
-  TmpLabel.Parent := ParentSurface;
-  TmpLabel.Left := ScaleX(10);
-  TmpLabel.Top := lblScreenSize.Top + ScaleY(52);
-  TmpLabel.Caption := 'Quality vs Performance - (Unchecked = better performance):';
-  TmpLabel.Font.Style := [fsBold];
-  TmpLabel.AutoSize := True;
-  MakeShortcutHelpButton(ParentSurface, TmpLabel.Top, 4);
 
-  // Row 6 — Experience checkboxes (2 columns, 3 rows)
+  // Collapsible panel for Basic Shortcut Settings controls
+  BasicPanel := TPanel.Create(ParentSurface);
+  BasicPanel.Parent := ParentSurface;
+  BasicPanel.Left := ScaleX(10);
+  BasicPanel.Top := lblBasicHeader.Top + ScaleY(18);
+  BasicPanel.Width := ParentSurface.Width - ScaleX(20);
+  BasicPanel.Height := ScaleY(56);
+  BasicPanel.BevelOuter := bvNone;
+  BasicPanel.Visible := ShowBasicSettings;
+
+  // Inside BasicPanel — Copy & Paste (1st column)
+  chkCopyPaste := TCheckBox.Create(BasicPanel);
+  chkCopyPaste.Parent := BasicPanel;
+  chkCopyPaste.Left := ScaleX(10);
+  chkCopyPaste.Top := ScaleY(4);
+  chkCopyPaste.Width := ScaleX(150);
+  chkCopyPaste.Caption := 'Allow Copy && Paste';
+  chkCopyPaste.Checked := True;
+
+  // Inside BasicPanel — Sound (2nd column)
+  chkSound := TCheckBox.Create(BasicPanel);
+  chkSound.Parent := BasicPanel;
+  chkSound.Left := ScaleX(180);
+  chkSound.Top := ScaleY(4);
+  chkSound.Width := ScaleX(180);
+  chkSound.Caption := 'Allow Sound';
+  chkSound.Checked := True;
+
+  // Inside BasicPanel — Keyboard Combos dropdown
+  lblKeyboardHook := TLabel.Create(BasicPanel);
+  lblKeyboardHook.Parent := BasicPanel;
+  lblKeyboardHook.Left := ScaleX(10);
+  lblKeyboardHook.Top := ScaleY(28);
+  lblKeyboardHook.Caption := 'Keyboard Combos (like ALT+TAB):';
+  lblKeyboardHook.AutoSize := True;
+
+  cboKeyboardHook := TComboBox.Create(BasicPanel);
+  cboKeyboardHook.Parent := BasicPanel;
+  cboKeyboardHook.Left := ScaleX(200);
+  cboKeyboardHook.Top := ScaleY(24);
+  cboKeyboardHook.Width := ScaleX(210);
+  cboKeyboardHook.Style := csDropDownList;
+  cboKeyboardHook.Items.Add('Send to the main/host PC');
+  cboKeyboardHook.Items.Add('Send to the RDP');
+  cboKeyboardHook.Items.Add('Send to the RDP, only if full-screen');
+  cboKeyboardHook.ItemIndex := 0;
+
+  // Keep lblShortcutSection for backward compatibility (invisible, code references set its caption)
+  lblShortcutSection := TLabel.Create(ParentSurface);
+  lblShortcutSection.Parent := ParentSurface;
+  lblShortcutSection.Left := ScaleX(10);
+  lblShortcutSection.Top := lblBasicHeader.Top;
+  lblShortcutSection.Caption := '▶ Basic Shortcut Settings';
+  lblShortcutSection.Font.Style := [fsBold];
+  lblShortcutSection.AutoSize := True;
+  lblShortcutSection.Visible := False;
+
+  // --- Quality vs Performance accordion (existing — collapsed by default) ---
+  lblPerformanceHeader := TLabel.Create(ParentSurface);
+  lblPerformanceHeader.Parent := ParentSurface;
+  lblPerformanceHeader.Left := ScaleX(10);
+  lblPerformanceHeader.Top := lblBasicHeader.Top + ScaleY(76);
+  lblPerformanceHeader.Caption := '▶ Quality vs Performance';
+  lblPerformanceHeader.Font.Style := [fsBold];
+  lblPerformanceHeader.Width := ScaleX(320);
+  lblPerformanceHeader.AutoSize := False;
+  lblPerformanceHeader.Cursor := crHandPoint;
+  lblPerformanceHeader.OnClick := @OnPerformanceHeaderClick;
+  MakeShortcutHelpButton(ParentSurface, lblPerformanceHeader.Top, 4);
+
+  // Collapsible panel containing the 6 experience checkboxes
+  PerformancePanel := TPanel.Create(ParentSurface);
+  PerformancePanel.Parent := ParentSurface;
+  PerformancePanel.Left := ScaleX(10);
+  PerformancePanel.Top := lblPerformanceHeader.Top + ScaleY(18);
+  PerformancePanel.Width := ParentSurface.Width - ScaleX(20);
+  PerformancePanel.Height := ScaleY(74);
+  PerformancePanel.BevelOuter := bvNone;
+  PerformancePanel.Visible := ShowPerformanceSettings;
+
+  // Row 6 — Experience checkboxes (2 columns, 3 rows), parented to PerformancePanel
   // Col 1, Row 1
-  chkExpWallpaper := TCheckBox.Create(ParentSurface);
-  chkExpWallpaper.Parent := ParentSurface;
-  chkExpWallpaper.Left := ScaleX(20);
-  chkExpWallpaper.Top := TmpLabel.Top + ScaleY(20);
+  chkExpWallpaper := TCheckBox.Create(PerformancePanel);
+  chkExpWallpaper.Parent := PerformancePanel;
+  chkExpWallpaper.Left := ScaleX(10);
+  chkExpWallpaper.Top := ScaleY(4);
   chkExpWallpaper.Width := ScaleX(180);
   chkExpWallpaper.Caption := 'Desktop wallpaper';
   chkExpWallpaper.Checked := False;
 
   // Col 2, Row 1
-  chkExpFontSmooth := TCheckBox.Create(ParentSurface);
-  chkExpFontSmooth.Parent := ParentSurface;
-  chkExpFontSmooth.Left := ScaleX(210);
-  chkExpFontSmooth.Top := chkExpWallpaper.Top;
-  chkExpFontSmooth.Width := ScaleX(180);
+  chkExpFontSmooth := TCheckBox.Create(PerformancePanel);
+  chkExpFontSmooth.Parent := PerformancePanel;
+  chkExpFontSmooth.Left := ScaleX(200);
+  chkExpFontSmooth.Top := ScaleY(4);
+  chkExpFontSmooth.Width := ScaleX(160);
   chkExpFontSmooth.Caption := 'Smooth text (ClearType)';
   chkExpFontSmooth.Checked := True;
 
   // Col 1, Row 2
-  chkExpComposition := TCheckBox.Create(ParentSurface);
-  chkExpComposition.Parent := ParentSurface;
-  chkExpComposition.Left := ScaleX(20);
-  chkExpComposition.Top := chkExpWallpaper.Top + ScaleY(22);
+  chkExpComposition := TCheckBox.Create(PerformancePanel);
+  chkExpComposition.Parent := PerformancePanel;
+  chkExpComposition.Left := ScaleX(10);
+  chkExpComposition.Top := ScaleY(26);
   chkExpComposition.Width := ScaleX(180);
   chkExpComposition.Caption := 'Transparent windows && effects';
   chkExpComposition.Checked := True;
 
   // Col 2, Row 2
-  chkExpDragContents := TCheckBox.Create(ParentSurface);
-  chkExpDragContents.Parent := ParentSurface;
-  chkExpDragContents.Left := ScaleX(210);
-  chkExpDragContents.Top := chkExpComposition.Top;
+  chkExpDragContents := TCheckBox.Create(PerformancePanel);
+  chkExpDragContents.Parent := PerformancePanel;
+  chkExpDragContents.Left := ScaleX(200);
+  chkExpDragContents.Top := ScaleY(26);
   chkExpDragContents.Width := ScaleX(230);
   chkExpDragContents.Caption := 'Show window contents while dragging';
   chkExpDragContents.Checked := True;
 
   // Col 1, Row 3
-  chkExpMenuAnim := TCheckBox.Create(ParentSurface);
-  chkExpMenuAnim.Parent := ParentSurface;
-  chkExpMenuAnim.Left := ScaleX(20);
-  chkExpMenuAnim.Top := chkExpComposition.Top + ScaleY(22);
+  chkExpMenuAnim := TCheckBox.Create(PerformancePanel);
+  chkExpMenuAnim.Parent := PerformancePanel;
+  chkExpMenuAnim.Left := ScaleX(10);
+  chkExpMenuAnim.Top := ScaleY(48);
   chkExpMenuAnim.Width := ScaleX(180);
   chkExpMenuAnim.Caption := 'Animated menus && transitions';
   chkExpMenuAnim.Checked := True;
 
   // Col 2, Row 3
-  chkExpVisualStyles := TCheckBox.Create(ParentSurface);
-  chkExpVisualStyles.Parent := ParentSurface;
-  chkExpVisualStyles.Left := ScaleX(210);
-  chkExpVisualStyles.Top := chkExpMenuAnim.Top;
+  chkExpVisualStyles := TCheckBox.Create(PerformancePanel);
+  chkExpVisualStyles.Parent := PerformancePanel;
+  chkExpVisualStyles.Left := ScaleX(200);
+  chkExpVisualStyles.Top := ScaleY(48);
   chkExpVisualStyles.Width := ScaleX(180);
   chkExpVisualStyles.Caption := 'Visual themes';
   chkExpVisualStyles.Checked := True;
@@ -5543,17 +5632,16 @@ begin
   lblMultiShortcutEditingNote := TLabel.Create(ParentSurface);
   lblMultiShortcutEditingNote.Parent := ParentSurface;
   lblMultiShortcutEditingNote.Left := ScaleX(10);
-  lblMultiShortcutEditingNote.Top := StartTop;
+  lblMultiShortcutEditingNote.Top := StartTop + ScaleY(22);
   lblMultiShortcutEditingNote.Font.Style := [fsBold];
   lblMultiShortcutEditingNote.AutoSize := True;
   lblMultiShortcutEditingNote.Visible := False;
 
-  // Row 4 — "Open advanced shortcut options" checkbox (shown in Edit Shortcuts mode for single shortcut,
-  // and in Install mode when creating a single new shortcut)
+  // "Open advanced shortcut options" checkbox (shown below the performance accordion)
   chkShowMoreShortcutOptions := TCheckBox.Create(ParentSurface);
   chkShowMoreShortcutOptions.Parent := ParentSurface;
   chkShowMoreShortcutOptions.Left := ScaleX(260);
-  chkShowMoreShortcutOptions.Top := chkExpMenuAnim.Top + ScaleY(49);
+  chkShowMoreShortcutOptions.Top := lblPerformanceHeader.Top + ScaleY(91);
   chkShowMoreShortcutOptions.Width := ScaleX(260);
   chkShowMoreShortcutOptions.Caption := 'Open advanced shortcut options (Next page)';
   chkShowMoreShortcutOptions.Checked := False;
@@ -5925,7 +6013,7 @@ begin
   rbCreateUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
   rbCreateUsers.Parent := CreateRdpShortcutsGroup;
   rbCreateUsers.Left := ScaleX(10);
-  rbCreateUsers.Top := ScaleY(8);
+  rbCreateUsers.Top := ScaleY(-2);
   rbCreateUsers.Width := ScaleX(340);
   rbCreateUsers.Caption := 'Create new users';
   rbCreateUsers.Checked := True;
@@ -5934,7 +6022,7 @@ begin
   rbUseExistingUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
   rbUseExistingUsers.Parent := CreateRdpShortcutsGroup;
   rbUseExistingUsers.Left := ScaleX(10);
-  rbUseExistingUsers.Top := ScaleY(32);
+  rbUseExistingUsers.Top := ScaleY(22);
   rbUseExistingUsers.Width := ScaleX(340);
   rbUseExistingUsers.Caption := 'Use existing users';
   rbUseExistingUsers.Checked := False;
@@ -6203,8 +6291,7 @@ begin
   Page_ShortcutSettings := CreateCustomPage(
     UserPage.ID,
     'Shortcut Settings',
-    'Configure the settings for your RDP desktop shortcuts.' + #13#10 + 
-    'If you dont know what to choose here, just click [Next]'
+    'Configure the settings for your RDP desktop shortcuts.'
   );
   BuildShortcutSettingsBlock(Page_ShortcutSettings.Surface, ScaleY(10));
 
@@ -6642,6 +6729,8 @@ begin
   EditShortcutControlsBuilt := False;
   EditShortcutAdvancedControlsBuilt := False;
   CreateShortcutAdvancedControlsBuilt := False;
+  ShowPerformanceSettings := False;  // collapsed by default
+  ShowBasicSettings := False;         // collapsed by default
   ShortcutsList := TStringList.Create;
   
 
