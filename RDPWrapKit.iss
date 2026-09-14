@@ -6010,11 +6010,8 @@ begin
       'Active RDP sessions will be disconnected. Check this box if you changed the port or want to ' +
       'ensure all settings are fully applied immediately.';
     8: HelpText :=
-      'Hide most security warnings' + #13#10#13#10 +
-      'When enabled, common security prompt dialogs related to RDP are hidden. Please be aware that ' +
-      'this can suppress warnings, which may have security implications. Files created by RDPWrapKit ' +
-      'are safe because they are Local RDP files.' + #13#10#13#10 +
-      'Exercise caution if you use RDP to connect to untrusted remote machines.';
+      'Placeholder' + #13#10#13#10 +
+      'Placeholder help text.';
     10: HelpText :=
       'Restart RDP Service' + #13#10#13#10 +
       'Stops and restarts the Windows Remote Desktop service (TermService).' + #13#10#13#10 +
@@ -6751,7 +6748,7 @@ begin
     chkHideSecurityWarnings.Left := childLeft;
     chkHideSecurityWarnings.Top := topPos;
     chkHideSecurityWarnings.Width := ScaleX(420) - childIndent;
-    chkHideSecurityWarnings.Caption := 'Hide most security warnings';
+    chkHideSecurityWarnings.Caption := 'Placeholder';
     chkHideSecurityWarnings.Checked := False;
     chkHideSecurityWarnings.ParentFont := False;
     chkHideSecurityWarnings.Font.Color := LabelColor;
