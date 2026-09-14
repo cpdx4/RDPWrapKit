@@ -122,6 +122,7 @@ procedure InitInstallerLog; forward;
 procedure WriteInstallerLog(const Msg: string); forward;
 procedure LogSectionHeader(const Title: string); forward;
 procedure LogKeyValue(const KeyName, KeyValue: string); forward;
+function GetLocalizedGroupName(const Sid, Fallback: string): string; forward;
 
 // Logger architecture forward declarations
 function GetThreadIdHex: string; forward;
@@ -313,6 +314,13 @@ var
   FinishedText: TLabel;
   // Button to open install log on finish page
   ViewLogButton: TButton;
+  // Administrator advisory page (shown when the LAUNCHING user is not an admin)
+  Page_AdminWarning: TWizardPage;
+  AdminWarningCloseButton: TButton;
+  AdminWarningContinueButton: TButton;
+  AdminWarningActive: Boolean;
+  LauncherAdminChecked: Boolean;
+  LauncherIsAdmin: Boolean;
   // Flag set when Smart App Control (VerifiedAndReputablePolicyState) is detected as On
   SmartAppControlIsOn: Boolean;
   // Shortcut settings controls on Create RDP User Account page
@@ -561,6 +569,44 @@ function GetSysColor(nIndex: DWORD): DWORD;
 
 function MessageBox(hWnd: Integer; lpText, lpCaption: String; uType: Cardinal): Integer;
   external 'MessageBoxW@user32.dll stdcall';
+
+// ---------------------------------------------------------------------------
+// INTERACTIVE (LAUNCHER) USER PATH RESOLUTION
+// ---------------------------------------------------------------------------
+// Under UAC the elevated installer runs with the admin token, so {userdesktop}
+// and {localappdata} resolve to the UAC account rather than the user who
+// launched the installer.  These helpers resolve the LAUNCHER's own profile
+// paths so RDP shortcuts and log copies land on the correct user's Desktop.
+//
+// Strategy (all pure Pascal Script, no external script):
+//   1. WTSQuerySessionInformation reports the user name of the session in which
+//      the launching process runs.  UAC elevation preserves the session, so
+//      this is the user who launched the installer, not the elevated admin.
+//   2. That user name is mapped to a SID by scanning
+//      HKLM\...\ProfileList for the profile whose ProfileImagePath leaf matches.
+//   3. The launcher's Desktop / Local AppData are then read from that user's
+//      registry hive (HKU\<SID>...\Shell Folders), which honours OneDrive
+//      redirection.
+// Why not SHGetFolderPath(..., 0, ...)?  A NULL hToken resolves to the current
+// *process* token (the elevated admin); WTSQueryUserToken additionally needs the
+// SeTcbPrivilege that a UAC-elevated non-SYSTEM process typically lacks.  The
+// session/profile-registry route above needs neither.
+
+const
+  WTS_USERNAME = 5;   // WTS_INFO_CLASS: user name
+  REG_PROFILE_LIST = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList';
+  REG_SHELL_FOLDERS_SUFFIX = '\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders';
+  VAL_DESKTOP = 'Desktop';
+  VAL_LOCAL_APP_DATA = 'Local AppData';
+
+function ProcessIdToSessionId(ProcessId: DWORD; var SessionId: DWORD): Boolean;
+  external 'ProcessIdToSessionId@kernel32.dll stdcall';
+
+function WTSQuerySessionInformation(hServer: Cardinal; SessionId: DWORD; WTSInfoClass: DWORD; var ppBuffer: PAnsiChar; var pBytesReturned: Cardinal): Boolean;
+  external 'WTSQuerySessionInformationA@wtsapi32.dll stdcall';
+
+procedure WTSFreeMemory(pMemory: PAnsiChar);
+  external 'WTSFreeMemory@wtsapi32.dll stdcall';
 
 // Compares two dotted version strings (e.g. "0.4.9" vs "0.4.10").
 // Returns 1 if A > B, -1 if A < B, 0 if equal.
@@ -852,12 +898,125 @@ begin
   Result := ExpandConstant('{tmp}\' + FileName);
 end;
 
+// User name of the user who launched the installer, resolved from the session
+// in which the launching process runs (UAC preserves the session, so this is
+// the launcher, not the elevated admin account).  Returns '' on failure.
+function GetInteractiveUserName: string;
+var
+  SessionId: DWORD;
+  pBuf: PAnsiChar;
+  Bytes: Cardinal;
+begin
+  Result := '';
+  if not ProcessIdToSessionId(GetCurrentProcessId, SessionId) then
+    exit;
+  pBuf := '';
+  Bytes := 0;
+  if WTSQuerySessionInformation(0, SessionId, WTS_USERNAME, pBuf, Bytes) and (Bytes > 0) then
+  begin
+    Result := pBuf;
+    WTSFreeMemory(pBuf);
+  end;
+end;
+
+// Finds the SID (ProfileList subkey) whose ProfileImagePath leaf folder name
+// matches the given user name.  Returns '' when no match is found.
+function FindSidForUserName(const UserName: string): string;
+var
+  Subkeys: TArrayOfString;
+  i: Integer;
+  ProfilePath: string;
+begin
+  Result := '';
+  if not RegGetSubkeyNames(HKLM, REG_PROFILE_LIST, Subkeys) then
+    exit;
+  for i := 0 to GetArrayLength(Subkeys) - 1 do
+  begin
+    if RegQueryStringValue(HKLM, REG_PROFILE_LIST + '\' + Subkeys[i], 'ProfileImagePath', ProfilePath) and
+       (CompareText(ExtractFileName(ProfilePath), UserName) = 0) then
+    begin
+      Result := Subkeys[i];
+      exit;
+    end;
+  end;
+end;
+
+// Profile root (e.g. "C:\Users\Alice") of the launcher, or '' on failure.
+function GetInteractiveProfilePath: string;
+var
+  Sid: string;
+  ProfilePath: string;
+begin
+  Result := '';
+  Sid := FindSidForUserName(GetInteractiveUserName);
+  if Sid = '' then
+    exit;
+  if RegQueryStringValue(HKLM, REG_PROFILE_LIST + '\' + Sid, 'ProfileImagePath', ProfilePath) then
+    Result := ProfilePath;
+end;
+
+// Desktop folder of the user who launched the installer (OneDrive-redirected
+// paths included).  Falls back to {userdesktop} when it cannot be resolved.
+function GetInteractiveDesktop: string;
+var
+  UserName: string;
+  Sid: string;
+  DesktopPath: string;
+  ProfilePath: string;
+begin
+  Result := ExpandConstant('{userdesktop}');
+  UserName := GetInteractiveUserName;
+  if UserName = '' then
+    exit;
+  Sid := FindSidForUserName(UserName);
+  if Sid <> '' then
+  begin
+    // 'Shell Folders\Desktop' holds the resolved path (handles OneDrive redirection).
+    if RegQueryStringValue(HKU, Sid + REG_SHELL_FOLDERS_SUFFIX, VAL_DESKTOP, DesktopPath) and
+       (DesktopPath <> '') and (Pos('%', DesktopPath) = 0) then
+    begin
+      Result := DesktopPath;
+      exit;
+    end;
+  end;
+  ProfilePath := GetInteractiveProfilePath;
+  if (ProfilePath <> '') and (DirExists(ProfilePath + '\Desktop')) then
+    Result := ProfilePath + '\Desktop';
+end;
+
+// Local AppData folder of the launcher.  Falls back to {localappdata}.
+function GetInteractiveLocalAppData: string;
+var
+  UserName: string;
+  Sid: string;
+  AppDataPath: string;
+  ProfilePath: string;
+begin
+  Result := ExpandConstant('{localappdata}');
+  UserName := GetInteractiveUserName;
+  if UserName = '' then
+    exit;
+  Sid := FindSidForUserName(UserName);
+  if Sid <> '' then
+  begin
+    if RegQueryStringValue(HKU, Sid + REG_SHELL_FOLDERS_SUFFIX, VAL_LOCAL_APP_DATA, AppDataPath) and
+       (AppDataPath <> '') and (Pos('%', AppDataPath) = 0) then
+    begin
+      Result := AppDataPath;
+      exit;
+    end;
+  end;
+  ProfilePath := GetInteractiveProfilePath;
+  if ProfilePath <> '' then
+    Result := ProfilePath + '\AppData\Local';
+end;
+
 function EnsureDebugWorkDir: string;
 var
   BaseDir: string;
 begin
   LogEntry('EnsureDebugWorkDir');
-  BaseDir := ExpandConstant('{localappdata}\RDPWrapKit');
+  BaseDir := GetInteractiveLocalAppData + '\RDPWrapKit';
   if (not DirExists(BaseDir)) and (not CreateDir(BaseDir)) then
   begin
     LogWarn('Could not create debug work base directory: ' + BaseDir);
@@ -1107,6 +1266,95 @@ begin
   end;
   LogDebug('ValidateGroupMembership: group=' + GroupName + ' user=' + UserName + ' result=' + BoolToStr(Result));
   LogExit('ValidateGroupMembership');
+end;
+
+// -----------------------------------------------------------------------------
+// LAUNCHER ADMINISTRATOR CHECK
+// -----------------------------------------------------------------------------
+// RDPWrapKit always runs elevated, so the process token is always an
+// administrator's.  The meaningful question is whether the user who LAUNCHED
+// the installer belongs to the local Administrators group: when UAC elevates to
+// a DIFFERENT admin account, the saved RDP password (a DPAPI blob) is bound to
+// that admin, so auto-login will not work for the launcher's account.
+//
+// The verdict is computed once and cached.  When the launcher cannot be
+// resolved we report True so the advisory is never shown spuriously.
+//
+// Diagnostics: the resolved launcher name, the localized Administrators group
+// name and the resulting verdict are written to the main installer log via
+// WriteInstallerLog (search for "Launcher admin check").
+function IsLauncherAdministrator(): Boolean;
+var
+  LauncherName: string;
+  AdminGroupName: string;
+begin
+  if LauncherAdminChecked then
+  begin
+    Result := LauncherIsAdmin;
+    exit;
+  end;
+
+  // Default to administrator so we never nag when detection is impossible.
+  Result := True;
+  LauncherAdminChecked := True;
+  LauncherIsAdmin := True;
+
+  LauncherName := GetInteractiveUserName;
+  if LauncherName = '' then
+  begin
+    WriteInstallerLog('Launcher admin check: could not resolve the interactive user; assuming administrator (advisory skipped)');
+    exit;
+  end;
+
+  AdminGroupName := GetLocalizedGroupName('S-1-5-32-544', 'Administrators');
+  Result := ValidateGroupMembership(AdminGroupName, LauncherName);
+  LauncherIsAdmin := Result;
+  if Result then
+    WriteInstallerLog('Launcher admin check: user=' + LauncherName + ' group=' + AdminGroupName +
+                      ' isAdmin=True -> advisory page skipped')
+  else
+    WriteInstallerLog('Launcher admin check: user=' + LauncherName + ' group=' + AdminGroupName +
+                      ' isAdmin=False -> advisory page shown');
+end;
+
+// Opens the classic "User Accounts" dialog (netplwiz.exe).
+// On 64-bit Windows a 32-bit installer must use {sysnative}: {sys} would point
+// at SysWOW64, where netplwiz.exe does not exist.
+procedure OpenUserAccounts(Sender: TObject);
+var
+  NetPlWizPath: string;
+  ResultCode: Integer;
+begin
+  if IsWin64 then
+    NetPlWizPath := ExpandConstant('{sysnative}\netplwiz.exe')
+  else
+    NetPlWizPath := ExpandConstant('{sys}\netplwiz.exe');
+
+  if not FileExists(NetPlWizPath) then
+    NetPlWizPath := 'netplwiz.exe';
+
+  if not ShellExec('open', NetPlWizPath, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then
+    MsgBox('Could not open User Accounts automatically.' + #13#10#13#10 +
+           'To open it manually: press Windows key + R, type "netplwiz", and press Enter.',
+           mbError, MB_OK);
+end;
+
+// "Close Setup" on the administrator advisory: exit the installer so the user
+// can promote their account and run setup again.
+procedure OnAdminWarningCloseClick(Sender: TObject);
+begin
+  LogInfo('Administrator advisory: user chose Close Setup');
+  // WizardForm.Close() is a no-op in this build, so invoke the wizard's own
+  // Cancel handler instead; that exits Setup through the normal path.
+  WizardForm.CancelButton.Visible := True;
+  WizardForm.CancelButton.OnClick(WizardForm.CancelButton);
+end;
+
+// "Continue Anyway" on the administrator advisory: proceed into the wizard.
+procedure OnAdminWarningContinueClick(Sender: TObject);
+begin
+  LogInfo('Administrator advisory: user chose Continue Anyway');
+  WizardForm.NextButton.OnClick(WizardForm.NextButton);
 end;
 
 // Verify file is authenticode-signed by Microsoft Corporation
@@ -2176,7 +2424,7 @@ begin
     exit;
   end;
 
-  DestDir := ExpandConstant('{userdesktop}\RDPWrapKit_DebugLogs');
+  DestDir := GetInteractiveDesktop + '\RDPWrapKit_DebugLogs';
   if (not DirExists(DestDir)) and (not CreateDir(DestDir)) then
   begin
     LogWarn('Could not create debug log folder: ' + DestDir);
@@ -3028,17 +3276,19 @@ var
   FilesList: TStringList;
   FindRec: TFindRec;
   DesktopPattern: string;
+  DesktopPath: string;
 begin
   LogEntry('GetDesktopRdpFiles');
   FilesList := TStringList.Create;
-  DesktopPattern := ExpandConstant('{userdesktop}\*.rdp');
+  DesktopPath := GetInteractiveDesktop;
+  DesktopPattern := DesktopPath + '\*.rdp';
 
   if FindFirst(DesktopPattern, FindRec) then
   begin
     try
       repeat
         if (FindRec.Attributes and 16) = 0 then
-          FilesList.Add(ExpandConstant('{userdesktop}\') + FindRec.Name);
+          FilesList.Add(DesktopPath + '\' + FindRec.Name);
       until not FindNext(FindRec);
     finally
       FindClose(FindRec);
@@ -3112,7 +3362,7 @@ var
   UserDesktop: string;
   CommonDesktop: string;
 begin
-  UserDesktop := ExpandConstant('{userdesktop}');
+  UserDesktop := GetInteractiveDesktop;
   CommonDesktop := ExpandConstant('{commondesktop}');
 
   Result := DesktopFolderHasRdpShortcut(UserDesktop);
@@ -3644,7 +3894,7 @@ var
 begin
   LogEntry('OnViewLogButtonClick');
   WriteInstallerLog('User clicked Save Install Log button');
-  DestName := ExpandConstant('{userdesktop}\RDPWrapKit_install.log');
+  DestName := GetInteractiveDesktop + '\RDPWrapKit_install.log';
   Saved := CopyFile(InstallLogPath, DestName, False);
   if Saved then
     MsgBox('File RDPWrapKit_install.log was saved to your Desktop', mbInformation, MB_OK)
@@ -4079,6 +4329,20 @@ begin
   LogExit('ShouldApplyRegistryEntries');
 end;
 
+// Called when the user clicks Cancel (or closes the wizard) or when the
+// advisory page's "Close Setup" button routes through the wizard's Cancel
+// handler.  Nothing has been installed while the advisory is displayed, so the
+// "Setup is not complete" confirmation is meaningless there — suppress it for
+// that page only; every other page keeps the standard confirmation.
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if Assigned(Page_AdminWarning) and (CurPageID = Page_AdminWarning.ID) then
+  begin
+    Confirm := False;
+    WriteInstallerLog('Administrator advisory: closing Setup without the standard confirmation');
+  end;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   LogEntry('ShouldSkipPage');
@@ -4087,6 +4351,14 @@ begin
   // Always skip directory selection page
   if PageID = wpSelectDir then
     Result := True;
+
+  // Administrator advisory: only relevant when the LAUNCHING user is not an
+  // administrator (i.e. UAC elevated to a different account).
+  if Assigned(Page_AdminWarning) and (PageID = Page_AdminWarning.ID) then
+  begin
+    if IsLauncherAdministrator() then
+      Result := True;
+  end;
   
   // Skip User Page unless installing in Install mode with Create new users selected
   if (PageID = UserPage.ID) and
@@ -4485,7 +4757,7 @@ begin
     ShortcutFileName := UserName + '.rdp';
   if CompareText(ExtractFileExt(ShortcutFileName), '.rdp') <> 0 then
     ShortcutFileName := ShortcutFileName + '.rdp';
-  Result := ExpandConstant('{userdesktop}\' + ShortcutFileName);
+  Result := GetInteractiveDesktop + '\' + ShortcutFileName;
 end;
 
 procedure CreateRDPShortcut(const UserName, Password, CreationSource: string);
@@ -4945,8 +5217,8 @@ begin
     LogDebug('  [' + IntToStr(i) + '] ' + MaskPasswordInEntry(ShortcutsList[i]));
 
   // Log desktop info for shortcut path resolution
-  LogDebug('CreateShortcutsForExistingUsers: Desktop path=' + ExpandConstant('{userdesktop}') +
-    ' | user desktop exists=' + BoolToStr(DirExists(ExpandConstant('{userdesktop}'))));
+  LogDebug('CreateShortcutsForExistingUsers: Desktop path=' + GetInteractiveDesktop +
+    ' | user desktop exists=' + BoolToStr(DirExists(GetInteractiveDesktop)));
 
   for i := 0 to ShortcutsList.Count - 1 do
   begin
@@ -5804,6 +6076,13 @@ var
   lblAnd: TLabel;
   lblBSSName: TLabel;
   lblProjectHome: TLabel;
+  // Administrator advisory page controls
+  AdminWarnHead: TLabel;
+  AdminWarnBody: TLabel;
+  AdminWarnStep1: TLabel;
+  AdminWarnStep1Link: TLabel;
+  AdminWarnSteps: TLabel;
+  AdminWarnY: Integer;
   // Controls for Edit System-wide Settings page (declared in global var block)
 
   LinkColor: TColor;
@@ -5887,6 +6166,106 @@ begin
     'Welcome',
     ''
   );
+
+  // -------------------------------------------------------------------------
+  // Administrator advisory page.
+  // Only displayed when the LAUNCHING user is not an administrator; see
+  // ShouldSkipPage().  Without administrator rights the saved RDP password is
+  // bound to the UAC-elevated admin (DPAPI), so auto-login will not work for
+  // the launcher's own account.
+  //
+  // NOTE: created AFTER WelcomePage on purpose.  This Inno build orders pages
+  // that share an anchor newest-first, so creating it later places it BEFORE
+  // WelcomePage (i.e. the first page the user sees after the built-in welcome).
+  // -------------------------------------------------------------------------
+  Page_AdminWarning := CreateCustomPage(
+    wpWelcome,
+    'Administrator Account Recommended',
+    ''
+  );
+
+  AdminWarnY := ScaleY(10);
+
+  AdminWarnHead := TLabel.Create(Page_AdminWarning);
+  AdminWarnHead.Parent := Page_AdminWarning.Surface;
+  AdminWarnHead.Left := ScaleX(10);
+  AdminWarnHead.Top := AdminWarnY;
+  AdminWarnHead.AutoSize := False;
+  AdminWarnHead.Width := Page_AdminWarning.SurfaceWidth - ScaleX(20);
+  AdminWarnHead.Height := ScaleY(20);
+  AdminWarnHead.WordWrap := True;
+  AdminWarnHead.Font.Style := [fsBold];
+  AdminWarnHead.Font.Color := clRed;
+  AdminWarnHead.Caption := 'Your main account does not have administrator privileges.';
+  AdminWarnY := AdminWarnY + ScaleY(30);
+
+  AdminWarnBody := TLabel.Create(Page_AdminWarning);
+  AdminWarnBody.Parent := Page_AdminWarning.Surface;
+  AdminWarnBody.Left := ScaleX(10);
+  AdminWarnBody.Top := AdminWarnY;
+  AdminWarnBody.AutoSize := False;
+  AdminWarnBody.Width := Page_AdminWarning.SurfaceWidth - ScaleX(20);
+  AdminWarnBody.Height := ScaleY(60);
+  AdminWarnBody.WordWrap := True;
+  AdminWarnBody.Caption :=
+    'Every connection will prompt for your password.' + #13#10 + #13#10 +
+    'To make this account an Administrator:';
+  AdminWarnY := AdminWarnY + ScaleY(62);
+
+  // Step 1 — "User Accounts" is an inline clickable link.
+  AdminWarnStep1 := TLabel.Create(Page_AdminWarning);
+  AdminWarnStep1.Parent := Page_AdminWarning.Surface;
+  AdminWarnStep1.Left := ScaleX(10);
+  AdminWarnStep1.Top := AdminWarnY;
+  AdminWarnStep1.AutoSize := True;
+  AdminWarnStep1.Caption := '1. Open';
+
+  AdminWarnStep1Link := TLabel.Create(Page_AdminWarning);
+  AdminWarnStep1Link.Parent := Page_AdminWarning.Surface;
+  AdminWarnStep1Link.Left := AdminWarnStep1.Left + AdminWarnStep1.Width + ScaleX(5);
+  AdminWarnStep1Link.Top := AdminWarnY;
+  AdminWarnStep1Link.AutoSize := True;
+  AdminWarnStep1Link.Caption := '''User Accounts'' by clicking here';
+  AdminWarnStep1Link.Font.Color := clBlue;
+  AdminWarnStep1Link.Font.Style := [fsUnderline];
+  AdminWarnStep1Link.Cursor := crHand;
+  AdminWarnStep1Link.OnClick := @OpenUserAccounts;
+  AdminWarnY := AdminWarnY + ScaleY(20);
+
+  // Steps 2-4 (wrapped block).
+  AdminWarnSteps := TLabel.Create(Page_AdminWarning);
+  AdminWarnSteps.Parent := Page_AdminWarning.Surface;
+  AdminWarnSteps.Left := ScaleX(10);
+  AdminWarnSteps.Top := AdminWarnY;
+  AdminWarnSteps.AutoSize := False;
+  AdminWarnSteps.Width := Page_AdminWarning.SurfaceWidth - ScaleX(20);
+  AdminWarnSteps.Height := ScaleY(85);
+  AdminWarnSteps.WordWrap := True;
+  AdminWarnSteps.Caption :=
+    '2. Select your account, click "Properties"' + #13#10 +
+    '3. On the "Group Membership" tab choose "Administrator" and click [OK]' + #13#10 +
+    '4. Restart your PC and run RDPWrapKit Setup again';
+
+  // Page buttons: our own two buttons replace the wizard's on this page.
+  AdminWarningCloseButton := TButton.Create(Page_AdminWarning);
+  AdminWarningCloseButton.Parent := Page_AdminWarning.Surface;
+  AdminWarningCloseButton.Caption := 'Close Setup';
+  AdminWarningCloseButton.Width := ScaleX(110);
+  AdminWarningCloseButton.Height := ScaleY(25);
+  AdminWarningCloseButton.Left := Page_AdminWarning.SurfaceWidth - ScaleX(235);
+  AdminWarningCloseButton.Top := Page_AdminWarning.SurfaceHeight - ScaleY(35);
+  AdminWarningCloseButton.OnClick := @OnAdminWarningCloseClick;
+
+  AdminWarningContinueButton := TButton.Create(Page_AdminWarning);
+  AdminWarningContinueButton.Parent := Page_AdminWarning.Surface;
+  AdminWarningContinueButton.Caption := 'Continue Anyway';
+  AdminWarningContinueButton.Width := ScaleX(115);
+  AdminWarningContinueButton.Height := ScaleY(25);
+  AdminWarningContinueButton.Left := Page_AdminWarning.SurfaceWidth - ScaleX(120);
+  AdminWarningContinueButton.Top := Page_AdminWarning.SurfaceHeight - ScaleY(35);
+  AdminWarningContinueButton.OnClick := @OnAdminWarningContinueClick;
+
+  WriteInstallerLog('Administrator advisory page created (ID=' + IntToStr(Page_AdminWarning.ID) + ')');
 
 
   // Explanatory text in the main body of the welcome page
@@ -7091,7 +7470,7 @@ begin
           // Ensure .rdp extension
           if CompareText(ExtractFileExt(NewShortcutBase), '.rdp') <> 0 then
             NewShortcutBase := NewShortcutBase + '.rdp';
-          NewShortcutPath := ExpandConstant('{userdesktop}\' + NewShortcutBase);
+          NewShortcutPath := GetInteractiveDesktop + '\' + NewShortcutBase;
           // Only rename if the new path differs from the current one
           if CompareText(NewShortcutPath, SelectedShortcutPath) <> 0 then
           begin
@@ -8341,6 +8720,26 @@ begin
   LogEntry('CurPageChanged');
   PageName := GetPageNameById(CurPageID);
   LogDebug('CurPageChanged: CurPageID=' + IntToStr(CurPageID) + ' (' + PageName + ') SelectedInstallMode=' + IntToStr(SelectedInstallMode));
+
+  // Administrator advisory page uses its own two buttons, so hide the wizard's
+  // navigation buttons while it is displayed and restore them when leaving it.
+  if Assigned(Page_AdminWarning) and (CurPageID = Page_AdminWarning.ID) then
+  begin
+    AdminWarningActive := True;
+    WizardForm.PageNameLabel.Visible := False;
+    WizardForm.PageDescriptionLabel.Visible := False;
+    WizardForm.BackButton.Visible := False;
+    WizardForm.NextButton.Visible := False;
+    WizardForm.CancelButton.Visible := False;
+    WizardForm.ActiveControl := AdminWarningContinueButton;
+  end
+  else if AdminWarningActive then
+  begin
+    AdminWarningActive := False;
+    WizardForm.BackButton.Visible := True;
+    WizardForm.NextButton.Visible := True;
+    WizardForm.CancelButton.Visible := True;
+  end;
   // Suppress grey flash by hiding page content during the VCL style paint cycle.
   if (CurPageID = Page_InstallOptions.ID) or
      (CurPageID = UserPage.ID) or
