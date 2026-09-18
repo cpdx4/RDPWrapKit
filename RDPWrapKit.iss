@@ -4609,7 +4609,6 @@ begin
     SL.Add('redirectsmartcards:i:0');
     SL.Add('redirectwebauthn:i:0');
     SL.Add('videoplaybackmode:i:1');
-    SL.Add('connection type:i:1');
     SL.Add('displayconnectionbar:i:1');
     SL.Add('disable wallpaper:i:' + IntToStr(DisableWallpaper));
     SL.Add('allow font smoothing:i:' + IntToStr(AllowFontSmooth));
@@ -4705,7 +4704,6 @@ begin
     '  $rdp += "redirectdrives:i:0"' + #13#10 +
     '  $rdp += "redirectprinters:i:0"' + #13#10 +
     '  $rdp += "videoplaybackmode:i:1"' + #13#10 +
-    '  $rdp += "connection type:i:1"' + #13#10 +
     '  $rdp += "displayconnectionbar:i:1"' + #13#10 +
     '  $rdp += "disable wallpaper:i:' + IntToStr(DisableWallpaper) + '"' + #13#10 +
     '  $rdp += "allow font smoothing:i:' + IntToStr(AllowFontSmooth) + '"' + #13#10 +
@@ -5545,7 +5543,6 @@ begin
     '$lines = Set-RdpKey $lines "redirectclipboard" "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "networkautodetect" "networkautodetect:i:1"' + #13#10 +
     '$lines = Set-RdpKey $lines "bandwidthautodetect" "bandwidthautodetect:i:1"' + #13#10 +
-    '$lines = Set-RdpKey $lines "connection type" "connection type:i:1"' + #13#10 +
     '$lines = Set-RdpKey $lines "disable wallpaper" "disable wallpaper:i:' + IntToStr(DisableWallpaper) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "allow font smoothing" "allow font smoothing:i:' + IntToStr(AllowFontSmooth) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "allow desktop composition" "allow desktop composition:i:' + IntToStr(AllowComposition) + '"' + #13#10 +
