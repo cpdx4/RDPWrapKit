@@ -226,7 +226,7 @@ var
   OrigEnableRDP: Boolean;
   OrigShowUsers: Boolean;
   OrigPreventDuplicate: Boolean;
-  OrigHideSecurityWarnings: Boolean;
+  OrigDisableUdpTransport: Boolean;
   OrigRdpPort: Cardinal;
   OptionsLabel: TLabel;
   Tool1UsersHeaderLabel: TLabel;  // "Users found" header
@@ -255,7 +255,7 @@ var
   chkEnableRDP: TCheckBox;
   chkShowUsers: TCheckBox;
   chkPreventDuplicate: TCheckBox;
-  chkHideSecurityWarnings: TCheckBox;
+  chkDisableUdpTransport: TCheckBox;
   lblRdpPort: TLabel;
   edtRdpPort: TEdit;
   lblPortDefault: TLabel;
@@ -6010,8 +6010,12 @@ begin
       'Active RDP sessions will be disconnected. Check this box if you changed the port or want to ' +
       'ensure all settings are fully applied immediately.';
     8: HelpText :=
-      'Placeholder' + #13#10#13#10 +
-      'Placeholder help text.';
+      'RDP Transport: Use TCP instead of UDP' + #13#10#13#10 +
+      'Turns off the UDP transport in the Remote Desktop client so the session uses TCP only.' + #13#10#13#10 +
+      'There is a known issue where having UDP enabled can make RDP stutter, freeze, or lag. ' +
+      'Switching to TCP-only prevents RDP lag in many cases because TCP retransmits lost data ' +
+      'reliably, at the cost of slightly higher latency.' + #13#10#13#10 +
+      'Reconnect the RDP session for the change to take effect.';
     10: HelpText :=
       'Restart RDP Service' + #13#10#13#10 +
       'Stops and restarts the Windows Remote Desktop service (TermService).' + #13#10#13#10 +
@@ -6743,15 +6747,15 @@ begin
     MakeHelpButton(EditSystemwideSettingsPage, topPos, 3);
     topPos := topPos + ScaleY(26);
 
-    chkHideSecurityWarnings := TCheckBox.Create(EditSystemwideSettingsPage);
-    chkHideSecurityWarnings.Parent := EditSystemwideSettingsPage.Surface;
-    chkHideSecurityWarnings.Left := childLeft;
-    chkHideSecurityWarnings.Top := topPos;
-    chkHideSecurityWarnings.Width := ScaleX(420) - childIndent;
-    chkHideSecurityWarnings.Caption := 'Placeholder';
-    chkHideSecurityWarnings.Checked := False;
-    chkHideSecurityWarnings.ParentFont := False;
-    chkHideSecurityWarnings.Font.Color := LabelColor;
+    chkDisableUdpTransport := TCheckBox.Create(EditSystemwideSettingsPage);
+    chkDisableUdpTransport.Parent := EditSystemwideSettingsPage.Surface;
+    chkDisableUdpTransport.Left := childLeft;
+    chkDisableUdpTransport.Top := topPos;
+    chkDisableUdpTransport.Width := ScaleX(420) - childIndent;
+    chkDisableUdpTransport.Caption := 'RDP Transport: Use TCP instead of UDP';
+    chkDisableUdpTransport.Checked := False;
+    chkDisableUdpTransport.ParentFont := False;
+    chkDisableUdpTransport.Font.Color := LabelColor;
     MakeHelpButton(EditSystemwideSettingsPage, topPos, 8);
     topPos := topPos + ScaleY(26);
 
@@ -7643,9 +7647,9 @@ begin
     begin
       if chkPreventDuplicate.Checked then LogInfo('  [x] Prevent duplicate connections per user') else LogInfo('  [ ] Prevent duplicate connections per user');
     end;
-    if Assigned(chkHideSecurityWarnings) then
+    if Assigned(chkDisableUdpTransport) then
     begin
-      if chkHideSecurityWarnings.Checked then LogInfo('  [x] Hide most security warnings') else LogInfo('  [ ] Hide most security warnings');
+      if chkDisableUdpTransport.Checked then LogInfo('  [x] RDP Transport: Use TCP instead of UDP') else LogInfo('  [ ] RDP Transport: Use TCP instead of UDP');
     end;
     if Assigned(edtRdpPort) then
       LogKeyValue('RDP Port', edtRdpPort.Text);
@@ -8254,25 +8258,25 @@ begin
         SetStepDone(StepPreventDuplicate, 'Prevent duplicate connections per user');
       end;
 
-      // Hide most security warnings (RedirectionWarningDialogVersion)
-      if Assigned(chkHideSecurityWarnings) and (chkHideSecurityWarnings.Checked <> OrigHideSecurityWarnings) then
+      // Disable RDP client UDP transport (fClientDisableUDP): reduces RDP lag/stutter on lossy links
+      if Assigned(chkDisableUdpTransport) and (chkDisableUdpTransport.Checked <> OrigDisableUdpTransport) then
       begin
-        SetStepInProgress(StepPreventDuplicate, 'Updating RDP client redirection warning policy');
-        if chkHideSecurityWarnings.Checked then
+        SetStepInProgress(StepPreventDuplicate, 'Updating RDP client UDP transport policy');
+        if chkDisableUdpTransport.Checked then
         begin
-          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1) then
-            WriteInstallerLog('Applied RedirectionWarningDialogVersion=1 (Hide security warnings)')
+          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+            WriteInstallerLog('Applied fClientDisableUDP=1 (UDP transport disabled)')
           else
-            WriteInstallerLog('Failed to write RedirectionWarningDialogVersion');
+            WriteInstallerLog('Failed to write fClientDisableUDP');
         end
         else
         begin
-          if RegDeleteValue(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion') then
-            WriteInstallerLog('Removed RedirectionWarningDialogVersion (Restore warnings)')
+          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 0) then
+            WriteInstallerLog('Applied fClientDisableUDP=0 (UDP transport enabled)')
           else
-            WriteInstallerLog('Failed to remove RedirectionWarningDialogVersion');
+            WriteInstallerLog('Failed to write fClientDisableUDP');
         end;
-        SetStepDone(StepPreventDuplicate, 'Hide most security warnings');
+        SetStepDone(StepPreventDuplicate, 'RDP Transport: Use TCP instead of UDP');
       end;
 
       // RDP port change
@@ -8482,6 +8486,12 @@ begin
         WriteInstallerLog('Registry: Set MaxInstanceCount=999999 (unlimited connections)')
       else
         WriteInstallerLog('Registry: FAILED to set MaxInstanceCount');
+
+      // Disable RDP client UDP transport by default: prevents RDP lag/stutter in many cases
+      if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+        WriteInstallerLog('Registry: Set fClientDisableUDP=1 (UDP transport disabled)')
+      else
+        WriteInstallerLog('Registry: FAILED to set fClientDisableUDP');
 
       // Ensure TermService runs under the expected service account.
       EnsureTermServiceRunsAsNetworkService;
@@ -9106,8 +9116,8 @@ begin
     LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, chkEnableRDP, False);
     LoadDWordCheckbox(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, chkShowUsers, True);
     LoadDWordCheckbox(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, chkPreventDuplicate, False);
-    // Hide most security warnings: RedirectionWarningDialogVersion under Policies\...\Terminal Services\Client
-    LoadDWordCheckbox(HKLM, REG_TS_POLICIES + '\\Client', 'RedirectionWarningDialogVersion', 1, chkHideSecurityWarnings, False);
+    // Disable RDP UDP transport: fClientDisableUDP under Policies\...\Terminal Services\Client (1 = on, 0 = off)
+    LoadDWordCheckbox(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1, chkDisableUdpTransport, False);
     if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
       edtRdpPort.Text := IntToStr(PortNumber)
     else
@@ -9121,7 +9131,7 @@ begin
     if Assigned(chkEnableRDP) then OrigEnableRDP := chkEnableRDP.Checked else OrigEnableRDP := False;
     if Assigned(chkShowUsers) then OrigShowUsers := chkShowUsers.Checked else OrigShowUsers := True;
     if Assigned(chkPreventDuplicate) then OrigPreventDuplicate := chkPreventDuplicate.Checked else OrigPreventDuplicate := False;
-    if Assigned(chkHideSecurityWarnings) then OrigHideSecurityWarnings := chkHideSecurityWarnings.Checked else OrigHideSecurityWarnings := False;
+    if Assigned(chkDisableUdpTransport) then OrigDisableUdpTransport := chkDisableUdpTransport.Checked else OrigDisableUdpTransport := False;
     OrigRdpPort := StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT);
     WriteInstallerLog('CurPageChanged: Captured original system settings: EnableRDP=' + BoolToStr(OrigEnableRDP) + ', ShowUsers=' + BoolToStr(OrigShowUsers) + ', SingleSession=' + BoolToStr(OrigPreventDuplicate) + ', Port=' + IntToStr(OrigRdpPort));
   end;
