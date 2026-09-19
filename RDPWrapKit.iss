@@ -237,6 +237,13 @@ var
   rbQFRestartRDP: TRadioButton;
   rbQFAccountNeverExpires: TRadioButton;
   rbQFRestoreTermService: TRadioButton;
+  rbQFLowFPS: TRadioButton;
+
+  // Controls for the "Low FPS and Lag Troubleshooting" quick fix page
+  QuickFixLowFPSPage: TWizardPage;
+  LowFPSNameLabels: array of TLabel;
+  LowFPSCurrentLabels: array of TLabel;
+  LowFPSRecommendedLabels: array of TLabel;
 
   // Controls for Edit System-wide Settings page
   lblSysHeader: TLabel;
@@ -399,6 +406,12 @@ const
   TXT_RemoveFolder = 'Remove TermWrap folder';
   TXT_UninstallTermWrap = 'Uninstall TermWrap';
   TXT_ShowRDPInfo = 'Apply RDP settings';
+
+  // -------------------------------------------------------------------------
+  // LOW FPS AND LAG TROUBLESHOOTING QUICK FIX
+  // -------------------------------------------------------------------------
+  // Number of policy values reviewed/applied by the Low FPS quick fix page.
+  LOWFPS_COUNT = 4;
   
   // -------------------------------------------------------------------------
   // REGISTRY PATHS
@@ -2296,6 +2309,7 @@ begin
   else if Assigned(Page_CreateShortcutAdvanced) and (PageID = Page_CreateShortcutAdvanced.ID) then Result := 'Custom: Create Shortcut Advanced'
   else if Assigned(EditSystemwideSettingsPage) and (PageID = EditSystemwideSettingsPage.ID) then Result := 'Custom: Edit System-wide RDP Settings'
   else if Assigned(QuickFixesPage) and (PageID = QuickFixesPage.ID) then Result := 'Custom: Quick Fixes'
+  else if Assigned(QuickFixLowFPSPage) and (PageID = QuickFixLowFPSPage.ID) then Result := 'Custom: Low FPS and Lag Troubleshooting'
   else if Assigned(Page_ShowRDPInfo) and (PageID = Page_ShowRDPInfo.ID) then Result := 'Custom: Show RDP Info'
   else
     Result := 'Custom/Unknown';
@@ -4394,6 +4408,11 @@ if Assigned(Page_CreateShortcutAdvanced) and (PageID = Page_CreateShortcutAdvanc
   if Assigned(QuickFixesPage) and (PageID = QuickFixesPage.ID) and (SelectedInstallMode <> installModeQuickFixes) then
     Result := True;
 
+  // Show the Low FPS and Lag Troubleshooting page only when that quick fix was selected
+  if Assigned(QuickFixLowFPSPage) and (PageID = QuickFixLowFPSPage.ID) and
+     ((SelectedInstallMode <> installModeQuickFixes) or (not (Assigned(rbQFLowFPS) and rbQFLowFPS.Checked))) then
+    Result := True;
+
   // Show Create Shortcuts for Existing Users page only when:
   //   Install mode + Create RDP shortcuts + Use existing users
   if PageID = Page_CreateShortcutsForExistingUsers.ID then
@@ -6028,6 +6047,10 @@ begin
       'Use this if antivirus software or a system cleanup tool has accidentally removed the ' +
       'TermService registry entries, preventing RDP from functioning. This will restore the ' +
       'service configuration, image path, and required privileges to their default values.';
+    13: HelpText :=
+      'Low FPS and Lag Troubleshooting' + #13#10#13#10 +
+      'Applies RDP settings that commonly fix low frame rate and lag.' + #13#10#13#10 +
+      'Reconnect the RDP session after applying for the changes to take effect.';
   else
     HelpText := 'No additional information available for this setting.';
   end;
@@ -6050,6 +6073,198 @@ begin
   Btn.Tag := ATag;
   Btn.OnClick := @ShowGPHelpInfo;
   Result := Btn;
+end;
+
+// =============================================================================
+// LOW FPS AND LAG TROUBLESHOOTING QUICK FIX
+// =============================================================================
+// Reviews and applies four policy values that commonly cause low frame rate and
+// lag over Remote Desktop:
+//   0. fClientDisableUDP   HKLM\...\Policies\...\Terminal Services\Client -> recommended 1
+//   1. SelectNetworkDetect HKLM\...\Policies\...\Terminal Services        -> recommended (Not set)
+//   2. ImageQuality        HKLM\...\Policies\...\Terminal Services        -> recommended 2
+//   3. MaxCompressionLevel HKLM\...\Policies\...\Terminal Services        -> recommended 2
+// The page shows the current value (green when already recommended, red when it
+// needs fixing) next to the recommended value; [Next] writes all recommendations.
+
+function LowFPSFriendlyName(Index: Integer): string;
+begin
+  case Index of
+    0: Result := 'RDP Transport (TCP only)';
+    1: Result := 'Network Auto-Detect';
+    2: Result := 'RemoteFX Image Quality';
+    3: Result := 'RemoteFX Compression';
+  else
+    Result := 'Setting ' + IntToStr(Index);
+  end;
+end;
+
+function LowFPSRecommendedText(Index: Integer): string;
+begin
+  case Index of
+    0: Result := 'Enabled (1)';
+    1: Result := 'Not set';
+    2: Result := '2 - High';
+    3: Result := '2 - Balanced';
+  else
+    Result := '';
+  end;
+end;
+
+function LowFPSImageQualityText(Value: Cardinal): string;
+begin
+  case Value of
+    0: Result := '0 - Low';
+    1: Result := '1 - Medium';
+    2: Result := '2 - High';
+    3: Result := '3 - Lossless';
+  else
+    Result := IntToStr(Value) + ' - Unknown';
+  end;
+end;
+
+function LowFPSCompressionText(Value: Cardinal): string;
+begin
+  case Value of
+    0: Result := '0 - None';
+    1: Result := '1 - Memory';
+    2: Result := '2 - Balanced';
+    3: Result := '3 - Bandwidth';
+  else
+    Result := IntToStr(Value) + ' - Unknown';
+  end;
+end;
+
+// Returns a human-readable description of the current registry value for the
+// given setting index and sets IsGood to True when it already matches the
+// recommendation.
+function LowFPSCurrentText(Index: Integer; var IsGood: Boolean): string;
+var
+  D: Cardinal;
+  S: string;
+begin
+  IsGood := False;
+  Result := 'Not set';
+  case Index of
+    0:
+    begin
+      if RegQueryDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', D) then
+      begin
+        if D = 1 then
+        begin
+          Result := 'Enabled (1)';
+          IsGood := True;
+        end
+        else
+          Result := 'Disabled (' + IntToStr(D) + ')';
+      end
+      else
+        Result := 'Not set';
+    end;
+    1:
+    begin
+      if RegQueryDWordValue(HKLM, REG_TS_POLICIES, 'SelectNetworkDetect', D) then
+        Result := 'Present (' + IntToStr(D) + ')'
+      else if RegQueryStringValue(HKLM, REG_TS_POLICIES, 'SelectNetworkDetect', S) then
+        Result := 'Present (' + S + ')'
+      else
+      begin
+        Result := 'Not set';
+        IsGood := True;
+      end;
+    end;
+    2:
+    begin
+      if RegQueryDWordValue(HKLM, REG_TS_POLICIES, 'ImageQuality', D) then
+      begin
+        Result := LowFPSImageQualityText(D);
+        IsGood := (D = 2);
+      end
+      else
+        Result := 'Not set';
+    end;
+    3:
+    begin
+      if RegQueryDWordValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', D) then
+      begin
+        Result := LowFPSCompressionText(D);
+        IsGood := (D = 2);
+      end
+      else
+        Result := 'Not set';
+    end;
+  end;
+end;
+
+// Re-reads every setting and updates the Low FPS page labels/colours.
+procedure RefreshLowFPSPage;
+var
+  i: Integer;
+  IsGood: Boolean;
+  GoodColor, BadColor: TColor;
+begin
+  if (not Assigned(QuickFixLowFPSPage)) or (Length(LowFPSCurrentLabels) < LOWFPS_COUNT) then
+    exit;
+
+  if IsDarkColor(QuickFixLowFPSPage.Surface.Color) then
+  begin
+    GoodColor := clLime;
+    BadColor := clRed;
+  end
+  else
+  begin
+    GoodColor := clGreen;
+    BadColor := clRed;
+  end;
+
+  for i := 0 to LOWFPS_COUNT - 1 do
+  begin
+    if Assigned(LowFPSNameLabels[i]) then
+      LowFPSNameLabels[i].Caption := LowFPSFriendlyName(i);
+    if Assigned(LowFPSRecommendedLabels[i]) then
+      LowFPSRecommendedLabels[i].Caption := LowFPSRecommendedText(i);
+    if Assigned(LowFPSCurrentLabels[i]) then
+    begin
+      LowFPSCurrentLabels[i].Caption := LowFPSCurrentText(i, IsGood);
+      if IsGood then
+        LowFPSCurrentLabels[i].Font.Color := GoodColor
+      else
+        LowFPSCurrentLabels[i].Font.Color := BadColor;
+    end;
+  end;
+end;
+
+// Writes every recommended value for the Low FPS / lag quick fix.
+procedure ApplyLowFPSRecommended;
+begin
+  // 1. fClientDisableUDP -> 1 (use TCP, disable UDP transport)
+  if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+    WriteInstallerLog('LowFPS: Set fClientDisableUDP=1 (TCP only)')
+  else
+    WriteInstallerLog('LowFPS: FAILED to set fClientDisableUDP');
+
+  // 2. SelectNetworkDetect -> clear when present (recommended: Not set)
+  if RegValueExists(HKLM, REG_TS_POLICIES, 'SelectNetworkDetect') then
+  begin
+    if RegDeleteValue(HKLM, REG_TS_POLICIES, 'SelectNetworkDetect') then
+      WriteInstallerLog('LowFPS: Deleted SelectNetworkDetect')
+    else
+      WriteInstallerLog('LowFPS: FAILED to delete SelectNetworkDetect');
+  end
+  else
+    WriteInstallerLog('LowFPS: SelectNetworkDetect already Not set');
+
+  // 3. ImageQuality -> 2 (High)
+  if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'ImageQuality', 2) then
+    WriteInstallerLog('LowFPS: Set ImageQuality=2 (High)')
+  else
+    WriteInstallerLog('LowFPS: FAILED to set ImageQuality');
+
+  // 4. MaxCompressionLevel -> 2 (Balanced)
+  if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', 2) then
+    WriteInstallerLog('LowFPS: Set MaxCompressionLevel=2 (Balanced)')
+  else
+    WriteInstallerLog('LowFPS: FAILED to set MaxCompressionLevel');
 end;
 
 procedure InitializeWizard;
@@ -6092,6 +6307,11 @@ var
     radioTopBase: Integer;
     radioSpacing: Integer;
     TmpLabel: TLabel;
+  // Low FPS and Lag Troubleshooting quick fix page layout
+  lblLowFPSColName, lblLowFPSColCurrent, lblLowFPSColRec: TLabel;
+  lowFPSRowTop, lowFPSRowHeight: Integer;
+  lowFPSNameLeft, lowFPSCurrentLeft, lowFPSRecommendedLeft: Integer;
+  lowFPSIndex: Integer;
 begin
   // Create transparent label overlay for status text to prevent grey flash.
   StatusOverlay := TLabel.Create(WizardForm);
@@ -6932,6 +7152,108 @@ begin
     rbQFRestoreTermService.ParentFont := False;
     rbQFRestoreTermService.Font.Color := LabelColor;
     MakeHelpButton(QuickFixesPage, topPos, 12);
+    topPos := topPos + ScaleY(24);
+
+    rbQFLowFPS := TRadioButton.Create(QuickFixesPage);
+    rbQFLowFPS.Parent := QuickFixesPage.Surface;
+    rbQFLowFPS.Left := childLeft;
+    rbQFLowFPS.Top := topPos;
+    rbQFLowFPS.Width := ScaleX(420) - childIndent;
+    rbQFLowFPS.Caption := 'Low FPS and Lag Troubleshooting';
+    rbQFLowFPS.Checked := False;
+    rbQFLowFPS.ParentFont := False;
+    rbQFLowFPS.Font.Color := LabelColor;
+    MakeHelpButton(QuickFixesPage, topPos, 13);
+  end
+
+  // -------------------------------------------------------------------------
+  // Create "Low FPS and Lag Troubleshooting" quick fix page
+  // Shown only when the matching Quick Fix is selected on the previous page.
+  // Lists each relevant RDP policy value along with its current value (green
+  // when already recommended, red when it needs fixing) and the recommended
+  // value. Clicking [Next] writes every recommended value.
+  // -------------------------------------------------------------------------
+  QuickFixLowFPSPage := CreateCustomPage(
+    QuickFixesPage.ID,
+    'Low FPS and Lag Troubleshooting',
+    'Experiencing low FPS or lag? Click [Next] to apply settings that might help.'
+  );
+  if IsDarkColor(QuickFixLowFPSPage.Surface.Color) then
+    LabelColor := clWhite
+  else
+    LabelColor := clBlack;
+  begin
+    lowFPSNameLeft := ScaleX(20);
+    lowFPSCurrentLeft := ScaleX(20) + ScaleX(190);
+    lowFPSRecommendedLeft := ScaleX(20) + ScaleX(310);
+    lowFPSRowTop := ScaleY(40);
+    lowFPSRowHeight := ScaleY(24);
+
+    // Column headers
+    lblLowFPSColName := TLabel.Create(QuickFixLowFPSPage);
+    lblLowFPSColName.Parent := QuickFixLowFPSPage.Surface;
+    lblLowFPSColName.Left := lowFPSNameLeft;
+    lblLowFPSColName.Top := ScaleY(16);
+    lblLowFPSColName.Caption := 'Setting';
+    lblLowFPSColName.Font.Style := [fsBold];
+    lblLowFPSColName.ParentFont := False;
+    lblLowFPSColName.Font.Color := LabelColor;
+    lblLowFPSColName.Transparent := True;
+
+    lblLowFPSColCurrent := TLabel.Create(QuickFixLowFPSPage);
+    lblLowFPSColCurrent.Parent := QuickFixLowFPSPage.Surface;
+    lblLowFPSColCurrent.Left := lowFPSCurrentLeft;
+    lblLowFPSColCurrent.Top := ScaleY(16);
+    lblLowFPSColCurrent.Caption := 'Current Value';
+    lblLowFPSColCurrent.Font.Style := [fsBold];
+    lblLowFPSColCurrent.ParentFont := False;
+    lblLowFPSColCurrent.Font.Color := LabelColor;
+    lblLowFPSColCurrent.Transparent := True;
+
+    lblLowFPSColRec := TLabel.Create(QuickFixLowFPSPage);
+    lblLowFPSColRec.Parent := QuickFixLowFPSPage.Surface;
+    lblLowFPSColRec.Left := lowFPSRecommendedLeft;
+    lblLowFPSColRec.Top := ScaleY(16);
+    lblLowFPSColRec.Caption := 'Recommended';
+    lblLowFPSColRec.Font.Style := [fsBold];
+    lblLowFPSColRec.ParentFont := False;
+    lblLowFPSColRec.Font.Color := LabelColor;
+    lblLowFPSColRec.Transparent := True;
+
+    // Value rows
+    SetLength(LowFPSNameLabels, LOWFPS_COUNT);
+    SetLength(LowFPSCurrentLabels, LOWFPS_COUNT);
+    SetLength(LowFPSRecommendedLabels, LOWFPS_COUNT);
+    for lowFPSIndex := 0 to LOWFPS_COUNT - 1 do
+    begin
+      LowFPSNameLabels[lowFPSIndex] := TLabel.Create(QuickFixLowFPSPage);
+      LowFPSNameLabels[lowFPSIndex].Parent := QuickFixLowFPSPage.Surface;
+      LowFPSNameLabels[lowFPSIndex].Left := lowFPSNameLeft;
+      LowFPSNameLabels[lowFPSIndex].Top := lowFPSRowTop + lowFPSIndex * lowFPSRowHeight;
+      LowFPSNameLabels[lowFPSIndex].Caption := LowFPSFriendlyName(lowFPSIndex);
+      LowFPSNameLabels[lowFPSIndex].ParentFont := False;
+      LowFPSNameLabels[lowFPSIndex].Font.Color := LabelColor;
+      LowFPSNameLabels[lowFPSIndex].Transparent := True;
+
+      LowFPSCurrentLabels[lowFPSIndex] := TLabel.Create(QuickFixLowFPSPage);
+      LowFPSCurrentLabels[lowFPSIndex].Parent := QuickFixLowFPSPage.Surface;
+      LowFPSCurrentLabels[lowFPSIndex].Left := lowFPSCurrentLeft;
+      LowFPSCurrentLabels[lowFPSIndex].Top := LowFPSNameLabels[lowFPSIndex].Top;
+      LowFPSCurrentLabels[lowFPSIndex].Caption := '...';
+      LowFPSCurrentLabels[lowFPSIndex].Font.Style := [fsBold];
+      LowFPSCurrentLabels[lowFPSIndex].ParentFont := False;
+      LowFPSCurrentLabels[lowFPSIndex].Font.Color := LabelColor;
+      LowFPSCurrentLabels[lowFPSIndex].Transparent := True;
+
+      LowFPSRecommendedLabels[lowFPSIndex] := TLabel.Create(QuickFixLowFPSPage);
+      LowFPSRecommendedLabels[lowFPSIndex].Parent := QuickFixLowFPSPage.Surface;
+      LowFPSRecommendedLabels[lowFPSIndex].Left := lowFPSRecommendedLeft;
+      LowFPSRecommendedLabels[lowFPSIndex].Top := LowFPSNameLabels[lowFPSIndex].Top;
+      LowFPSRecommendedLabels[lowFPSIndex].Caption := LowFPSRecommendedText(lowFPSIndex);
+      LowFPSRecommendedLabels[lowFPSIndex].ParentFont := False;
+      LowFPSRecommendedLabels[lowFPSIndex].Font.Color := LabelColor;
+      LowFPSRecommendedLabels[lowFPSIndex].Transparent := True;
+    end;
   end
 
   // -------------------------------------------------------------------------
@@ -7750,18 +8072,28 @@ begin
       LogInfo('  (x) Restart RDP Service');
       LogInfo('  ( ) Set all Local Accounts to Never Expire');
       LogInfo('  ( ) Restore deleted Remote Desktop Service');
+      LogInfo('  ( ) Low FPS and Lag Troubleshooting');
     end
     else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
     begin
       LogInfo('  ( ) Restart RDP Service');
       LogInfo('  (x) Set all Local Accounts to Never Expire');
       LogInfo('  ( ) Restore deleted Remote Desktop Service');
+      LogInfo('  ( ) Low FPS and Lag Troubleshooting');
     end
     else if Assigned(rbQFRestoreTermService) and rbQFRestoreTermService.Checked then
     begin
       LogInfo('  ( ) Restart RDP Service');
       LogInfo('  ( ) Set all Local Accounts to Never Expire');
       LogInfo('  (x) Restore deleted Remote Desktop Service');
+      LogInfo('  ( ) Low FPS and Lag Troubleshooting');
+    end
+    else if Assigned(rbQFLowFPS) and rbQFLowFPS.Checked then
+    begin
+      LogInfo('  ( ) Restart RDP Service');
+      LogInfo('  ( ) Set all Local Accounts to Never Expire');
+      LogInfo('  ( ) Restore deleted Remote Desktop Service');
+      LogInfo('  (x) Low FPS and Lag Troubleshooting');
     end;
   end
   else if CurPageID = UserPage.ID then
@@ -8050,7 +8382,9 @@ begin
       else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
         AddStepPendingLabel(StepQuickFixes, 'Set all Local Accounts to Never Expire')
       else if Assigned(rbQFRestoreTermService) and rbQFRestoreTermService.Checked then
-        AddStepPendingLabel(StepQuickFixes, 'Restore deleted Remote Desktop Service');
+        AddStepPendingLabel(StepQuickFixes, 'Restore deleted Remote Desktop Service')
+      else if Assigned(rbQFLowFPS) and rbQFLowFPS.Checked then
+        AddStepPendingLabel(StepQuickFixes, 'Apply Low FPS and Lag troubleshooting settings');
     end
     else if SelectedInstallMode = installModeInstall then
     begin
@@ -8368,6 +8702,14 @@ begin
         WriteInstallerLog('QuickFixes: Restore TermService (exit=' + IntToStr(ResultCode) + ')');
         SetStepDone(StepQuickFixes, 'Restore deleted Remote Desktop Service');
         StatusOverlay.Caption := 'Remote Desktop Service restored.';
+      end
+      else if Assigned(rbQFLowFPS) and rbQFLowFPS.Checked then
+      begin
+        SetStepInProgress(StepQuickFixes, 'Applying Low FPS and Lag troubleshooting settings');
+        LogDebug('QuickFixes: Applying Low FPS and Lag troubleshooting settings');
+        ApplyLowFPSRecommended;
+        SetStepDone(StepQuickFixes, 'Apply Low FPS and Lag troubleshooting settings');
+        StatusOverlay.Caption := 'Low FPS and lag settings applied. Reconnect your RDP session.';
       end;
     end
     else if SelectedInstallMode = installModeEditShortcuts then
@@ -8749,6 +9091,7 @@ begin
      (CurPageID = UserPage.ID) or
      (CurPageID = Page_ShortcutSettings.ID) or
      (CurPageID = EditSystemwideSettingsPage.ID) or
+     (CurPageID = QuickFixLowFPSPage.ID) or
      (CurPageID = Page_ShowRDPInfo.ID) or
      (CurPageID = Page_CreateShortcutsForExistingUsers.ID) or
      (CurPageID = EditShortcutPage.ID) or
@@ -9003,6 +9346,14 @@ begin
     LogDebug('CurPageChanged: Quick Fixes page shown');
   end;
 
+  // Low FPS and Lag Troubleshooting page: read current policy values and colour them
+  if Assigned(QuickFixLowFPSPage) and (CurPageID = QuickFixLowFPSPage.ID) then
+  begin
+    LogDebug('CurPageChanged: Low FPS and Lag Troubleshooting page shown');
+    WizardForm.NextButton.Visible := True;
+    RefreshLowFPSPage;
+  end;
+
   // Populate Show RDP Info page when shown
   if Assigned(Page_ShowRDPInfo) and (CurPageID = Page_ShowRDPInfo.ID) then
   begin
@@ -9167,9 +9518,24 @@ begin
     end
     else if SelectedInstallMode = installModeQuickFixes then
     begin
-      WizardForm.FinishedHeadingLabel.Caption := 'Quick Fix Applied';
-      CompletionText := 'The selected quick fix has been applied successfully.';
-      WriteInstallerLog('CurPageChanged: Showing Quick Fixes completion message');
+      if Assigned(rbQFLowFPS) and rbQFLowFPS.Checked then
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'Low FPS and Lag Settings Applied';
+        CompletionText :=
+          'The following RDP settings were set to their recommended values:' + #13#10#13#10 +
+          '- RDP Transport (TCP only) - UDP transport disabled (fClientDisableUDP=1)' + #13#10 +
+          '- Network Auto-Detect - SelectNetworkDetect Not set' + #13#10 +
+          '- RemoteFX Image Quality - set to 2 (High)' + #13#10 +
+          '- RemoteFX Compression - set to 2 (Balanced)' + #13#10#13#10 +
+          'Reconnect your Remote Desktop session for the changes to take effect.';
+        WriteInstallerLog('CurPageChanged: Showing Low FPS and Lag completion message');
+      end
+      else
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'Quick Fix Applied';
+        CompletionText := 'The selected quick fix has been applied successfully.';
+        WriteInstallerLog('CurPageChanged: Showing Quick Fixes completion message');
+      end;
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
