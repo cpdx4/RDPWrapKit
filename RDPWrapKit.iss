@@ -220,6 +220,7 @@ var
   
   // Flags derived from welcome/options controls
   DoInstallTermWrap: Boolean;
+  RdpWrapperAutoupdatePresent: Boolean;  // "RDP Wrapper Autoupdate" scheduled task detected at options-page time
   DoCreateRdpShortcuts: Boolean;
   CreateUserMode: Integer;       // createUserModeNew or createUserModeExisting (only used when DoCreateRdpShortcuts = True)
   DoEditSystemWideSettings: Boolean;
@@ -273,6 +274,7 @@ var
   StepsHeaderLabel: TLabel;
   StepAddExcl: TLabel;
   StepRemoveExcl: TLabel;
+  StepDisableRdpWrapperTask: TLabel;
   StepStopSvc: TLabel;
   StepEnsureVC: TLabel;
   StepInstallTermWrap: TLabel;
@@ -391,6 +393,7 @@ const
   // Step text constants for progress checklist - displayed during installation
   TXT_AddExcl = 'Add Windows Defender exclusion';
   TXT_RemoveExcl = 'Remove Windows Defender exclusion';
+  TXT_DisableRdpWrapperTask = 'Disable RDP Wrapper autoupdate task';
   TXT_StopSvc = 'Stop Remote Desktop Services';
   TXT_StartSvc = 'Start Remote Desktop Services';
   TXT_RestartSvc = 'Restart Remote Desktop Services';
@@ -2792,6 +2795,47 @@ begin
     DeleteFile(OutPath);
   Result := RC;
   LogExit('RunNetHiddenCapture');
+end;
+
+// -----------------------------------------------------------------------------
+// RDP WRAPPER AUTOUPDATE TASK CONFLICT
+// -----------------------------------------------------------------------------
+// RDP Wrapper is an alternate method to enable local RDP. Its installer can
+// register a scheduled task named "RDP Wrapper Autoupdate" that periodically
+// re-applies RDP Wrapper's TermService hooks, which breaks TermWrap (the
+// wrapper RDPWrapKit installs).  We detect that task when the user chooses to
+// (re)install TermWrap, inform the user, and disable it during installation.
+
+// Returns True when the "RDP Wrapper Autoupdate" scheduled task exists.
+function IsRdpWrapperAutoupdateTaskPresent: Boolean;
+var
+  PSOut: string;
+begin
+  LogEntry('IsRdpWrapperAutoupdateTaskPresent');
+  PSOut := GetPSOutput(
+    '$t = Get-ScheduledTask -TaskName ''RDP Wrapper Autoupdate'' -ErrorAction SilentlyContinue; ' +
+    'if ($t) { Write-Output ''PRESENT'' } else { Write-Output ''ABSENT'' }');
+  Result := Pos('PRESENT', PSOut) > 0;
+  LogInfo('RDP Wrapper autoupdate task present: ' + BoolToStr(Result));
+  LogExit('IsRdpWrapperAutoupdateTaskPresent');
+end;
+
+// Disables the "RDP Wrapper Autoupdate" scheduled task (no-op if absent).
+procedure DisableRdpWrapperAutoupdateTask;
+var
+  RC: Integer;
+  PSOut: string;
+begin
+  LogEntry('DisableRdpWrapperAutoupdateTask');
+  PSOut := ExecPSCaptureAll(
+    'try { Disable-ScheduledTask -TaskName ''RDP Wrapper Autoupdate'' | Out-Null; Write-Output ''DISABLED'' } ' +
+    'catch { Write-Output (''FAILED: '' + $_.Exception.Message) }',
+    RC);
+  if Pos('DISABLED', PSOut) > 0 then
+    LogInfo('Scheduled task "RDP Wrapper Autoupdate" disabled')
+  else
+    LogWarn('Could not disable scheduled task "RDP Wrapper Autoupdate" (RC=' + IntToStr(RC) + '): ' + PSOut);
+  LogExit('DisableRdpWrapperAutoupdateTask');
 end;
 
 // Sleep with UI updates
@@ -7495,6 +7539,7 @@ begin
   StepStopSvc := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   StepAddExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
   StepRemoveExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
+  StepDisableRdpWrapperTask := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepEnsureVC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);         topPos := topPos + ScaleY(16);
   StepInstallTermWrap := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);topPos := topPos + ScaleY(16);
   StepConfigureService := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
@@ -7578,6 +7623,7 @@ begin
   begin
     // Derive install mode and flags from the options page controls
     DoInstallTermWrap := False;
+    RdpWrapperAutoupdatePresent := False;
     DoCreateRdpShortcuts := False;
     CreateUserMode := createUserModeNew;
     DoEditSystemWideSettings := False;
@@ -7642,6 +7688,23 @@ begin
         MsgBox('Please select at least one option under Install', mbError, MB_OK);
         Result := False;
         exit;
+      end;
+
+      // Detect the "RDP Wrapper Autoupdate" scheduled task before proceeding.
+      // RDP Wrapper is an alternate method to enable local RDP, but its
+      // autoupdate task re-applies RDP Wrapper's TermService hooks and breaks
+      // TermWrap, so it will be disabled during installation.
+      if DoInstallTermWrap then
+      begin
+        RdpWrapperAutoupdatePresent := IsRdpWrapperAutoupdateTaskPresent;
+        if RdpWrapperAutoupdatePresent then
+        begin
+          MsgBox('RDP Wrapper detected on this system.' + #13#10#13#10 +
+                 'RDP Wrapper is an alternate method to enable local RDP, but its "RDP Wrapper Autoupdate" scheduled task breaks TermWrap (which RDPWrapKit uses).' + #13#10#13#10 +
+                 'That scheduled task will be disabled during installation.',
+                 mbInformation, MB_OK);
+          LogInfo('USER SELECTIONS: RDP Wrapper autoupdate task detected; user notified it will be disabled');
+        end;
       end;
 
       // Pre-populate the existing-users page when taking that path
@@ -8396,6 +8459,8 @@ begin
         AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
         AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
         AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
+        if RdpWrapperAutoupdatePresent then
+          AddStepPendingLabel(StepDisableRdpWrapperTask, TXT_DisableRdpWrapperTask);
         AddStepPendingLabel(StepConfigureService, TXT_ConfigureService);
       end;
       if DoCreateRdpShortcuts and (CreateUserMode = createUserModeNew) and (UsersList.Count > 0) then
@@ -8782,7 +8847,18 @@ begin
       end;
       // VC++ ensured (installed or skipped)
       SetStepDone(StepEnsureVC, TXT_EnsureVC);
-      
+
+      // Disable the "RDP Wrapper Autoupdate" scheduled task if it was detected
+      // at the options page - its autoupdate re-applies RDP Wrapper's hooks and
+      // breaks TermWrap.
+      if RdpWrapperAutoupdatePresent then
+      begin
+        SetStepInProgress(StepDisableRdpWrapperTask, TXT_DisableRdpWrapperTask);
+        StatusOverlay.Caption := 'Disabling RDP Wrapper autoupdate task...';
+        DisableRdpWrapperAutoupdateTask;
+        SetStepDone(StepDisableRdpWrapperTask, TXT_DisableRdpWrapperTask);
+      end;
+
       // Install and configure TermWrap
       SetStepInProgress(StepConfigureService, TXT_ConfigureService);
       StatusOverlay.Caption := 'Installing and configuring TermWrap...';
