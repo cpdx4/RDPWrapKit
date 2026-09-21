@@ -38,14 +38,17 @@ if %SIGNONLY% equ 1 (
 echo.
 echo === Step 2: Compile Installer ===
 
-REM Try to find ISCC.exe in common locations
+REM Try to find ISCC.exe in common locations (prefer Inno Setup 7, fall back to 6)
 set ISCC_EXE=
-if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+if exist "C:\Program Files\Inno Setup 7\ISCC.exe" set ISCC_EXE=C:\Program Files\Inno Setup 7\ISCC.exe
+if not defined ISCC_EXE if exist "C:\Program Files (x86)\Inno Setup 7\ISCC.exe" set ISCC_EXE=C:\Program Files (x86)\Inno Setup 7\ISCC.exe
+if not defined ISCC_EXE if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
 if not defined ISCC_EXE if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set ISCC_EXE=C:\Program Files\Inno Setup 6\ISCC.exe
 if not defined ISCC_EXE where ISCC.exe >nul 2>nul && set ISCC_EXE=ISCC.exe
 
 if not defined ISCC_EXE (
-    echo ERROR: Inno Setup 6 compiler not found.
+    echo ERROR: Inno Setup compiler not found.
+    echo Looked for Inno Setup 7 then Inno Setup 6.
     echo Install from https://jrsoftware.org/isdl.php
     exit /b 1
 )
