@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RDP “Not Listening” but Running — Fix — RDPWrapKit</title>
+    <meta
+      name="description"
+      content="Fix for when the RDPWrapKit 'Show RDP Info' page says RDP is Not Listening on port 3389 even though the Remote Desktop service is Running: an in-place Windows repair that keeps your apps and data."
+    />
+    <meta name="author" content="cpdx4" />
+    <meta property="og:title" content="RDP “Not Listening” but Running — Fix — RDPWrapKit" />
+    <meta
+      property="og:description"
+      content="Fix for the 'Not Listening on port 3389' / service Running mismatch with an in-place Windows repair that keeps your apps and data."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://rdpwrapkit.cpdx4.space/troubleshooting/rdp-not-listening.html" />
+    <meta property="og:site_name" content="RDPWrapKit" />
+    <link rel="canonical" href="https://rdpwrapkit.cpdx4.space/troubleshooting/rdp-not-listening.html" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="../favicon.ico" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <nav class="site-nav" aria-label="Main">
+      <div class="container nav-bar">
+        <a class="nav-brand" href="../index.html">
+          <span class="nav-brand-main">RDP</span><span class="nav-brand-accent">WrapKit</span>
+        </a>
+        <div class="nav-links">
+          <a href="../index.html#quickstart">Quick Start</a>
+          <a href="../troubleshooting/" class="active" aria-current="page">Troubleshooting</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="container">
+        <nav class="breadcrumb" aria-label="Breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <a href="../troubleshooting/">Troubleshooting</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <span class="current" aria-current="page">Not Listening</span>
+        </nav>
+        <h1>RDP shows "Not Listening" while the service is Running</h1>
+        <p class="lead">If the <strong>Show RDP Info</strong> page says RDP is <strong>Not Listening on port 3389</strong> even though the Remote Desktop service is <strong>Running</strong>, the RDP listener has stopped working. The fix below performs an in-place Windows repair that keeps your apps and data.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="container narrow">
+          <h2>The symptom</h2>
+          <p class="section-subtitle">Why "Running" and "Not Listening" can both be true</p>
+          <div class="callout">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>Remote Desktop service (TermService):</strong> Running</p>
+              <p><strong>RDP listener on port 3389:</strong> Not Listening</p>
+            </div>
+          </div>
+          <p>The service is technically running, but the part of Windows that actually accepts incoming RDP connections — the <em>listener</em> — is not bound to port 3389. That mismatch is usually caused by a Windows Update corrupting or replacing a system component that RDP depends on. The service still starts, but it can't open its listening port, so no RDP client can connect.</p>
+          <p>An <strong>in-place Windows repair</strong> reinstalls the affected system files while keeping your apps and data, which normally restores the listener.</p>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>The fix — in-place Windows repair</h2>
+          <p class="section-subtitle">Reinstall the Windows files that power RDP, without touching your apps or data</p>
+          <div class="callout callout-safe">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>This is a repair, not a clean install.</strong> It does <strong>not</strong> delete your apps or personal files. Still, back up anything important before you begin.</p>
+            </div>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <span class="step-number">01</span>
+              <div class="step-content">
+                <h3>Download the official Windows 11 installer</h3>
+                <p>Go to <a href="https://www.microsoft.com/en-us/software-download/windows11" target="_blank" rel="noopener noreferrer">Microsoft's Windows 11 download page</a>.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div class="step-content">
+                <h3>Choose the multi-edition ISO</h3>
+                <p>Scroll to the third section, <strong>"Download Windows 11 Disk Image (ISO) for x64 devices"</strong>. Open the dropdown and select <strong>Windows 11 (multi-edition ISO)</strong>, then click <strong>Confirm</strong> and <strong>64-bit Download</strong>.</p>
+                <figure class="fix-figure">
+                  <img src="../assets/troubleshooting/win11-iso-download.png" alt="Windows 11 download page showing the 'Windows 11 (multi-edition ISO for x64 devices)' dropdown, with the Confirm button and the 64-bit Download button highlighted" loading="lazy" />
+                  <figcaption>Select "Windows 11 (multi-edition ISO)", then Confirm, then 64-bit Download.</figcaption>
+                </figure>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div class="step-content">
+                <h3>Mount the ISO</h3>
+                <p>In your <strong>Downloads</strong> folder, right-click the downloaded <code>.iso</code> file and choose <strong>Mount</strong>. It then opens like a virtual DVD drive.</p>
+                <p class="step-note">If nothing opens, go to <strong>This PC</strong> in File Explorer and double-click the new DVD drive.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div class="step-content">
+                <h3>Run setup.exe — and keep your apps and data</h3>
+                <p>Open the mounted drive and run <code>setup.exe</code>. Follow the prompts toward <strong>Install</strong>.</p>
+                <p class="step-note step-note-warn"><strong>Stop if you don't see "Keep personal files and apps."</strong> If that option is missing, you picked the wrong media (possibly the wrong language) — stop and start over from step 2.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">05</span>
+              <div class="step-content">
+                <h3>(Re)install TermWrap from RDPWrapKit</h3>
+                <p>Once the repair is complete, run the RDPWrapKit installer again and choose the <strong>TermWrap</strong> option to (re)install it.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">06</span>
+              <div class="step-content">
+                <h3>Confirm RDP is listening</h3>
+                <p>Open the <strong>Show RDP Info</strong> page again. RDP should now report <strong>Listening on port 3389</strong>, and your desktop RDP shortcut will connect.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Still showing "Not Listening"?</h2>
+          <p class="section-subtitle">Let us know what you're seeing so we can keep improving these fixes</p>
+          <div class="cta-row">
+            <a class="btn btn-outline" href="https://github.com/cpdx4/RDPWrapKit/issues" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Open an issue on GitHub
+            </a>
+            <a class="btn btn-solid" href="../troubleshooting/">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              All fixes
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-content">
+        <p>RDPWrapKit ©2026 <span id="year"></span> · Maintained by <a href="https://github.com/cpdx4" target="_blank" rel="noopener noreferrer">cpdx4</a></p>
+        <nav>
+          <a href="https://github.com/cpdx4/RDPWrapKit/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="../script.js"></script>
+  </body>
+</html>
