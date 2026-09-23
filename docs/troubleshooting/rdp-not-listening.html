@@ -3,13 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RDP “Not Listening” but Running — Fix — RDPWrapKit</title>
+    <title>RDP “Not Listening” but Running | Fix | RDPWrapKit</title>
     <meta
       name="description"
       content="Fix for when the RDPWrapKit 'Show RDP Info' page says RDP is Not Listening on port 3389 even though the Remote Desktop service is Running: an in-place Windows repair that keeps your apps and data."
     />
     <meta name="author" content="cpdx4" />
-    <meta property="og:title" content="RDP “Not Listening” but Running — Fix — RDPWrapKit" />
+    <meta property="og:title" content="RDP “Not Listening” but Running | Fix | RDPWrapKit" />
     <meta
       property="og:description"
       content="Fix for the 'Not Listening on port 3389' / service Running mismatch with an in-place Windows repair that keeps your apps and data."
@@ -62,14 +62,14 @@
               <p><strong>RDP listener on port 3389:</strong> Not Listening</p>
             </div>
           </div>
-          <p>The service is technically running, but the part of Windows that actually accepts incoming RDP connections — the <em>listener</em> — is not bound to port 3389. That mismatch is usually caused by a Windows Update corrupting or replacing a system component that RDP depends on. The service still starts, but it can't open its listening port, so no RDP client can connect.</p>
+          <p>The service is technically running, but the part of Windows that actually accepts incoming RDP connections (the <em>listener</em>) is not bound to port 3389. That mismatch is usually caused by a Windows Update corrupting or replacing a system component that RDP depends on. The service still starts, but it can't open its listening port, so no RDP client can connect.</p>
           <p>An <strong>in-place Windows repair</strong> reinstalls the affected system files while keeping your apps and data, which normally restores the listener.</p>
         </div>
       </section>
 
       <section class="section section-border">
         <div class="container narrow">
-          <h2>The fix — in-place Windows repair</h2>
+          <h2>The fix: in-place Windows repair</h2>
           <p class="section-subtitle">Reinstall the Windows files that power RDP, without touching your apps or data</p>
           <div class="callout callout-safe">
             <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -108,9 +108,9 @@
             <li>
               <span class="step-number">04</span>
               <div class="step-content">
-                <h3>Run setup.exe — and keep your apps and data</h3>
+                <h3>Run setup.exe and keep your apps and data</h3>
                 <p>Open the mounted drive and run <code>setup.exe</code>. Follow the prompts toward <strong>Install</strong>.</p>
-                <p class="step-note step-note-warn"><strong>Stop if you don't see "Keep personal files and apps."</strong> If that option is missing, you picked the wrong media (possibly the wrong language) — stop and start over from step 2.</p>
+                <p class="step-note step-note-warn"><strong>Stop if you don't see "Keep personal files and apps."</strong> If that option is missing, you picked the wrong media (possibly the wrong language). Stop and start over from step 2.</p>
               </div>
             </li>
             <li>

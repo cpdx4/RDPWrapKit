@@ -208,6 +208,12 @@ h2 {
   text-align: center;
 }
 
+.credit {
+  color: var(--muted);
+  margin: 1.5rem 0 0;
+  text-align: center;
+}
+
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

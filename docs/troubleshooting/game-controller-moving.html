@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Game Controller Moving in RDP | Fix | RDPWrapKit</title>
+    <meta
+      name="description"
+      content="Fix for when a game controller keeps moving your character inside RDP: use the HidHide app to hide the controller from RDP while keeping it available to your games."
+    />
+    <meta name="author" content="cpdx4" />
+    <meta property="og:title" content="Game Controller Moving in RDP | Fix | RDPWrapKit" />
+    <meta
+      property="og:description"
+      content="Fix for when a game controller keeps moving your character inside RDP: hide the controller from RDP with HidHide."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://rdpwrapkit.cpdx4.space/troubleshooting/game-controller-moving.html" />
+    <meta property="og:site_name" content="RDPWrapKit" />
+    <link rel="canonical" href="https://rdpwrapkit.cpdx4.space/troubleshooting/game-controller-moving.html" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="../favicon.ico" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <nav class="site-nav" aria-label="Main">
+      <div class="container nav-bar">
+        <a class="nav-brand" href="../index.html">
+          <span class="nav-brand-main">RDP</span><span class="nav-brand-accent">WrapKit</span>
+        </a>
+        <div class="nav-links">
+          <a href="../index.html#quickstart">Quick Start</a>
+          <a href="../troubleshooting/" class="active" aria-current="page">Troubleshooting</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="container">
+        <nav class="breadcrumb" aria-label="Breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <a href="../troubleshooting/">Troubleshooting</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <span class="current" aria-current="page">Controller moving in RDP</span>
+        </nav>
+        <h1>My game controller is moving in RDP</h1>
+        <p class="lead">If your game controller is moving your character inside RDP when you don't want it to, RDP is intercepting the controller input. The fix below uses the <a href="https://github.com/nefarius/HidHide/releases" target="_blank" rel="noopener noreferrer">HidHide</a> app to hide the controller from RDP while keeping it available to your games.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="container narrow">
+          <h2>The symptom</h2>
+          <p class="section-subtitle">Why your controller ends up "driving" inside RDP</p>
+          <div class="callout">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>Am I affected?</strong> You are using a game controller and it is moving your character in RDP when you don't want it to.</p>
+              <p><strong>Cause:</strong> RDP thinks you're trying to use the controller within it, so the input keeps being sent into the remote session.</p>
+              <p><strong>The fix:</strong> Use the HidHide app to hide the controller from other apps, in this case RDP.</p>
+            </div>
+          </div>
+          <p>Windows delivers game controller input to every application that listens for it, including the Remote Desktop client. HidHide sits between your controller and the apps on your PC and lets you decide which apps can see the device: your games keep full access, while RDP (or whatever else you choose) is cut off from it entirely.</p>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>The fix: hide the controller with HidHide</h2>
+          <p class="section-subtitle">Whitelist your games (or blacklist RDP) so the controller input never reaches the remote session</p>
+          <div class="callout callout-safe">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>HidHide is a free, open-source tool</strong> from Nefarius Software Solutions. It does not change your controller hardware or firmware; it only blocks which apps can see the device.</p>
+            </div>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <span class="step-number">01</span>
+              <div class="step-content">
+                <h3>Download and install HidHide</h3>
+                <p>Download and install <a href="https://github.com/nefarius/HidHide/releases" target="_blank" rel="noopener noreferrer">HidHide</a> from the GitHub releases page. Reboot your PC when prompted.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div class="step-content">
+                <h3>Open the HidHide configuration client</h3>
+                <p>After rebooting, open the HidHide configuration client. You can find it by searching for the app in the Windows search bar.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div class="step-content">
+                <h3>Choose how you want the cloak to work</h3>
+                <p>By default, HidHide will block all games from seeing your controller, which is the opposite of what you want here. Decide which direction you need:</p>
+                <ul>
+                  <li>By entering any game with the <strong>+</strong> button on the bottom right corner, they will be added to a whitelist where only the games you select can see and use your controller.</li>
+                  <li>Alternatively, by toggling <strong>Inverse application cloak</strong> on the bottom left, HidHide will now allow all games to see your controller, and any game added to the list will be blacklisted from seeing your controller.</li>
+                </ul>
+                <p class="step-note"><strong>Recommendation:</strong> If you run many RDPs and play few games with your controller, leave <em>Inverse application cloak</em> unchecked. If you run few RDPs but play many games with your controller, have it checked.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div class="step-content">
+                <h3>Add your apps to the list via Task Manager</h3>
+                <p>If you have <strong>Inverse application cloak</strong> unchecked, you will need to add each game you want to use with a controller to the list. If it is checked, you will need to add each RDP to the list.</p>
+                <p>Open <strong>Task Manager</strong> while you have the RDP/games open and go to the <strong>Details</strong> tab. Right-click on the top row and click <strong>Select columns</strong>, then enable <strong>Command line</strong>.</p>
+                <figure class="fix-figure">
+                  <img src="../assets/troubleshooting/hidhide-taskmgr-select-columns.webp" alt="Task Manager column picker with the 'Command line' option enabled" loading="lazy" />
+                  <figcaption>Enable the "Command line" column in Task Manager.</figcaption>
+                </figure>
+                <p>A new column will appear which will show the location of your game/RDP. You can then look for the app you want to add to the list, copy its location, and enter it into HidHide.</p>
+                <figure class="fix-figure">
+                  <img src="../assets/troubleshooting/hidhide-taskmgr-command-line.webp" alt="Task Manager Details tab showing the new Command line column with each app's full path" loading="lazy" />
+                  <figcaption>The Command line column shows the full path of each game/RDP. Copy it and paste it into HidHide.</figcaption>
+                </figure>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">05</span>
+              <div class="step-content">
+                <h3>Hide your controller on the Devices tab</h3>
+                <p>After adding all your RDPs/games to the configuration, switch to the <strong>Devices</strong> tab.</p>
+                <figure class="fix-figure">
+                  <img src="../assets/troubleshooting/hidhide-devices-tab.webp" alt="HidHide configuration client with Applications and Devices tabs and the Inverse application cloak checkbox" loading="lazy" />
+                  <figcaption>Switch to the Devices tab once your app list is set up.</figcaption>
+                </figure>
+                <p>Plug in your controller and then select it from the list.</p>
+                <figure class="fix-figure">
+                  <img src="../assets/troubleshooting/hidhide-select-device.webp" alt="HidHide Devices tab with the connected controller selected from the device list" loading="lazy" />
+                  <figcaption>Select your controller from the device list.</figcaption>
+                </figure>
+                <p class="step-note">You may also need to toggle <strong>Gaming devices only</strong> and/or <strong>Filter-out disconnected</strong> to find your controller. Then toggle <strong>Enable device hiding</strong> and reconnect your controller.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">06</span>
+              <div class="step-content">
+                <h3>Verify HidHide is working</h3>
+                <p>Verify HidHide is working by:</p>
+                <ul>
+                  <li>Using your controller with both an RDP and a game open.</li>
+                  <li>Checking if you can move around in-game without moving in your RDP.</li>
+                  <li>If you tried to blacklist your RDPs and it didn't work, you may need to add both the Roblox installation and the RDP itself (<code>mstsc.exe</code>) to the list.</li>
+                </ul>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Still seeing controller input in RDP?</h2>
+          <p class="section-subtitle">Let us know what you're seeing so we can keep improving these fixes</p>
+          <div class="cta-row">
+            <a class="btn btn-outline" href="https://github.com/cpdx4/RDPWrapKit/issues" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Open an issue on GitHub
+            </a>
+            <a class="btn btn-solid" href="../troubleshooting/">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              All fixes
+            </a>
+          </div>
+          <p class="credit">Credit to BSGH member mahirishere</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-content">
+        <p>RDPWrapKit ©2026 <span id="year"></span> · Maintained by <a href="https://github.com/cpdx4" target="_blank" rel="noopener noreferrer">cpdx4</a></p>
+        <nav>
+          <a href="https://github.com/cpdx4/RDPWrapKit/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="../script.js"></script>
+  </body>
+</html>
