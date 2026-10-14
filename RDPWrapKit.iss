@@ -99,6 +99,10 @@ procedure OnNextShortcutPageClick(Sender: TObject); forward;
 procedure OnShortcutCheckBoxClick(Sender: TObject); forward;
 procedure BuildEditShortcutAdvancedControls; forward;
 procedure BuildCreateShortcutAdvancedControls; forward;
+procedure BuildRemoveUsersControls; forward;
+procedure UpdateRemoveUsersPageDisplay; forward;
+procedure OnRemoveUsersPrevPageClick(Sender: TObject); forward;
+procedure OnRemoveUsersNextPageClick(Sender: TObject); forward;
 procedure UnSignRdpFile(const RdpPath: string); forward;
 procedure UpdateShortcutPageDisplay; forward;
 function IsValidPassword(const Password: string): String; forward;
@@ -175,7 +179,21 @@ var
   rbEditSystemwideSettings: TRadioButton;
   rbShowRDPInfo: TRadioButton;
   rbQuickFixes: TRadioButton;
+  rbRemoveUsers: TRadioButton;
   rbUninstall: TRadioButton;
+  Page_RemoveUsers: TWizardPage;
+  // Remove Users page controls
+  RemoveUsersUserCheckBoxes: array of TCheckBox;
+  RemoveUsersUserDisplayNames: array of TLabel;
+  RemoveUsersDelRegCheckBoxes: array of TCheckBox;
+  RemoveUsersDelRegLabels: array of TLabel;
+  RemoveUsersConfirmPage: TWizardPage;  // Confirmation page shown before deletion
+  // Remove Users pagination
+  RemoveUsersCurrentPage: Integer;
+  RemoveUsersPerPage: Integer;
+  RemoveUsersPrevButton: TButton;
+  RemoveUsersNextButton: TButton;
+  RemoveUsersPageLabel: TLabel;
   Page_ShowRDPInfo: TWizardPage;
   // Show RDP Info page controls
   cmbGPCompression: TComboBox;
@@ -205,6 +223,7 @@ var
   EditShortcutControlsBuilt: Boolean;
   EditShortcutAdvancedControlsBuilt: Boolean;
   CreateShortcutAdvancedControlsBuilt: Boolean;
+  RemoveUsersControlsBuilt: Boolean;
   ShowPerformanceSettings: Boolean;
   ShowBasicSettings: Boolean;
   Page_CreateShortcutAdvanced: TWizardPage;
@@ -239,6 +258,13 @@ var
   rbQFAccountNeverExpires: TRadioButton;
   rbQFRestoreTermService: TRadioButton;
   rbQFLowFPS: TRadioButton;
+
+  // Controls for the "Remove user accounts" page
+  lblRemoveUsersHeader: TLabel;
+  lblColUser: TLabel;
+  lblColDelReg: TLabel;
+  lblConfirmList: TLabel;
+  // RemoveUsersPageScrollbar: TScrollBox;  // Placeholder for potential scrollbar control
 
   // Controls for the "Low FPS and Lag Troubleshooting" quick fix page
   QuickFixLowFPSPage: TWizardPage;
@@ -295,7 +321,14 @@ var
   StepRestartRDP: TLabel;
   StepQuickFixes: TLabel;
   StepAccountNeverExpires: TLabel;
-  SelectedInstallMode: Integer;  // installModeInstall, installModeEditShortcuts, installModeEditSystemwideSettings, installModeUninstall
+  StepRemoveUsers: TLabel;
+  SelectedInstallMode: Integer;  // installModeInstall, installModeEditShortcuts, installModeEditSystemwideSettings, installModeUninstall, installModeRemoveUsers
+  RemoveUsersUsersList: TStringList;        // login usernames for remove-users page
+  RemoveUsersUsersDisplay: TStringList;      // display labels (email if online account, else same as username)
+  RemoveUsersCurrentUserName: string;        // the account the installer is running under
+  RemoveUsersSelectedForDeletion: TStringList; // usernames checked for deletion
+  RemoveUsersFailedDeletes: TStringList;       // "username|error" entries that failed to delete
+  RemoveUsersFailureShown: Boolean;            // ensures the failure popup shows only once
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
   DoShowMstscEdit: Boolean;  // True = open mstsc /edit after writing settings (EditShortcuts path)
   // Simulation marker flags (log once per run)
@@ -409,6 +442,7 @@ const
   TXT_RemoveFolder = 'Remove TermWrap folder';
   TXT_UninstallTermWrap = 'Uninstall TermWrap';
   TXT_ShowRDPInfo = 'Apply RDP settings';
+  TXT_RemoveUsers = 'Remove user accounts';
 
   // -------------------------------------------------------------------------
   // LOW FPS AND LAG TROUBLESHOOTING QUICK FIX
@@ -513,6 +547,7 @@ const
   installModeUninstall = 3;                      // Uninstall everything
   installModeShowRDPInfo = 4;               // Show RDP Info + configure RemoteFX/startup settings
   installModeQuickFixes = 5;                     // Quick Fixes page
+  installModeRemoveUsers = 6;                     // Remove user accounts
 
   // CREATE USER MODE CONSTANTS (only relevant when DoCreateRdpShortcuts = True)
   createUserModeNew = 0;                         // Create new local user accounts
@@ -3262,16 +3297,24 @@ begin
   OpTick := GetTickCount;
   PSPath := ExpandConstant(TEMP_LOCAL_USERS);
 
+  // Use CIM (Win32_UserAccount) instead of Get-LocalUser for maximum reliability.
+  // Get-LocalUser (from Microsoft.PowerShell.LocalAccounts) is unavailable on
+  // some Windows 11 24H2 / Server 2025 builds where the LocalAccounts WMI provider
+  // is not installed.  Win32_UserAccount via CIM is always present on modern Windows.
   PSCommand :=
     'try {' +
     ' $out=@();' +
     ' $sq=[char]39;' +
-    ' foreach($u in (Get-LocalUser | Where-Object {$_.Enabled -and $_.Name[0] -ne $sq})) {' +
-    '  $n=$u.Name; $detail=$null;' +
+    ' $machineName = (Get-CimInstance Win32_ComputerSystem).Name;' +
+    ' foreach($u in (Get-CimInstance -ClassName Win32_UserAccount -Filter ''LocalAccount=True AND Disabled=False'')) {' +
+    '  if($u.Domain -ne $machineName) { continue }' + // ensure truly local, not built-in domain account
+    '  $n=$u.Name;' +
+    '  if($n[0] -eq $sq) { continue }' + // skip if name starts with single-quote
+    '  $detail=$null;' +
     '  if($u.FullName -match ''@'') { $detail=$u.FullName }' +
     '  elseif($u.FullName -and $u.FullName.Trim() -ne '''') { $detail=$u.FullName.Trim() }' +
     '  if(-not $detail) { try {' +
-    '   $s=$u.SID.Value;' +
+    '   $s=$u.SID;' +
     '   $r=''HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\''+$s+''\IdentityCache\''+$s;' +
     '   $e=(Get-ItemProperty -Path $r -Name UserName -ErrorAction Stop).UserName;' +
     '   if($e -and $e.Trim() -ne '''') {$detail=$e.Trim()}' +
@@ -4098,6 +4141,383 @@ begin
 
   // Mark controls as built to avoid duplicates on re-entry
   CreateShortcutsControlsBuilt := True;
+end;
+
+// -------------------------------------------------------------------------
+// Remove Users page controls
+// -------------------------------------------------------------------------
+
+procedure BuildRemoveUsersControls;
+var
+  i: Integer;
+  UserCount: Integer;
+  TopPos: Integer;
+  RowHeight: Integer;
+  Username: string;
+  DisplayLabel: string;
+  IsCurrentUser: Boolean;
+  PageCount: Integer;
+begin
+  LogEntry('BuildRemoveUsersControls');
+
+  if RemoveUsersControlsBuilt then
+  begin
+    LogDebug('BuildRemoveUsersControls: already built, skipping');
+    LogExit('BuildRemoveUsersControls');
+    exit;
+  end;
+
+  // Populate the user list
+  RemoveUsersUsersList.Clear;
+  RemoveUsersUsersDisplay.Clear;
+  GetLocalUsers(RemoveUsersUsersList, RemoveUsersUsersDisplay);
+  RemoveUsersCurrentUserName := GetInteractiveUserName();
+  LogDebug('BuildRemoveUsersControls: found ' + IntToStr(RemoveUsersUsersList.Count) + ' users, current=' + RemoveUsersCurrentUserName);
+
+  if RemoveUsersUsersList.Count = 0 then
+  begin
+    LogDebug('BuildRemoveUsersControls: no users found');
+    RemoveUsersControlsBuilt := True;
+    LogExit('BuildRemoveUsersControls');
+    exit;
+  end;
+
+  // Initialize pagination
+  RemoveUsersCurrentPage := 0;
+  if RemoveUsersPerPage = 0 then
+    RemoveUsersPerPage := 6; // users per page
+
+  UserCount := RemoveUsersUsersList.Count;
+  SetLength(RemoveUsersUserCheckBoxes, UserCount);
+  SetLength(RemoveUsersDelRegCheckBoxes, UserCount);
+  SetLength(RemoveUsersUserDisplayNames, UserCount);
+  SetLength(RemoveUsersDelRegLabels, UserCount);
+
+  TopPos := ScaleY(10) + ScaleY(50); // after column headers
+  RowHeight := ScaleY(36);
+
+  // Create controls for all users but only show a page at a time
+  for i := 0 to UserCount - 1 do
+  begin
+    Username := RemoveUsersUsersList[i];
+    DisplayLabel := RemoveUsersUsersDisplay[i];
+    IsCurrentUser := Lowercase(Username) = Lowercase(RemoveUsersCurrentUserName);
+
+    // Main checkbox for selecting user deletion
+    RemoveUsersUserCheckBoxes[i] := TCheckBox.Create(Page_RemoveUsers);
+    RemoveUsersUserCheckBoxes[i].Parent := Page_RemoveUsers.Surface;
+    RemoveUsersUserCheckBoxes[i].Left := ScaleX(16);
+    RemoveUsersUserCheckBoxes[i].Width := ScaleX(180);
+    if IsCurrentUser then
+      RemoveUsersUserCheckBoxes[i].Caption := DisplayLabel + ' (current user)'
+    else
+      RemoveUsersUserCheckBoxes[i].Caption := DisplayLabel;
+    RemoveUsersUserCheckBoxes[i].Enabled := not IsCurrentUser;
+    RemoveUsersUserCheckBoxes[i].Checked := False;
+    if IsCurrentUser then
+    begin
+      RemoveUsersUserCheckBoxes[i].Font.Color := RGBToColor(128, 128, 128);
+      RemoveUsersUserCheckBoxes[i].Enabled := False;
+      RemoveUsersUserCheckBoxes[i].Checked := False; // greyed out and unchecked (cannot be selected)
+    end;
+    RemoveUsersUserCheckBoxes[i].Tag := i;
+
+    // "Also delete registry/files" sub-checkbox (default: unchecked)
+    RemoveUsersDelRegCheckBoxes[i] := TCheckBox.Create(Page_RemoveUsers);
+    RemoveUsersDelRegCheckBoxes[i].Parent := Page_RemoveUsers.Surface;
+    RemoveUsersDelRegCheckBoxes[i].Left := ScaleX(200);
+    RemoveUsersDelRegCheckBoxes[i].Width := ScaleX(220);
+    RemoveUsersDelRegCheckBoxes[i].Caption := 'Delete this user''s registry/files';
+    RemoveUsersDelRegCheckBoxes[i].Enabled := not IsCurrentUser;
+    RemoveUsersDelRegCheckBoxes[i].Checked := False; // default unchecked
+    RemoveUsersDelRegCheckBoxes[i].Tag := i;
+    if IsCurrentUser then
+    begin
+      RemoveUsersDelRegCheckBoxes[i].Font.Color := RGBToColor(128, 128, 128);
+      RemoveUsersDelRegCheckBoxes[i].Enabled := False;
+    end;
+  end;
+
+  // Pagination controls (only if more users than fit on a single page)
+  PageCount := (UserCount + RemoveUsersPerPage - 1) div RemoveUsersPerPage;
+  if UserCount > RemoveUsersPerPage then
+  begin
+    // Previous button
+    RemoveUsersPrevButton := TButton.Create(Page_RemoveUsers);
+    RemoveUsersPrevButton.Parent := Page_RemoveUsers.Surface;
+    RemoveUsersPrevButton.Left := ScaleX(16);
+    RemoveUsersPrevButton.Width := ScaleX(80);
+    RemoveUsersPrevButton.Caption := 'Previous';
+    RemoveUsersPrevButton.OnClick := @OnRemoveUsersPrevPageClick;
+
+    // Page label
+    RemoveUsersPageLabel := TLabel.Create(Page_RemoveUsers);
+    RemoveUsersPageLabel.Parent := Page_RemoveUsers.Surface;
+    RemoveUsersPageLabel.AutoSize := True;
+    RemoveUsersPageLabel.Left := ScaleX(100);
+
+    // Next button
+    RemoveUsersNextButton := TButton.Create(Page_RemoveUsers);
+    RemoveUsersNextButton.Parent := Page_RemoveUsers.Surface;
+    RemoveUsersNextButton.Width := ScaleX(80);
+    RemoveUsersNextButton.Caption := 'Next';
+    RemoveUsersNextButton.OnClick := @OnRemoveUsersNextPageClick;
+
+    // Set initial visibility - controls will be positioned by UpdateRemoveUsersPageDisplay
+    RemoveUsersPrevButton.Visible := False;
+    RemoveUsersNextButton.Visible := False;
+    RemoveUsersPageLabel.Visible := False;
+  end
+  else
+  begin
+    RemoveUsersPrevButton := nil;
+    RemoveUsersNextButton := nil;
+    RemoveUsersPageLabel := nil;
+  end;
+
+  // Show first page
+  UpdateRemoveUsersPageDisplay;
+
+  RemoveUsersControlsBuilt := True;
+  LogExit('BuildRemoveUsersControls');
+end;
+
+procedure UpdateRemoveUsersPageDisplay;
+var
+  PageCount, StartIdx, EndIdx, VisIndex, RowHeight, TopPos: Integer;
+  i: Integer;
+begin
+  LogEntry('UpdateRemoveUsersPageDisplay');
+  if RemoveUsersUsersList.Count = 0 then
+  begin
+    LogDebug('UpdateRemoveUsersPageDisplay: no users, skipping');
+    LogExit('UpdateRemoveUsersPageDisplay');
+    exit;
+  end;
+
+  PageCount := (RemoveUsersUsersList.Count + RemoveUsersPerPage - 1) div RemoveUsersPerPage;
+  if RemoveUsersCurrentPage < 0 then RemoveUsersCurrentPage := 0;
+  if RemoveUsersCurrentPage >= PageCount then RemoveUsersCurrentPage := PageCount - 1;
+
+  StartIdx := RemoveUsersCurrentPage * RemoveUsersPerPage;
+  EndIdx := StartIdx + RemoveUsersPerPage - 1;
+  if EndIdx > RemoveUsersUsersList.Count - 1 then EndIdx := RemoveUsersUsersList.Count - 1;
+
+  RowHeight := ScaleY(36);
+  TopPos := ScaleY(10) + ScaleY(50); // after column headers
+  VisIndex := 0;
+
+  for i := 0 to RemoveUsersUsersList.Count - 1 do
+  begin
+    if Assigned(RemoveUsersUserCheckBoxes[i]) then
+    begin
+      RemoveUsersUserCheckBoxes[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+      if RemoveUsersUserCheckBoxes[i].Visible then
+        RemoveUsersUserCheckBoxes[i].Top := TopPos + VisIndex * RowHeight;
+    end;
+    if Assigned(RemoveUsersDelRegCheckBoxes[i]) then
+    begin
+      RemoveUsersDelRegCheckBoxes[i].Visible := (i >= StartIdx) and (i <= EndIdx);
+      if RemoveUsersDelRegCheckBoxes[i].Visible then
+        RemoveUsersDelRegCheckBoxes[i].Top := TopPos + VisIndex * RowHeight;
+    end;
+
+    if (i >= StartIdx) and (i <= EndIdx) then
+      Inc(VisIndex);
+  end;
+
+  // Position and update pagination controls
+  if Assigned(RemoveUsersPrevButton) and Assigned(RemoveUsersNextButton) and Assigned(RemoveUsersPageLabel) then
+  begin
+    RemoveUsersPrevButton.Visible := True;
+    RemoveUsersNextButton.Visible := True;
+    RemoveUsersPageLabel.Visible := True;
+    RemoveUsersPrevButton.Top := Page_RemoveUsers.SurfaceHeight - ScaleY(30);
+    RemoveUsersNextButton.Top := RemoveUsersPrevButton.Top;
+    RemoveUsersNextButton.Left := RemoveUsersPrevButton.Left + RemoveUsersPrevButton.Width + ScaleX(120);
+    RemoveUsersPageLabel.Top := RemoveUsersPrevButton.Top + ScaleY(4);
+    RemoveUsersPageLabel.Caption := 'Page ' + IntToStr(RemoveUsersCurrentPage + 1) + ' of ' + IntToStr(PageCount);
+    RemoveUsersPrevButton.Enabled := RemoveUsersCurrentPage > 0;
+    RemoveUsersNextButton.Enabled := RemoveUsersCurrentPage < PageCount - 1;
+  end;
+  LogExit('UpdateRemoveUsersPageDisplay');
+end;
+
+procedure OnRemoveUsersPrevPageClick(Sender: TObject);
+begin
+  LogEntry('OnRemoveUsersPrevPageClick');
+  if RemoveUsersCurrentPage > 0 then
+    Dec(RemoveUsersCurrentPage);
+  UpdateRemoveUsersPageDisplay;
+  LogExit('OnRemoveUsersPrevPageClick');
+end;
+
+procedure OnRemoveUsersNextPageClick(Sender: TObject);
+var
+  PageCount: Integer;
+begin
+  LogEntry('OnRemoveUsersNextPageClick');
+  PageCount := (RemoveUsersUsersList.Count + RemoveUsersPerPage - 1) div RemoveUsersPerPage;
+  if RemoveUsersCurrentPage < PageCount - 1 then
+    Inc(RemoveUsersCurrentPage);
+  UpdateRemoveUsersPageDisplay;
+  LogExit('OnRemoveUsersNextPageClick');
+end;
+
+// Delete a single local user account, optionally removing their registry and profile files
+function DeleteUserAccount(const UserName: string; DeleteRegAndFiles: Boolean; var ErrorMessage: string): Boolean;
+var
+  PSCommand: string;
+  PSOutput: string;
+  ResultCode: Integer;
+begin
+  LogEntry('DeleteUserAccount');
+  LogDebug('DeleteUserAccount: user=' + UserName + ' DeleteRegAndFiles=' + BoolToStr(DeleteRegAndFiles));
+  Result := False;
+  ErrorMessage := '';
+
+  // Robust account removal. Remove-LocalUser fails (exit 1) when the account still
+  // has an active/disconnected session or a loaded profile, so we:
+  //   1) force-terminate every process owned by the user (ends sessions, unloads profile),
+  //   2) optionally remove the user profile (registry hive + profile folder),
+  //   3) delete the account, falling back to net.exe if Remove-LocalUser errors.
+  // *>&1 captures the failure text so we can surface the real reason.
+  PSCommand :=
+    '$ErrorActionPreference = ''SilentlyContinue''; ' +
+    '$u = ''' + UserName + '''; ' +
+    // 1) End the user's processes/sessions
+    'Get-CimInstance Win32_Process | ForEach-Object { try { if ($_.GetOwner().User -ieq $u) { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } catch {} }; ' +
+    'Start-Sleep -Milliseconds 800; ';
+
+  if DeleteRegAndFiles then
+  begin
+    // 2) Unload and delete the user profile (LocalPath is like 'C:\Users\<name>')
+    PSCommand := PSCommand +
+      'Get-CimInstance Win32_UserProfile | ForEach-Object { try { if ($_.LocalPath -like (''*\'' + $u)) { $_.Delete() } } catch { Remove-Item -LiteralPath $_.LocalPath -Recurse -Force -ErrorAction SilentlyContinue } }; ' +
+      'Remove-Item -LiteralPath (''C:\Users\'' + $u) -Recurse -Force -ErrorAction SilentlyContinue; ';
+  end;
+
+  // 3) Delete the account (Remove-LocalUser preferred, net.exe as fallback)
+  PSCommand := PSCommand +
+    'try { ' +
+    'Remove-LocalUser -Name $u -ErrorAction Stop; ' +
+    'Write-Output ''DELETE_RESULT_OK'' ' +
+    '} catch { ' +
+    '$first = $_.Exception.Message; ' +
+    '$netOut = (net user "$u" /delete 2>&1) -join '' ''; ' +
+    'if (($LASTEXITCODE -eq 0) -or ($null -eq (Get-LocalUser -Name $u -ErrorAction SilentlyContinue))) { ' +
+    'Write-Output ''DELETE_RESULT_OK'' ' +
+    '} else { ' +
+    'Write-Output (''DELETE_RESULT_FAILED: '' + $first + '' || '' + $netOut) ' +
+    '} }';
+
+  PSOutput := ExecPSCaptureAll(PSCommand, ResultCode);
+
+  if Pos('DELETE_RESULT_OK', PSOutput) > 0 then
+  begin
+    Result := True;
+    LogInfo('DeleteUserAccount: removed user ' + UserName);
+  end
+  else
+  begin
+    Result := False;
+    ErrorMessage := PSOutput;
+    if ErrorMessage = '' then
+      ErrorMessage := 'PowerShell exit code ' + IntToStr(ResultCode);
+    LogWarn('DeleteUserAccount: FAILED to remove user ' + UserName + ' - ' + ErrorMessage);
+  end;
+
+  LogExit('DeleteUserAccount');
+end;
+
+// Build the confirmation list and show it on RemoveUsersConfirmPage
+procedure BuildRemoveUsersConfirmation;
+var
+  i, UserCount, SelectedCount: Integer;
+  ConfirmText: string;
+  Username: string;
+  DeleteReg: Boolean;
+begin
+  LogEntry('BuildRemoveUsersConfirmation');
+
+  RemoveUsersSelectedForDeletion.Clear;
+  UserCount := RemoveUsersUsersList.Count;
+  SelectedCount := 0;
+  ConfirmText := '';
+
+  for i := 0 to UserCount - 1 do
+  begin
+    if Assigned(RemoveUsersUserCheckBoxes[i]) and RemoveUsersUserCheckBoxes[i].Checked then
+    begin
+      // Skip current user if it's disabled (greyed out)
+      if not RemoveUsersUserCheckBoxes[i].Enabled then
+        continue;
+      Username := RemoveUsersUsersList[i];
+      DeleteReg := Assigned(RemoveUsersDelRegCheckBoxes[i]) and RemoveUsersDelRegCheckBoxes[i].Checked;
+      RemoveUsersSelectedForDeletion.Add(Username + '|' + BoolToStr(DeleteReg));
+      Inc(SelectedCount);
+      ConfirmText := ConfirmText + #13#10'  - ' + Username;
+      if DeleteReg then
+        ConfirmText := ConfirmText + ' (will delete registry/files)'
+      else
+        ConfirmText := ConfirmText + ' (registry/files kept)';
+    end;
+  end;
+
+  if SelectedCount = 0 then
+  begin
+    MsgBox('No user accounts selected for deletion.', mbInformation, MB_OK);
+    LogDebug('BuildRemoveUsersConfirmation: no accounts selected');
+    LogExit('BuildRemoveUsersConfirmation');
+    exit;
+  end;
+
+  ConfirmText := 'The following ' + IntToStr(SelectedCount) + ' account(s) will be deleted permanently without any possibility of recovery:' + ConfirmText;
+
+  lblConfirmList.Caption := ConfirmText;
+
+  LogDebug('BuildRemoveUsersConfirmation: ' + IntToStr(SelectedCount) + ' accounts selected for deletion');
+  LogExit('BuildRemoveUsersConfirmation');
+end;
+
+procedure OnRemoveUsersConfirmProceed(Sender: TObject);
+var
+  DeleteCount, i: Integer;
+  Username, ParsePass, ErrMsg: string;
+  DeleteReg: Boolean;
+begin
+  LogEntry('OnRemoveUsersConfirmProceed');
+  
+  DeleteCount := RemoveUsersSelectedForDeletion.Count;
+  LogInfo('RemoveUsersConfirmProceed: deleting ' + IntToStr(DeleteCount) + ' user account(s)');
+  
+  WizardForm.NextButton.Enabled := False;
+  
+  for i := 0 to DeleteCount - 1 do
+  begin
+    ParseUserEntry(RemoveUsersSelectedForDeletion[i], Username, ParsePass);
+    DeleteReg := Pos('|True', RemoveUsersSelectedForDeletion[i]) > 0;
+    LogInfo('Removing user: ' + Username + ' (delete registry/files=' + BoolToStr(DeleteReg) + ')');
+    if not DeleteUserAccount(Username, DeleteReg, ErrMsg) then
+      LogWarn('RemoveUsersConfirmProceed: failed to remove ' + Username + ' - ' + ErrMsg);
+  end;
+  
+  LogInfo('RemoveUsersConfirmProceed: all user accounts deleted');
+  
+  LogExit('OnRemoveUsersConfirmProceed');
+end;
+
+procedure OnRemoveUsersConfirmCancel(Sender: TObject);
+begin
+  LogEntry('OnRemoveUsersConfirmCancel');
+  WizardForm.Close;
+  LogExit('OnRemoveUsersConfirmCancel');
+end;
+
+function OnRemoveUsersConfirmNextClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  LogInfo('NextButtonClick: RemoveUsersConfirmPage - Proceeding with user deletion');
 end;
 
 procedure UpdateUsersPageDisplay;
@@ -6314,6 +6734,7 @@ end;
 procedure InitializeWizard;
 var
   leftPos, topPos, widthVal: Integer;
+  colUserWidth, colDelRegWidth: Integer;
   TermWrapAlreadyInstalled: Boolean;
   InstallHintOffset: Integer;
   childIndent, childLeft, valueLeft: Integer;
@@ -6691,10 +7112,11 @@ begin
 
 
   // --- Compact, even radio button spacing ---
-  // Start at a base Y position just below the CreateRdpShortcutsGroup
-  // Move the bottom three radio buttons up by about two lines (ScaleY(32))
-  radioTopBase := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height - ScaleY(20); // was + ScaleY(12), now - ScaleY(20) to move up ~2 lines
-  radioSpacing := ScaleY(28); // Restore original spacing
+  // Start at a base Y position just below the CreateRdpShortcutsGroup content.
+  // The group is taller than its actual content; -20 leaves a modest gap below
+  // the last nested control (rbUseExistingUsers or its hint).
+  radioTopBase := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height - ScaleY(20);
+  radioSpacing := ScaleY(18);
 
   rbEditShortcutSettings := TRadioButton.Create(Page_InstallOptions);
   rbEditShortcutSettings.Parent := Page_InstallOptions.Surface;
@@ -6732,10 +7154,19 @@ begin
   rbQuickFixes.Checked := False;
   rbQuickFixes.OnClick := @OnInstallModeChange;
 
+  rbRemoveUsers := TRadioButton.Create(Page_InstallOptions);
+  rbRemoveUsers.Parent := Page_InstallOptions.Surface;
+  rbRemoveUsers.Left := ScaleX(10);
+  rbRemoveUsers.Top := radioTopBase + radioSpacing * 4;
+  rbRemoveUsers.Width := ScaleX(420);
+  rbRemoveUsers.Caption := 'Remove user accounts';
+  rbRemoveUsers.Checked := False;
+  rbRemoveUsers.OnClick := @OnInstallModeChange;
+
   rbUninstall := TRadioButton.Create(Page_InstallOptions);
   rbUninstall.Parent := Page_InstallOptions.Surface;
   rbUninstall.Left := ScaleX(10);
-  rbUninstall.Top := radioTopBase + radioSpacing * 4;
+  rbUninstall.Top := radioTopBase + radioSpacing * 5;
   rbUninstall.Width := ScaleX(420);
   rbUninstall.Caption := 'Uninstall (keeps users)';
   rbUninstall.Checked := False;
@@ -7439,6 +7870,79 @@ begin
     'Select one or more Desktop .rdp shortcuts to edit.'
   );
   
+
+  
+  // -------------------------------------------------------------------------
+  // Create "Remove user accounts" page
+  // Lists local users with checkboxes; user can select which to delete.
+  // -------------------------------------------------------------------------
+  Page_RemoveUsers := CreateCustomPage(
+    Page_InstallOptions.ID,
+    'Remove user accounts',
+    'Select one or more user accounts to delete. Each account has an optional checkbox to also delete that user''s registry entries and profile files.'
+  );
+  begin
+    leftPos := ScaleX(16);
+    topPos := ScaleY(10);
+    colUserWidth := ScaleX(140);
+    colDelRegWidth := ScaleX(180);
+
+    lblRemoveUsersHeader := TLabel.Create(Page_RemoveUsers);
+    lblRemoveUsersHeader.Parent := Page_RemoveUsers.Surface;
+    lblRemoveUsersHeader.Left := leftPos;
+    lblRemoveUsersHeader.Top := topPos;
+    lblRemoveUsersHeader.Caption := 'Select accounts to remove:';
+    lblRemoveUsersHeader.Font.Style := [fsBold];
+    lblRemoveUsersHeader.Font.Color := LabelColor;
+    lblRemoveUsersHeader.Transparent := True;
+    topPos := topPos + ScaleY(22);
+
+    // Column headers
+    lblColUser := TLabel.Create(Page_RemoveUsers);
+    lblColUser.Parent := Page_RemoveUsers.Surface;
+    lblColUser.Left := leftPos;
+    lblColUser.Top := topPos;
+    lblColUser.Caption := 'User Account';
+    lblColUser.Font.Color := LabelColor;
+    lblColUser.Transparent := True;
+
+    lblColDelReg := TLabel.Create(Page_RemoveUsers);
+    lblColDelReg.Parent := Page_RemoveUsers.Surface;
+    lblColDelReg.Left := leftPos + colUserWidth;
+    lblColDelReg.Top := topPos;
+    lblColDelReg.Caption := 'Also delete registry/files';
+    lblColDelReg.Font.Color := LabelColor;
+    lblColDelReg.Transparent := True;
+    topPos := topPos + ScaleY(20);
+  end;
+
+  // Confirmation page shown before deletion
+  RemoveUsersConfirmPage := CreateCustomPage(
+    Page_RemoveUsers.ID,
+    'Confirm account removal',
+    'Review the accounts that will be permanently deleted.'
+  );
+  begin
+    leftPos := ScaleX(16);
+    topPos := ScaleY(10);
+
+    // Confirmation list label (will be set dynamically)
+    lblConfirmList := TLabel.Create(RemoveUsersConfirmPage);
+    lblConfirmList.Parent := RemoveUsersConfirmPage.Surface;
+    lblConfirmList.Left := leftPos;
+    lblConfirmList.Top := topPos;
+    lblConfirmList.Width := ScaleX(460);
+    lblConfirmList.Height := ScaleY(200);
+    lblConfirmList.AutoSize := False;
+    lblConfirmList.WordWrap := True;
+    lblConfirmList.Font.Color := LabelColor;
+    lblConfirmList.Transparent := True;
+    lblConfirmList.Caption := '';
+    topPos := topPos + ScaleY(210);
+
+    // Note: Proceed/Cancel buttons removed — user confirms by clicking [Next] on the main wizard.
+  end;
+
   
   // Advanced editing page (shown only when user checks "Open advanced shortcut options")
   // Positioned after ShortcutSettings page so it appears just before the Installing page.
@@ -7447,7 +7951,6 @@ begin
     'Advanced Shortcut Editing',
     'Manual editing instructions for your RDP shortcut.'
   );
-  
   // Advanced editing page for NEW shortcuts (install flow) — positioned after Installing page
   // since the .rdp file doesn't exist until shortcut is created during installation.
   Page_CreateShortcutAdvanced := CreateCustomPage(
@@ -7472,6 +7975,7 @@ begin
   EditShortcutControlsBuilt := False;
   EditShortcutAdvancedControlsBuilt := False;
   CreateShortcutAdvancedControlsBuilt := False;
+  RemoveUsersControlsBuilt := False;
   ShowPerformanceSettings := False;  // collapsed by default
   ShowBasicSettings := False;         // collapsed by default
   ShortcutsList := TStringList.Create;
@@ -7509,6 +8013,14 @@ begin
   CurrentUserIndex := 0;
   // Shortcuts selections
   // ShortcutsList already initialized above; nothing else needed
+
+  // Initialize Remove Users lists
+  RemoveUsersUsersList := TStringList.Create;
+  RemoveUsersUsersDisplay := TStringList.Create;
+  RemoveUsersSelectedForDeletion := TStringList.Create;
+  RemoveUsersFailedDeletes := TStringList.Create;
+  RemoveUsersFailureShown := False;
+  RemoveUsersCurrentUserName := '';
   
   // Debug: Set to True to force VC++ download
   DebugMode := False;
@@ -7560,6 +8072,7 @@ begin
   StepQuickFixes := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);      topPos := topPos + ScaleY(16);
   StepAccountNeverExpires := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepShowRDPInfo := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
+  StepRemoveUsers := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);     topPos := topPos + ScaleY(16);
   // Create a label on the Finished page to show completion messages (positioned right below header)
   FinishedText := TLabel.Create(WizardForm.FinishedLabel.Parent);
   FinishedText.Parent := WizardForm.FinishedLabel.Parent;
@@ -7607,6 +8120,9 @@ var
   PortError: string;
   NewShortcutBase: string;
   NewShortcutPath: string;
+  UserCount: Integer;
+  ConfirmText: string;
+  DeleteReg: Boolean;
 begin
   LogEntry('NextButtonClick');
   LogDebug('NextButtonClick: CurPageID=' + IntToStr(CurPageID) + ' (' + GetPageNameById(CurPageID) + ')');
@@ -7631,6 +8147,10 @@ begin
     if Assigned(rbQuickFixes) and rbQuickFixes.Checked then
     begin
       SelectedInstallMode := installModeQuickFixes;
+    end
+    else if Assigned(rbRemoveUsers) and rbRemoveUsers.Checked then
+    begin
+      SelectedInstallMode := installModeRemoveUsers;
     end
     else if rbUninstall.Checked then
     begin
@@ -8126,6 +8646,53 @@ begin
 
       Result := True;
   end
+  else if CurPageID = Page_RemoveUsers.ID then
+  begin
+    // Collect selected users and build confirmation text before proceeding
+    if not RemoveUsersControlsBuilt then
+    begin
+      Result := True;
+      exit;
+    end;
+    RemoveUsersSelectedForDeletion.Clear;
+    UserCount := RemoveUsersUsersList.Count;
+    SelectedCount := 0;
+    ConfirmText := '';
+    for i := 0 to UserCount - 1 do
+    begin
+      if Assigned(RemoveUsersUserCheckBoxes[i]) and RemoveUsersUserCheckBoxes[i].Checked then
+      begin
+        if not RemoveUsersUserCheckBoxes[i].Enabled then
+          continue;
+        Username := RemoveUsersUsersList[i];
+        DeleteReg := Assigned(RemoveUsersDelRegCheckBoxes[i]) and RemoveUsersDelRegCheckBoxes[i].Checked;
+        RemoveUsersSelectedForDeletion.Add(Username + '|' + BoolToStr(DeleteReg));
+        Inc(SelectedCount);
+        ConfirmText := ConfirmText + #13#10'  - ' + Username;
+        if DeleteReg then
+          ConfirmText := ConfirmText + ' (will delete registry/files)'
+        else
+          ConfirmText := ConfirmText + ' (registry/files kept)';
+      end;
+    end;
+    if SelectedCount = 0 then
+    begin
+      MsgBox('No user accounts selected for deletion.', mbInformation, MB_OK);
+      Result := False;
+      exit;
+    end;
+    ConfirmText := 'The following ' + IntToStr(SelectedCount) + ' account(s) will be deleted permanently without any possibility of recovery:' + ConfirmText;
+    if Assigned(lblConfirmList) then
+      lblConfirmList.Caption := ConfirmText;
+    // Proceed to confirmation page then to installing
+    Result := True;
+  end
+  else if CurPageID = RemoveUsersConfirmPage.ID then
+  begin
+    // User confirmed by clicking [Next] — deletion handled in CurStepChanged ssPostInstall
+    LogInfo('NextButtonClick: RemoveUsersConfirmPage - Proceeding with user deletion');
+    Result := True;
+  end
   else if CurPageID = QuickFixesPage.ID then
   begin
     // Log the Quick Fixes selection
@@ -8378,6 +8945,7 @@ var
   UserInfo: string;
   UserName: string;
   Password: string;
+  DeleteErrMsg: string;
   PortNumber: Cardinal;
   StepName: string;
 begin
@@ -8475,6 +9043,11 @@ begin
       end
       else
         AddStepPendingLabel(StepPreTrust, TXT_PreTrust);
+    end
+    else if SelectedInstallMode = installModeRemoveUsers then
+    begin
+      StepsHeaderLabel.Caption := 'Remove User Accounts:';
+      AddStepPendingLabel(StepRemoveUsers, TXT_RemoveUsers);
     end
     else // SelectedInstallMode = installModeEditShortcuts (Edit Shortcut Settings)
     begin
@@ -8916,8 +9489,37 @@ begin
 
       // Don't start the service yet - wait until all users are created
       SetStepDone(StepConfigureService, TXT_ConfigureService);
+    end
+    else if SelectedInstallMode = installModeRemoveUsers then
+    begin
+      SetStepInProgress(StepRemoveUsers, TXT_RemoveUsers);
+      StatusOverlay.Caption := 'Removing selected user accounts...';
+      LogDebug('ssPostInstall: Removing ' + IntToStr(RemoveUsersSelectedForDeletion.Count) + ' user account(s)');
+
+      RemoveUsersFailedDeletes.Clear;
+      for i := 0 to RemoveUsersSelectedForDeletion.Count - 1 do
+      begin
+        ParseUserEntry(RemoveUsersSelectedForDeletion[i], UserName, Password);
+        StatusOverlay.Caption := 'Removing user account (' + IntToStr(i + 1) + ' of ' + IntToStr(RemoveUsersSelectedForDeletion.Count) + '): ' + UserName;
+        StatusOverlay.Visible := True;
+        WizardForm.Update;
+        LogDebug('Removing user account (' + IntToStr(i + 1) + ' of ' + IntToStr(RemoveUsersSelectedForDeletion.Count) + '): ' + UserName);
+        if DeleteUserAccount(UserName, Password = 'True', DeleteErrMsg) then
+          LogInfo('Removed user account: ' + UserName)
+        else
+        begin
+          RemoveUsersFailedDeletes.Add(UserName + '|' + DeleteErrMsg);
+          LogError('DeleteUserAccount failed for ' + UserName + ': ' + DeleteErrMsg);
+        end;
+      end;
+
+      SetStepDone(StepRemoveUsers, TXT_RemoveUsers);
+      if RemoveUsersFailedDeletes.Count > 0 then
+        StatusOverlay.Caption := 'Some user accounts could not be removed.'
+      else
+        StatusOverlay.Caption := 'User accounts removed successfully.';
     end;
-    
+
     // Create all user accounts and RDP files (skip for uninstall and Create Shortcuts)
     if SelectedInstallMode = installModeInstall then
     begin
@@ -9126,6 +9728,8 @@ var
   MstscPath: string;
   MstscResultCode: Integer;
   NowTick: Cardinal;
+  RemovedCount: Integer;
+  FailNames: string;
   IsDuplicatePageEvent: Boolean;
   DeltaMs: Cardinal;
   DisplayVersion: string;
@@ -9560,6 +10164,21 @@ begin
     WriteInstallerLog('CurPageChanged: Captured original system settings: EnableRDP=' + BoolToStr(OrigEnableRDP) + ', ShowUsers=' + BoolToStr(OrigShowUsers) + ', SingleSession=' + BoolToStr(OrigPreventDuplicate) + ', Port=' + IntToStr(OrigRdpPort));
   end;
 
+  // Load and display user accounts when Remove Users page is shown
+  if CurPageID = Page_RemoveUsers.ID then
+  begin
+    if not RemoveUsersControlsBuilt then
+    begin
+      BuildRemoveUsersControls;
+      RemoveUsersControlsBuilt := True;
+    end;
+  end;
+  if CurPageID = RemoveUsersConfirmPage.ID then
+  begin
+    WizardForm.NextButton.Enabled := True;
+    WizardForm.BackButton.Enabled := True;
+  end;
+
   // Ensure pagination resets when Create Shortcuts page is shown (avoid stale page index after Back/Next)
   if CurPageID = Page_CreateShortcutsForExistingUsers.ID then
   begin
@@ -9612,6 +10231,55 @@ begin
         CompletionText := 'The selected quick fix has been applied successfully.';
         WriteInstallerLog('CurPageChanged: Showing Quick Fixes completion message');
       end;
+    end
+    else if SelectedInstallMode = installModeRemoveUsers then
+    begin
+      // Summarise the outcome, including any accounts that could not be removed
+      RemovedCount := RemoveUsersSelectedForDeletion.Count - RemoveUsersFailedDeletes.Count;
+
+      if RemoveUsersFailedDeletes.Count > 0 then
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'Some User Accounts Were Not Removed';
+        CompletionText := 'Removed ' + IntToStr(RemovedCount) + ' of ' + IntToStr(RemoveUsersSelectedForDeletion.Count) + ' user account(s).' + #13#10 + #13#10 +
+                          'Could not remove the following ' + IntToStr(RemoveUsersFailedDeletes.Count) + ' account(s):' + #13#10;
+        for i := 0 to RemoveUsersFailedDeletes.Count - 1 do
+        begin
+          ParseUserEntry(RemoveUsersFailedDeletes[i], UserName, Password);
+          CompletionText := CompletionText + '- ' + UserName + #13#10;
+        end;
+      end
+      else if RemoveUsersSelectedForDeletion.Count > 0 then
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'User Accounts Removed';
+        CompletionText := 'The following ' + IntToStr(RemoveUsersSelectedForDeletion.Count) + ' user account(s) were removed:' + #13#10;
+        for i := 0 to RemoveUsersSelectedForDeletion.Count - 1 do
+        begin
+          ParseUserEntry(RemoveUsersSelectedForDeletion[i], UserName, Password);
+          CompletionText := CompletionText + '- ' + UserName + #13#10;
+        end;
+      end
+      else
+      begin
+        WizardForm.FinishedHeadingLabel.Caption := 'No User Accounts Removed';
+        CompletionText := 'No user accounts were removed.';
+      end;
+
+      // Surface a popup when one or more deletions failed (shown only once)
+      if (RemoveUsersFailedDeletes.Count > 0) and (not RemoveUsersFailureShown) then
+      begin
+        RemoveUsersFailureShown := True;
+        FailNames := '';
+        for i := 0 to RemoveUsersFailedDeletes.Count - 1 do
+        begin
+          ParseUserEntry(RemoveUsersFailedDeletes[i], UserName, Password);
+          FailNames := FailNames + '- ' + UserName + #13#10;
+        end;
+        MsgBox('Some user accounts could not be removed.' + #13#10 + #13#10 +
+               'The following account(s) are still present on this computer and may require a restart:' + #13#10 +
+               FailNames, mbError, MB_OK);
+      end;
+
+      WriteInstallerLog('CurPageChanged: Showing Remove Users completion message');
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
