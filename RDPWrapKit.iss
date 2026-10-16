@@ -10192,7 +10192,17 @@ begin
     if ServiceStatus = '' then lblRDPService.Caption := 'Not installed'
     else lblRDPService.Caption := ServiceStatus;
 
-    TermsrvVer := GetPSOutput('(Get-Item -Path (Join-Path $env:windir ''System32\\termsrv.dll'') -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
+    // termsrv.dll exists only in the native System32 directory (SysWOW64 has no
+    // counterpart), so this lookup must not depend on how the spawned
+    // powershell.exe resolves 'System32'. If that PowerShell is running 32-bit,
+    // WOW64 silently redirects System32 to SysWOW64, the file is not found and
+    // the label degrades to 'Unknown'. Probe the native path first, then fall
+    // back to the Sysnative alias (valid from a 32-bit process) so that the real
+    // System32\termsrv.dll is read from either architecture.
+    TermsrvVer := GetPSOutput(
+      '$p = Join-Path $env:windir ''System32\termsrv.dll''; ' +
+      'if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path $env:windir ''Sysnative\termsrv.dll'' }; ' +
+      '(Get-Item -LiteralPath $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
     if TermsrvVer = '' then lblWinRDPVer.Caption := 'Unknown'
     else lblWinRDPVer.Caption := TermsrvVer;
 
