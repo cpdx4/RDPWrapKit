@@ -208,6 +208,15 @@ var
   InstallOptionsAutoUserSourceApplied: Boolean;
   rbEditShortcutSettings: TRadioButton;
   CreateRdpShortcutsGroup: TPanel;
+  // Setup Options page section cards. These are visual grouping backdrops only:
+  // the radios stay parented to the page surface so radio exclusivity and the
+  // created-order tab sequence are both preserved.
+  cardSetup: TPanel;
+  cardManage: TPanel;
+  cardCleanup: TPanel;
+  lblSetupHeader: TLabel;
+  lblManageHeader: TLabel;
+  lblCleanupHeader: TLabel;
   EditShortcutPage: TWizardPage;
   Page_ShortcutSettings: TWizardPage;
   Page_EditShortcutAdvanced: TWizardPage;
@@ -3786,6 +3795,65 @@ begin
     rbUseExistingUsersHint.Enabled := rbUseExistingUsers.Enabled;
 end;
 
+// Single source of truth for the Setup Options card geometry.
+//
+// The Setup card height depends on two optional sub-notes (the "Re-install
+// TermWrap" note and the "Selected because your desktop already has RDP+
+// shortcuts" note), so the shortcut-choice group is sized to the note only when
+// that note is actually visible - otherwise it would leave a visible placeholder
+// gap under the "Create new users" / "Use existing users" row.
+procedure RelayoutInstallOptionsPage();
+var
+  LowerRowTop: Integer;
+  LowerCardHeight: Integer;
+begin
+  if not (Assigned(cardSetup) and Assigned(CreateRdpShortcutsGroup)) then
+    exit;
+
+  if Assigned(rbUseExistingUsersHint) and rbUseExistingUsersHint.Visible then
+    CreateRdpShortcutsGroup.Height := ScaleY(44)
+  else
+    CreateRdpShortcutsGroup.Height := ScaleY(24);
+
+  cardSetup.Height := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height + ScaleY(10);
+
+  // Sized to leave a full row of breathing room below the last lower-row radio
+  LowerCardHeight := ScaleY(112);
+
+  // Place the lower row under the Setup card, clamped to the dark page surface
+  LowerRowTop := cardSetup.Top + cardSetup.Height + ScaleY(8);
+  if LowerRowTop + LowerCardHeight > Page_InstallOptions.SurfaceHeight - ScaleY(4) then
+    LowerRowTop := Page_InstallOptions.SurfaceHeight - ScaleY(4) - LowerCardHeight;
+  if LowerRowTop < cardSetup.Top + cardSetup.Height then
+    LowerRowTop := cardSetup.Top + cardSetup.Height + ScaleY(2);
+
+  if Assigned(cardManage) then
+  begin
+    cardManage.Height := LowerCardHeight;
+    cardManage.Top := LowerRowTop;
+  end;
+  if Assigned(cardCleanup) then
+  begin
+    cardCleanup.Height := LowerCardHeight;
+    cardCleanup.Top := LowerRowTop;
+  end;
+
+  if Assigned(lblManageHeader) then lblManageHeader.Top := LowerRowTop + ScaleY(6);
+  if Assigned(lblCleanupHeader) then lblCleanupHeader.Top := LowerRowTop + ScaleY(6);
+
+  if Assigned(rbEditShortcutSettings) then rbEditShortcutSettings.Top := LowerRowTop + ScaleY(26);
+  if Assigned(rbEditSystemwideSettings) then rbEditSystemwideSettings.Top := LowerRowTop + ScaleY(43);
+  if Assigned(rbShowRDPInfo) then rbShowRDPInfo.Top := LowerRowTop + ScaleY(60);
+  if Assigned(rbQuickFixes) then rbQuickFixes.Top := LowerRowTop + ScaleY(77);
+  if Assigned(rbRemoveUsers) then rbRemoveUsers.Top := LowerRowTop + ScaleY(26);
+  if Assigned(rbUninstall) then rbUninstall.Top := LowerRowTop + ScaleY(43);
+
+  LogDebug('RelayoutInstallOptionsPage: setupHeight=' + IntToStr(cardSetup.Height) +
+    ' shortcutGroupHeight=' + IntToStr(CreateRdpShortcutsGroup.Height) +
+    ' rowTop=' + IntToStr(LowerRowTop) +
+    ' surfaceHeight=' + IntToStr(Page_InstallOptions.SurfaceHeight));
+end;
+
 procedure OnCreateRdpShortcutsClick(Sender: TObject);
 begin
   LogEntry('OnCreateRdpShortcutsClick');
@@ -6769,8 +6837,8 @@ var
   BlockTop: Integer;
   Delta: Integer;
     regVal: Cardinal;
-    radioTopBase: Integer;
-    radioSpacing: Integer;
+    manageCardWidth: Integer;
+    cleanupCardWidth: Integer;
     TmpLabel: TLabel;
   // Low FPS and Lag Troubleshooting quick fix page layout
   lblLowFPSColName, lblLowFPSColCurrent, lblLowFPSColRec: TLabel;
@@ -6997,22 +7065,71 @@ begin
   );
   Page_InstallOptions.Surface.Color := RGBToColor(11, 16, 24);
 
-  // Create top-level radio buttons: Install, Edit Shortcut, Uninstall
+  // ---------------------------------------------------------------------------
+  // Section cards (declutter layout).
+  //
+  // These panels are created BEFORE the radios so they act purely as backdrop
+  // frames. The radios deliberately stay parented to Page_InstallOptions.Surface:
+  // TRadioButton exclusivity is scoped to a control's parent, so re-parenting
+  // them into the cards would allow two modes to be selected at the same time.
+  // ---------------------------------------------------------------------------
+  if IsDarkColor(Page_InstallOptions.Surface.Color) then
+    LabelColor := clWhite
+  else
+    LabelColor := clBlack;
+
+  manageCardWidth   := ((Page_InstallOptions.SurfaceWidth - ScaleX(18)) * 62) div 100;
+  cleanupCardWidth  := (Page_InstallOptions.SurfaceWidth - ScaleX(18)) - manageCardWidth;
+
+  cardSetup := TPanel.Create(Page_InstallOptions);
+  cardSetup.Parent := Page_InstallOptions.Surface;
+  cardSetup.Caption := '';
+  cardSetup.BorderStyle := bsSingle;
+  cardSetup.BevelInner := bvNone;
+  cardSetup.BevelOuter := bvNone;
+  cardSetup.BevelWidth := 0;
+  cardSetup.Color := Page_InstallOptions.Surface.Color;
+  // Final height is set below, once InstallHintOffset is known
+  cardSetup.SetBounds(ScaleX(6), ScaleY(2), Page_InstallOptions.SurfaceWidth - ScaleX(12), ScaleY(138));
+
+  cardManage := TPanel.Create(Page_InstallOptions);
+  cardManage.Parent := Page_InstallOptions.Surface;
+  cardManage.Caption := '';
+  cardManage.BorderStyle := bsSingle;
+  cardManage.BevelInner := bvNone;
+  cardManage.BevelOuter := bvNone;
+  cardManage.BevelWidth := 0;
+  cardManage.Color := Page_InstallOptions.Surface.Color;
+  // Final top is set below, once the Setup card height is known
+  cardManage.SetBounds(ScaleX(6), ScaleY(146), manageCardWidth, ScaleY(112));
+
+  cardCleanup := TPanel.Create(Page_InstallOptions);
+  cardCleanup.Parent := Page_InstallOptions.Surface;
+  cardCleanup.Caption := '';
+  cardCleanup.BorderStyle := bsSingle;
+  cardCleanup.BevelInner := bvNone;
+  cardCleanup.BevelOuter := bvNone;
+  cardCleanup.BevelWidth := 0;
+  cardCleanup.Color := Page_InstallOptions.Surface.Color;
+  cardCleanup.SetBounds(cardManage.Left + cardManage.Width + ScaleX(6), cardManage.Top,
+    cleanupCardWidth, ScaleY(112));
+
+  // --- Setup card: the Install mode and its children ---
   rbInstall := TRadioButton.Create(Page_InstallOptions);
   rbInstall.Parent := Page_InstallOptions.Surface;
-  rbInstall.Left := ScaleX(10);
-  rbInstall.Top := ScaleY(10);
-  rbInstall.Width := ScaleX(420);
-  rbInstall.Caption := 'Install';
+  rbInstall.Left := ScaleX(16);
+  rbInstall.Top := ScaleY(26);
+  rbInstall.Width := Page_InstallOptions.SurfaceWidth - ScaleX(40);
+  rbInstall.Caption := 'Install RDPWrapKit on this PC';
   rbInstall.Checked := True;
   rbInstall.OnClick := @OnInstallModeChange;
 
   // Under Install, add checkboxes and nested radios (always visible, only enabled for Install)
   chkInstallTermWrap := TCheckBox.Create(Page_InstallOptions);
   chkInstallTermWrap.Parent := Page_InstallOptions.Surface;
-  chkInstallTermWrap.Left := ScaleX(30);
-  chkInstallTermWrap.Top := ScaleY(36);
-  chkInstallTermWrap.Width := ScaleX(420);
+  chkInstallTermWrap.Left := ScaleX(32);
+  chkInstallTermWrap.Top := ScaleY(44);
+  chkInstallTermWrap.Width := Page_InstallOptions.SurfaceWidth - ScaleX(60);
   TermWrapAlreadyInstalled := IsTermWrapInstalled();
   InstallHintOffset := 0;
   if TermWrapAlreadyInstalled then
@@ -7026,9 +7143,9 @@ begin
 
       chkInstallTermWrapHint := TLabel.Create(Page_InstallOptions);
       chkInstallTermWrapHint.Parent := Page_InstallOptions.Surface;
-      chkInstallTermWrapHint.Left := ScaleX(46);
+      chkInstallTermWrapHint.Left := ScaleX(48);
       chkInstallTermWrapHint.Top := chkInstallTermWrap.Top + ScaleY(20);
-      chkInstallTermWrapHint.Width := ScaleX(390);
+      chkInstallTermWrapHint.Width := Page_InstallOptions.SurfaceWidth - ScaleX(90);
       chkInstallTermWrapHint.AutoSize := False;
       chkInstallTermWrapHint.Transparent := True;
       chkInstallTermWrapHint.WordWrap := True;
@@ -7051,21 +7168,25 @@ begin
     chkInstallTermWrap.Checked := True;
   end;
 
+  // Card heights and the lower-row positions are finalised by
+  // RelayoutInstallOptionsPage(), which is called once every control exists.
+
   chkCreateRdpShortcuts := TCheckBox.Create(Page_InstallOptions);
   chkCreateRdpShortcuts.Parent := Page_InstallOptions.Surface;
-  chkCreateRdpShortcuts.Left := ScaleX(30);
-  chkCreateRdpShortcuts.Top := ScaleY(60) + InstallHintOffset;
-  chkCreateRdpShortcuts.Width := ScaleX(380);
+  chkCreateRdpShortcuts.Left := ScaleX(32);
+  chkCreateRdpShortcuts.Top := ScaleY(64) + InstallHintOffset;
+  chkCreateRdpShortcuts.Width := Page_InstallOptions.SurfaceWidth - ScaleX(60);
   chkCreateRdpShortcuts.Caption := 'Create RDP shortcuts';
   chkCreateRdpShortcuts.Checked := True;
   chkCreateRdpShortcuts.OnClick := @OnCreateRdpShortcutsClick;
 
   CreateRdpShortcutsGroup := TPanel.Create(Page_InstallOptions);
   CreateRdpShortcutsGroup.Parent := Page_InstallOptions.Surface;
-  CreateRdpShortcutsGroup.Left := ScaleX(40);
-  CreateRdpShortcutsGroup.Top := ScaleY(84) + InstallHintOffset;
-  CreateRdpShortcutsGroup.Width := ScaleX(360);
-  CreateRdpShortcutsGroup.Height := ScaleY(88);
+  CreateRdpShortcutsGroup.Left := ScaleX(42);
+  CreateRdpShortcutsGroup.Top := chkCreateRdpShortcuts.Top + ScaleY(20);
+  CreateRdpShortcutsGroup.Width := Page_InstallOptions.SurfaceWidth - ScaleX(70);
+  // Tall enough for the two side-by-side radios plus the optional wrapped sub-note
+  CreateRdpShortcutsGroup.Height := ScaleY(46);
   CreateRdpShortcutsGroup.BorderStyle := bsNone;
   CreateRdpShortcutsGroup.Color := Page_InstallOptions.Surface.Color;
   CreateRdpShortcutsGroup.BevelInner := bvNone;
@@ -7074,27 +7195,28 @@ begin
 
   rbCreateUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
   rbCreateUsers.Parent := CreateRdpShortcutsGroup;
-  rbCreateUsers.Left := ScaleX(10);
-  rbCreateUsers.Top := ScaleY(-2);
-  rbCreateUsers.Width := ScaleX(340);
+  rbCreateUsers.Left := ScaleX(8);
+  rbCreateUsers.Top := ScaleY(2);
+  rbCreateUsers.Width := ScaleX(150);
   rbCreateUsers.Caption := 'Create new users';
   rbCreateUsers.Checked := True;
   rbCreateUsers.OnClick := @OnCreateRdpShortcutsClick;
 
+  // Placed beside "Create new users" to keep the Setup card compact
   rbUseExistingUsers := TRadioButton.Create(CreateRdpShortcutsGroup);
   rbUseExistingUsers.Parent := CreateRdpShortcutsGroup;
-  rbUseExistingUsers.Left := ScaleX(10);
-  rbUseExistingUsers.Top := ScaleY(22);
-  rbUseExistingUsers.Width := ScaleX(340);
+  rbUseExistingUsers.Left := ScaleX(166);
+  rbUseExistingUsers.Top := ScaleY(2);
+  rbUseExistingUsers.Width := ScaleX(150);
   rbUseExistingUsers.Caption := 'Use existing users';
   rbUseExistingUsers.Checked := False;
   rbUseExistingUsers.OnClick := @OnCreateRdpShortcutsClick;
 
   rbUseExistingUsersHint := TLabel.Create(CreateRdpShortcutsGroup);
   rbUseExistingUsersHint.Parent := CreateRdpShortcutsGroup;
-  rbUseExistingUsersHint.Left := ScaleX(26);
-  rbUseExistingUsersHint.Top := rbUseExistingUsers.Top + ScaleY(20);
-  rbUseExistingUsersHint.Width := ScaleX(320);
+  rbUseExistingUsersHint.Left := ScaleX(24);
+  rbUseExistingUsersHint.Top := ScaleY(22);
+  rbUseExistingUsersHint.Width := CreateRdpShortcutsGroup.Width - ScaleX(32);
   rbUseExistingUsersHint.AutoSize := False;
   rbUseExistingUsersHint.Transparent := True;
   rbUseExistingUsersHint.WordWrap := True;
@@ -7102,7 +7224,7 @@ begin
   rbUseExistingUsersHint.Font.Style := [fsItalic];
   rbUseExistingUsersHint.Visible := False;
 
-  // Edit Shortcut radio placed halfway between Install and Uninstall
+  // --- Lower section cards: Settings and troubleshooting (left), Cleanup (right) ---
 
   // Set initial enabled state based on Create RDP shortcuts checkbox
   rbCreateUsers.Enabled := chkCreateRdpShortcuts.Checked;
@@ -7111,66 +7233,98 @@ begin
 
 
 
-  // --- Compact, even radio button spacing ---
-  // Start at a base Y position just below the CreateRdpShortcutsGroup content.
-  // The group is taller than its actual content; -20 leaves a modest gap below
-  // the last nested control (rbUseExistingUsers or its hint).
-  radioTopBase := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height - ScaleY(20);
-  radioSpacing := ScaleY(18);
+  // --- Section card headers ---
+  // Created after the radios so they always paint on top of the card backdrop.
+  lblSetupHeader := TLabel.Create(Page_InstallOptions);
+  lblSetupHeader.Parent := Page_InstallOptions.Surface;
+  lblSetupHeader.Left := cardSetup.Left + ScaleX(10);
+  lblSetupHeader.Top := cardSetup.Top + ScaleY(6);
+  lblSetupHeader.Caption := 'Setup';
+  lblSetupHeader.Font.Style := [fsBold];
+  lblSetupHeader.ParentFont := False;
+  lblSetupHeader.Font.Color := LabelColor;
+  lblSetupHeader.Transparent := True;
+  lblSetupHeader.AutoSize := True;
+
+  lblManageHeader := TLabel.Create(Page_InstallOptions);
+  lblManageHeader.Parent := Page_InstallOptions.Surface;
+  lblManageHeader.Left := cardManage.Left + ScaleX(10);
+  lblManageHeader.Top := cardManage.Top + ScaleY(6);
+  lblManageHeader.Caption := 'Settings and troubleshooting';
+  lblManageHeader.Font.Style := [fsBold];
+  lblManageHeader.ParentFont := False;
+  lblManageHeader.Font.Color := LabelColor;
+  lblManageHeader.Transparent := True;
+  lblManageHeader.AutoSize := True;
+
+  lblCleanupHeader := TLabel.Create(Page_InstallOptions);
+  lblCleanupHeader.Parent := Page_InstallOptions.Surface;
+  lblCleanupHeader.Left := cardCleanup.Left + ScaleX(10);
+  lblCleanupHeader.Top := cardCleanup.Top + ScaleY(6);
+  lblCleanupHeader.Caption := 'Cleanup';
+  lblCleanupHeader.Font.Style := [fsBold];
+  lblCleanupHeader.ParentFont := False;
+  lblCleanupHeader.Font.Color := LabelColor;
+  lblCleanupHeader.Transparent := True;
+  lblCleanupHeader.AutoSize := True;
 
   rbEditShortcutSettings := TRadioButton.Create(Page_InstallOptions);
   rbEditShortcutSettings.Parent := Page_InstallOptions.Surface;
-  rbEditShortcutSettings.Left := ScaleX(10);
-  rbEditShortcutSettings.Top := radioTopBase;
-  rbEditShortcutSettings.Width := ScaleX(420);
+  rbEditShortcutSettings.Left := cardManage.Left + ScaleX(10);
+  rbEditShortcutSettings.Top := cardManage.Top + ScaleY(26);
+  rbEditShortcutSettings.Width := cardManage.Width - ScaleX(18);
   rbEditShortcutSettings.Caption := 'Edit existing shortcut settings';
   rbEditShortcutSettings.Checked := False;
   rbEditShortcutSettings.OnClick := @OnInstallModeChange;
 
   rbEditSystemwideSettings := TRadioButton.Create(Page_InstallOptions);
   rbEditSystemwideSettings.Parent := Page_InstallOptions.Surface;
-  rbEditSystemwideSettings.Left := ScaleX(10);
-  rbEditSystemwideSettings.Top := radioTopBase + radioSpacing;
-  rbEditSystemwideSettings.Width := ScaleX(420);
+  rbEditSystemwideSettings.Left := cardManage.Left + ScaleX(10);
+  rbEditSystemwideSettings.Top := cardManage.Top + ScaleY(43);
+  rbEditSystemwideSettings.Width := cardManage.Width - ScaleX(18);
   rbEditSystemwideSettings.Caption := 'Edit System-wide RDP settings';
   rbEditSystemwideSettings.Checked := False;
   rbEditSystemwideSettings.OnClick := @OnInstallModeChange;
 
   rbShowRDPInfo := TRadioButton.Create(Page_InstallOptions);
   rbShowRDPInfo.Parent := Page_InstallOptions.Surface;
-  rbShowRDPInfo.Left := ScaleX(10);
-  rbShowRDPInfo.Top := radioTopBase + radioSpacing * 2;
-  rbShowRDPInfo.Width := ScaleX(420);
+  rbShowRDPInfo.Left := cardManage.Left + ScaleX(10);
+  rbShowRDPInfo.Top := cardManage.Top + ScaleY(60);
+  rbShowRDPInfo.Width := cardManage.Width - ScaleX(18);
   rbShowRDPInfo.Caption := 'Show RDP Info';
   rbShowRDPInfo.Checked := False;
   rbShowRDPInfo.OnClick := @OnInstallModeChange;
 
   rbQuickFixes := TRadioButton.Create(Page_InstallOptions);
   rbQuickFixes.Parent := Page_InstallOptions.Surface;
-  rbQuickFixes.Left := ScaleX(10);
-  rbQuickFixes.Top := radioTopBase + radioSpacing * 3;
-  rbQuickFixes.Width := ScaleX(420);
+  rbQuickFixes.Left := cardManage.Left + ScaleX(10);
+  rbQuickFixes.Top := cardManage.Top + ScaleY(77);
+  rbQuickFixes.Width := cardManage.Width - ScaleX(18);
   rbQuickFixes.Caption := 'Quick Fixes';
   rbQuickFixes.Checked := False;
   rbQuickFixes.OnClick := @OnInstallModeChange;
 
   rbRemoveUsers := TRadioButton.Create(Page_InstallOptions);
   rbRemoveUsers.Parent := Page_InstallOptions.Surface;
-  rbRemoveUsers.Left := ScaleX(10);
-  rbRemoveUsers.Top := radioTopBase + radioSpacing * 4;
-  rbRemoveUsers.Width := ScaleX(420);
+  rbRemoveUsers.Left := cardCleanup.Left + ScaleX(10);
+  rbRemoveUsers.Top := cardCleanup.Top + ScaleY(26);
+  rbRemoveUsers.Width := cardCleanup.Width - ScaleX(18);
   rbRemoveUsers.Caption := 'Remove user accounts';
   rbRemoveUsers.Checked := False;
   rbRemoveUsers.OnClick := @OnInstallModeChange;
 
   rbUninstall := TRadioButton.Create(Page_InstallOptions);
   rbUninstall.Parent := Page_InstallOptions.Surface;
-  rbUninstall.Left := ScaleX(10);
-  rbUninstall.Top := radioTopBase + radioSpacing * 5;
-  rbUninstall.Width := ScaleX(420);
+  rbUninstall.Left := cardCleanup.Left + ScaleX(10);
+  rbUninstall.Top := cardCleanup.Top + ScaleY(43);
+  rbUninstall.Width := cardCleanup.Width - ScaleX(18);
   rbUninstall.Caption := 'Uninstall (keeps users)';
   rbUninstall.Checked := False;
   rbUninstall.OnClick := @OnInstallModeChange;
+
+  // Every Setup Options control now exists, so apply the final card heights and
+  // lower-row positions.
+  RelayoutInstallOptionsPage();
 
   // Add credits text at bottom of the welcome intro page
   CreditsText := TRichEditViewer.Create(WelcomePage);
@@ -8202,10 +8356,10 @@ begin
           CreateUserMode := createUserModeExisting;
       end;
 
-      // Require at least one action under Install
+      // Require at least one action under Setup
       if (not DoInstallTermWrap) and (not DoCreateRdpShortcuts) then
       begin
-        MsgBox('Please select at least one option under Install', mbError, MB_OK);
+        MsgBox('Please select at least one option under Setup (Install TermWrap or Create RDP shortcuts)', mbError, MB_OK);
         Result := False;
         exit;
       end;
@@ -9851,6 +10005,10 @@ begin
 
       OnCreateRdpShortcutsClick(nil);
     end;
+
+    // The "use existing users" sub-note may have just been shown or hidden, which
+    // changes the shortcut-choice group height, so re-apply the card layout.
+    RelayoutInstallOptionsPage();
   end;
 
   if CurPageID = EditShortcutPage.ID then

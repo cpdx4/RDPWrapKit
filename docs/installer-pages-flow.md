@@ -48,7 +48,7 @@ flowchart TD
 ### Page Descriptions
 
 - **Welcome Page**: Shows credits, project links, and a brief intro.
-- **Install Options**: User selects the desired install mode via radio buttons, with conditional sub-options for the Install mode.
+- **Install Options**: Grouped into three titled sections — **Setup** (the Install mode plus its Install TermWrap / Create RDP shortcuts sub-options), **Settings and troubleshooting** (Edit existing shortcut settings, Edit System-wide RDP settings, Show RDP Info, Quick Fixes) and **Cleanup** (Remove user accounts, Uninstall). The sections are visual grouping only: every radio remains parented to the page surface, so mutual exclusivity, tab order and all seven mode behaviours are unchanged.
 - **Create Users Page**: Add new local users and set passwords for RDP access (shown only when Install + Create RDP shortcuts + Create new users is selected).
 - **Select Existing Users Page**: Pre-populated list of local users with password fields; user selects which to generate shortcuts for (shown only when Install + Create RDP shortcuts + Use existing users is selected).
 - **Edit Existing Shortcut Settings Page**: List of .rdp files on the Desktop; user selects one to modify or delete (shown only in Edit existing shortcut settings mode).
@@ -88,7 +88,7 @@ The installer has **four top-level modes**, selected via radio buttons on the Op
 ## Options Page: Mode Selection Flow
 
 1. **Welcome Page**: Displays project info and credits.
-2. **Options Page**: User selects one of the four install modes via radio buttons.
+2. **Options Page**: User selects one of the four install modes via radio buttons, laid out in three titled section cards (**Setup**, **Settings and troubleshooting**, **Cleanup**). The first radio is captioned **"Install RDPWrapKit on this PC"** and owns the Install sub-options.
    - If **"Install"** is selected, two additional controls appear:
      - `chkInstallTermWrap` (default: checked) — Install TermWrap binaries → sets `DoInstallTermWrap`
      - `chkCreateRdpShortcuts` — **"Create RDP shortcuts"** (default: unchecked) → sets `DoCreateRdpShortcuts`
