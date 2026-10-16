@@ -133,6 +133,15 @@ function GetThreadIdHex: string; forward;
 function GetProcessIdHex: string; forward;
 function LoggerRedact(const S: string): string; forward;
 procedure LoggerWrite(const Level, Msg: string); forward;
+function PSHost: string; forward;
+procedure RegisterLoggerSecret(const Secret: string); forward;
+procedure ClearLoggerSecrets; forward;
+function ScrubRegisteredSecrets(const S: string): string; forward;
+function GenerateRandomPassword: string; forward;
+function LogCapabilityProbe: Boolean; forward;
+function ValidateGroupMembershipADSI(const GroupName, UserName: string): Boolean; forward;
+function UserExistsLocal(const UserName: string): Boolean; forward;
+procedure DisableLocalUserAccount(const UserName: string); forward;
 procedure LogInfo(const Msg: string); forward;
 procedure LogDebug(const Msg: string); forward;
 procedure LogWarn(const Msg: string); forward;
@@ -418,6 +427,36 @@ var
   LoggerOpStartTick: Cardinal;
   LoggerOpActive: Boolean;
 
+  // -------------------------------------------------------------------------
+  // INSTALLER LOG SECRET SCRUBBING
+  // -------------------------------------------------------------------------
+  // Live secrets registered here are stripped from EVERY log line by
+  // LoggerWrite, so a password can never reach the install log even when a
+  // child process echoes it back to us in an error message or stack trace.
+  LoggerSecretList: TStringList;
+
+  // -------------------------------------------------------------------------
+  // RUNTIME CAPABILITY PROBE
+  // -------------------------------------------------------------------------
+  // Results of the one-shot environment probe that runs during InitializeWizard.
+  // They decide which account-management strategy is safe to use on this host.
+  CapabilityProbeDone: Boolean;
+  PowerShellHostPath: string;        // Absolute path of the Windows PowerShell host in use
+  LocalAccountsModuleAvailable: Boolean; // True when Get-LocalUser / New-LocalUser exist
+  NetExeAvailable: Boolean;
+  AdsiAvailable: Boolean;
+  RDPGroupPresent: Boolean;          // True only when SID S-1-5-32-555 resolved to a real group
+  RDPGroupPresenceKnown: Boolean;    // False when group presence could not be determined
+
+  // -------------------------------------------------------------------------
+  // USER CREATION OUTCOME TRACKING
+  // -------------------------------------------------------------------------
+  // Only accounts that were verified as created AND RDP-ready are reported as
+  // success on the finish page; anything else is reported as a failure with a
+  // reason so the wizard can never claim success for a half-finished account.
+  UserCreateFailures: TStringList;   // 'username|reason' entries
+  UserCreateFailureShown: Boolean;   // ensures the failure popup shows only once
+
 const
   // -------------------------------------------------------------------------
   // SYSTEM CONSTANTS
@@ -478,7 +517,12 @@ const
   // User groups
   GROUP_ADMINISTRATORS = 'Administrators';
   GROUP_RDP_USERS = 'Remote Desktop Users';
-  NET_USER_TEMP_PASSWORD = 'Tmp1!';     // Short throwaway password for two-step net user /add (avoids 14-char LM prompt)
+  // NOTE: The net.exe fallback deliberately has NO hard-coded throwaway password.
+  // A random per-run password is generated instead, so an interrupted or failed
+  // run can never leave behind an account that has a publicly known password.
+  // Well-known local group SIDs used for language-independent group resolution
+  SID_ADMINISTRATORS = 'S-1-5-32-544';
+  SID_RDP_USERS = 'S-1-5-32-555';
   
   // -------------------------------------------------------------------------
   // TIMING CONSTANTS
@@ -515,7 +559,8 @@ const
   // Centralized constants for system executables to ensure consistency
   // and enable easy updates if paths change
   EXE_CMD = 'cmd.exe';
-  EXE_POWERSHELL = 'powershell.exe';
+  // NOTE: the PowerShell host path is resolved at runtime by PSHost() so that a
+  // shadowing powershell.exe earlier in the search order can never be used.
   PS_ARGS_BASE = '-NoProfile -ExecutionPolicy Bypass';
   PS_ARGS_HIDDEN = PS_ARGS_BASE + ' -NonInteractive -WindowStyle Hidden';
   
@@ -955,6 +1000,34 @@ begin
   Result := ExpandConstant('{tmp}\' + FileName);
 end;
 
+// -----------------------------------------------------------------------------
+// POWERSHELL HOST RESOLUTION
+// -----------------------------------------------------------------------------
+// Resolves Windows PowerShell to an absolute path so that a shadowing
+// powershell.exe (found earlier in the search order, e.g. next to the installer
+// or on PATH) can never be used instead of the real Windows PowerShell host.
+// A shadowing host is the classic reason why Microsoft.PowerShell.LocalAccounts
+// cmdlets appear to be "missing" and every account operation fails.
+function PSHost: string;
+var
+  Candidate: string;
+begin
+  if PowerShellHostPath <> '' then
+  begin
+    Result := PowerShellHostPath;
+    exit;
+  end;
+
+  Candidate := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(Candidate) then
+    Candidate := ExpandConstant('{win}\System32\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(Candidate) then
+    Candidate := 'powershell.exe';   // last resort: rely on the search path
+
+  PowerShellHostPath := Candidate;
+  Result := Candidate;
+end;
+
 // User name of the user who launched the installer, resolved from the session
 // in which the launching process runs (UAC preserves the session, so this is
 // the launcher, not the elevated admin account).  Returns '' on failure.
@@ -1214,7 +1287,7 @@ begin
   ScriptPath := TempFile(ScriptBaseName);
   SaveStringToFile(ScriptPath, ScriptContent, False);
   LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
-  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   DeleteFile(ScriptPath);
   LogExit('ExecPowerShellScriptContent');
@@ -1230,7 +1303,7 @@ begin
   ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
   SaveStringToFile(ScriptPath, ScriptContent, False);
   LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
-  Result := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not Result then
     LogError('Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
   LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
@@ -1244,9 +1317,22 @@ begin
     'param([string]$GroupSid, [string]$UserName, [string]$OutPath, [string]$SuccessTag)' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
-    '  $group = Get-LocalGroup -SID $GroupSid -ErrorAction Stop' + #13#10 +
-    '  $resolvedName = $group.Name' + #13#10 +
-    '  Add-LocalGroupMember -Group $group -Member $UserName -ErrorAction Stop' + #13#10 +
+    '  $computerName = $env:COMPUTERNAME' + #13#10 +
+    // Resolve the localized group name from the well-known SID using pure .NET
+    // (no LocalAccounts cmdlets) and add the member through the WinNT provider,
+    // then verify the add so a silently ignored failure cannot slip through.
+    '  $resolvedName = (New-Object System.Security.Principal.SecurityIdentifier($GroupSid)).Translate([System.Security.Principal.NTAccount]).Value' + #13#10 +
+    '  $resolvedName = $resolvedName.Split([char]92)[-1]' + #13#10 +
+    '  $group = [ADSI](''WinNT://'' + $computerName + ''/'' + $resolvedName + '',group'')' + #13#10 +
+    '  $memberPath = ''WinNT://'' + $computerName + ''/'' + $UserName + '',user''' + #13#10 +
+    '  $added = $false' + #13#10 +
+    '  $addErr = '''' ' + #13#10 +
+    '  try { $group.Add($memberPath); $added = $true } catch { $addErr = $_.Exception.Message }' + #13#10 +
+    '  if (-not $added) {' + #13#10 +
+    '    $isMember = $false' + #13#10 +
+    '    try { foreach ($m in $group.Members()) { if ($m.Name -ieq $UserName) { $isMember = $true; break } } } catch { }' + #13#10 +
+    '    if (-not $isMember) { throw (''could not add the account to '' + $resolvedName + '': '' + $addErr) }' + #13#10 +
+    '  }' + #13#10 +
     '  @($SuccessTag, (''Group={0}'' -f $resolvedName), (''GroupSid={0}'' -f $GroupSid), (''User={0}'' -f $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
     '  exit 0' + #13#10 +
     '} catch {' + #13#10 +
@@ -1279,6 +1365,16 @@ var
 begin
   LogEntry('ValidateGroupMembership');
   Result := False;
+
+  // Preferred check: ADSI / WinNT provider. Works on every Windows edition and
+  // does not depend on the Microsoft.PowerShell.LocalAccounts cmdlets.
+  if ValidateGroupMembershipADSI(GroupName, UserName) then
+  begin
+    Result := True;
+    LogExit('ValidateGroupMembership');
+    exit;
+  end;
+
   OutPath := TempFile('grp_members_' + SanitizeFileName(GroupName) + '.txt');
 
   Exec('cmd.exe', '/c net localgroup ' + QuoteExeArg(GroupName) + ' > ' + QuoteExeArg(OutPath) + ' 2>&1',
@@ -1567,7 +1663,7 @@ begin
   PSArgs := BuildPowerShellArgs(Command, True);
   // Log command and run (mask any embedded passwords)
   LogDebug('PowerShell Hidden: ' + MaskPasswordsInString(PSArgs));
-  Result := Exec(EXE_POWERSHELL, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := Exec(PSHost, PSArgs, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   LogDebug('PowerShell exitcode=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('ExecPowerShellHidden');
 end;
@@ -1589,7 +1685,7 @@ begin
   OpTick := GetTickCount;
   Result := '';
   PSPath := TempFile('psout.txt');
-  Exec(EXE_POWERSHELL,
+  Exec(PSHost,
     BuildPowerShellArgs(Command + ' | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force', True),
     '', SW_HIDE, ewWaitUntilTerminated, RC);
   if (RC = 0) and FileExists(PSPath) then
@@ -1635,7 +1731,7 @@ begin
   Result := '';
   PSPath := TempFile('psall.txt');
   WrappedCommand := '& { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
-  Exec(EXE_POWERSHELL,
+  Exec(PSHost,
     BuildPowerShellArgs(WrappedCommand, True),
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
@@ -2158,6 +2254,53 @@ begin
   end;
 end;
 
+// -----------------------------------------------------------------------------
+// RUNTIME SECRET SCRUBBING
+// -----------------------------------------------------------------------------
+// Belt-and-braces guarantee that a live password can never be written to the log:
+// every secret currently being processed is registered here and removed from the
+// final log string, in addition to the centralized pattern-based redaction.
+procedure RegisterLoggerSecret(const Secret: string);
+begin
+  if (Secret = '') or (Length(Secret) < 3) then
+    exit;
+  if LoggerSecretList = nil then
+    LoggerSecretList := TStringList.Create;
+  if LoggerSecretList.IndexOf(Secret) < 0 then
+    LoggerSecretList.Add(Secret);
+end;
+
+// Forget every registered secret (called as soon as the password leaves scope)
+procedure ClearLoggerSecrets;
+begin
+  if LoggerSecretList <> nil then
+    LoggerSecretList.Clear;
+end;
+
+// Replace every occurrence of every registered secret with [REDACTED]
+function ScrubRegisteredSecrets(const S: string): string;
+var
+  i, p: Integer;
+  Secret: string;
+begin
+  Result := S;
+  if (LoggerSecretList = nil) or (LoggerSecretList.Count = 0) then
+    exit;
+  for i := 0 to LoggerSecretList.Count - 1 do
+  begin
+    Secret := LoggerSecretList[i];
+    if Secret = '' then
+      continue;
+    p := Pos(Secret, Result);
+    while p > 0 do
+    begin
+      Delete(Result, p, Length(Secret));
+      Insert('[REDACTED]', Result, p);
+      p := Pos(Secret, Result);
+    end;
+  end;
+end;
+
 // Core log writer - every log entry flows through here
 procedure LoggerWrite(const Level, Msg: string);
 var
@@ -2165,8 +2308,8 @@ var
   RedactedMsg: string;
   DurationStr: string;
 begin
-  // Apply centralized redaction
-  RedactedMsg := LoggerRedact(Msg);
+  // Apply centralized redaction, then strip any secret registered at runtime
+  RedactedMsg := ScrubRegisteredSecrets(LoggerRedact(Msg));
 
   // Build duration string if an operation is active
   if LoggerOpActive then
@@ -2781,6 +2924,7 @@ var
   SL: TStringList;
   j: Integer;
   RC: Integer;
+  FullCmd: string;
 begin
   LogEntry('RunNetHiddenCapture');
   if SimulateNetFailPowerShell then
@@ -2799,42 +2943,782 @@ begin
   OutPath := TempFile('net_' + SanitizeFileName(OutTag) + '.log');
   RC := 0;
   LogDebug('RunNetHiddenCapture: ' + MaskCommandForLog('net.exe', Params));
-  Exec(EXE_CMD, '/c "net.exe ' + Params + '" > "' + OutPath + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, RC);
+
+  // CRITICAL - cmd.exe /c quoting rules:
+  //   When the command after /c starts with a double-quote, cmd.exe strips that
+  //   leading quote AND the LAST quote on the entire line. If the redirection is
+  //   placed OUTSIDE the outer quotes, the last quote is the one closing the
+  //   output path, so the redirect target is mangled into an invalid filename and
+  //   net.exe frequently never runs at all - with no captured output, which made
+  //   this failure completely silent. The redirection must therefore live INSIDE
+  //   the outer quotes (identical fix to RunCmdCapture).
+  // BEFORE (broken): /c "net.exe <params>" > "out.log" 2>&1
+  // AFTER  (fixed):  /c "net.exe <params> > "out.log" 2>&1"
+  FullCmd := '/c "net.exe ' + Params + ' > "' + OutPath + '" 2>&1"';
+  LogDebug('RunNetHiddenCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
+  if not Exec(EXE_CMD, FullCmd, '', SW_HIDE, ewWaitUntilTerminated, RC) then
+    LogWarn('RunNetHiddenCapture: Exec() could not launch cmd.exe for tag=' + OutTag);
   LogDebug('RunNetHiddenCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
 
-  if RC <> 0 then
+  // Always dump whatever the command produced. Diagnostics must never depend on
+  // a non-zero exit code: a missing output file is itself the strongest signal
+  // that the command line never executed.
+  if FileExists(OutPath) then
   begin
-    if FileExists(OutPath) then
-    begin
-      SL := TStringList.Create;
+    SL := TStringList.Create;
+    try
       try
-        try
-          SL.LoadFromFile(OutPath);
-          if SL.Count > 0 then
-          begin
-            LogDebug('net.exe output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
-            for j := 0 to SL.Count - 1 do
-              LogDebug('  ' + SL[j]);
-          end;
-        except
-          LogWarn('RunNetHiddenCapture: failed to read output: ' + OutPath);
-        end;
-      finally
-        SL.Free;
+        SL.LoadFromFile(OutPath);
+        if SL.Count > 0 then
+        begin
+          LogDebug('net.exe output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+          for j := 0 to SL.Count - 1 do
+            LogDebug('  ' + SL[j]);
+        end
+        else
+          LogDebug('RunNetHiddenCapture: output file is empty for tag=' + OutTag);
+      except
+        LogWarn('RunNetHiddenCapture: failed to read output: ' + OutPath);
       end;
-    end
-    else
-      LogDebug('RunNetHiddenCapture: no output file for tag=' + OutTag);
+    finally
+      SL.Free;
+    end;
   end
   else
   begin
-    LogDebug('RunNetHiddenCapture: command succeeded (exit=0) for tag=' + OutTag);
+    LogDebug('RunNetHiddenCapture: NO output file for tag=' + OutTag + ' (exit=' + IntToStr(RC) + ')');
+    LogDebug('RunNetHiddenCapture: full command for diagnosis: ' + FullCmd);
   end;
+
+  if RC = 0 then
+    LogDebug('RunNetHiddenCapture: command succeeded (exit=0) for tag=' + OutTag);
 
   if FileExists(OutPath) then
     DeleteFile(OutPath);
   Result := RC;
   LogExit('RunNetHiddenCapture');
+end;
+
+// -----------------------------------------------------------------------------
+// RANDOM TEMPORARY PASSWORD
+// -----------------------------------------------------------------------------
+// Replaces the old hard-coded throwaway password. The net.exe fallback needs a
+// short initial password (to dodge the >14 character LM confirmation prompt) but
+// it must never be a constant, otherwise an interrupted run leaves an account
+// with a publicly known password.
+function GenerateRandomPassword: string;
+var
+  Raw: string;
+begin
+  Result := '';
+  Raw := GetPSOutput('(([guid]::NewGuid().ToString(''N'')) + (Get-Random -Minimum 100000 -Maximum 999999)).Substring(0,12)');
+  Raw := Trim(Raw);
+  if Raw = '' then
+    Raw := 'Tmp' + IntToStr(GetTickCount and $FFFF);
+  // Guarantee complexity so the temporary password satisfies local policy
+  Result := Raw + 'aA9#';
+end;
+
+// Strip a DOMAIN\ or COMPUTER\ prefix from an account or group name
+function StripDomainPrefix(const S: string): string;
+var
+  i, p: Integer;
+begin
+  Result := S;
+  p := 0;
+  for i := 1 to Length(Result) do
+    if Result[i] = '\' then
+      p := i;
+  if p > 0 then
+    Result := Copy(Result, p + 1, MaxInt);
+end;
+
+// -----------------------------------------------------------------------------
+// RUNTIME CAPABILITY PROBE
+// -----------------------------------------------------------------------------
+// Determines which account-management facilities actually exist on this host and
+// logs them, so the installer chooses a strategy that works instead of failing
+// blind. Written into the install log header for support triage.
+function LogCapabilityProbe: Boolean;
+var
+  ScriptPath: string;
+  OutPath: string;
+  PSParams: string;
+  PSScript: string;
+  ResultCode: Integer;
+  SL: TStringList;
+  i: Integer;
+  Line: string;
+  Key: string;
+  Value: string;
+  SepPos: Integer;
+begin
+  LogEntry('LogCapabilityProbe');
+  Result := False;
+  if CapabilityProbeDone then
+  begin
+    Result := True;
+    LogExit('LogCapabilityProbe');
+    exit;
+  end;
+  CapabilityProbeDone := True;
+
+  // Defaults: assume the old behaviour unless the probe proves otherwise.
+  LocalAccountsModuleAvailable := False;
+  NetExeAvailable := False;
+  AdsiAvailable := False;
+  RDPGroupPresent := True;
+  RDPGroupPresenceKnown := False;
+
+  OutPath := TempFile('capability_probe.txt');
+  ScriptPath := TempFile('capability_probe.ps1');
+  PSScript :=
+    'param([string]$OutPath)' + #13#10 +
+    '$lines = @()' + #13#10 +
+    'function Add-Line([string]$k, [string]$v) { $script:lines += ($k + ''='' + $v) }' + #13#10 +
+    'try { Add-Line ''PSHostPath'' ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) } catch { Add-Line ''PSHostPath'' ''unknown'' }' + #13#10 +
+    'try { Add-Line ''PSVersion'' ($PSVersionTable.PSVersion.ToString()) } catch { Add-Line ''PSVersion'' ''unknown'' }' + #13#10 +
+    'try { if (Get-Command -Name New-LocalUser -ErrorAction SilentlyContinue) { Add-Line ''LocalAccounts'' ''available'' } else { Add-Line ''LocalAccounts'' ''missing'' } } catch { Add-Line ''LocalAccounts'' ''missing'' }' + #13#10 +
+    'try { if (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue) { Add-Line ''CimWmi'' ''available'' } else { Add-Line ''CimWmi'' ''missing'' } } catch { Add-Line ''CimWmi'' ''missing'' }' + #13#10 +
+    'try { $null = [ADSI](''WinNT://'' + $env:COMPUTERNAME + '',computer''); Add-Line ''Adsi'' ''available'' } catch { Add-Line ''Adsi'' ''missing'' }' + #13#10 +
+    'try { if (Test-Path ([System.IO.Path]::Combine($env:SystemRoot, ''System32\net.exe''))) { Add-Line ''NetExe'' ''available'' } else { Add-Line ''NetExe'' ''missing'' } } catch { Add-Line ''NetExe'' ''unknown'' }' + #13#10 +
+    'try { $s = New-Object System.Security.Principal.SecurityIdentifier(''S-1-5-32-544''); Add-Line ''Sid-S-1-5-32-544'' (''present:'' + $s.Translate([System.Security.Principal.NTAccount]).Value) } catch { Add-Line ''Sid-S-1-5-32-544'' ''missing'' }' + #13#10 +
+    'try { $s = New-Object System.Security.Principal.SecurityIdentifier(''S-1-5-32-555''); Add-Line ''Sid-S-1-5-32-555'' (''present:'' + $s.Translate([System.Security.Principal.NTAccount]).Value) } catch { Add-Line ''Sid-S-1-5-32-555'' ''missing'' }' + #13#10 +
+    '$lines | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    'exit 0';
+  SaveStringToFile(ScriptPath, PSScript, False);
+  PSParams := BuildPSNamedParam('OutPath', OutPath);
+  WriteInstallerLog('CapabilityProbe: PowerShell host=' + PSHost);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+  LogDebug('CapabilityProbe: exit=' + IntToStr(ResultCode));
+
+  if not FileExists(OutPath) then
+  begin
+    WriteInstallerLog('CapabilityProbe: WARNING - probe produced no output (exit=' + IntToStr(ResultCode) + '); using per-operation detection');
+    LogExit('LogCapabilityProbe');
+    exit;
+  end;
+
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(OutPath);
+      for i := 0 to SL.Count - 1 do
+      begin
+        Line := Trim(SL[i]);
+        if Line = '' then
+          continue;
+        SepPos := Pos('=', Line);
+        if SepPos <= 0 then
+        begin
+          WriteInstallerLog('CapabilityProbe: ' + Line);
+          continue;
+        end;
+        Key := Copy(Line, 1, SepPos - 1);
+        Value := Copy(Line, SepPos + 1, MaxInt);
+        WriteInstallerLog('CapabilityProbe: ' + Key + '=' + Value);
+
+        if CompareText(Key, 'LocalAccounts') = 0 then
+          LocalAccountsModuleAvailable := (CompareText(Value, 'available') = 0)
+        else if CompareText(Key, 'Adsi') = 0 then
+          AdsiAvailable := (CompareText(Value, 'available') = 0)
+        else if CompareText(Key, 'NetExe') = 0 then
+          NetExeAvailable := (CompareText(Value, 'available') = 0)
+        else if CompareText(Key, 'Sid-' + SID_RDP_USERS) = 0 then
+        begin
+          RDPGroupPresenceKnown := True;
+          RDPGroupPresent := (CompareText(Value, 'missing') <> 0);
+          if RDPGroupPresent and (Length(Value) > Length('present:')) then
+            GroupRDPUsersName := StripDomainPrefix(Copy(Value, Length('present:') + 1, MaxInt));
+        end
+        else if CompareText(Key, 'Sid-' + SID_ADMINISTRATORS) = 0 then
+        begin
+          if (Length(Value) > Length('present:')) then
+            GroupAdministratorsName := StripDomainPrefix(Copy(Value, Length('present:') + 1, MaxInt));
+        end;
+      end;
+    except
+      WriteInstallerLog('CapabilityProbe: failed to read probe output file');
+    end;
+  finally
+    SL.Free;
+    DeleteFile(OutPath);
+  end;
+
+  if not LocalAccountsModuleAvailable then
+    WriteInstallerLog('CapabilityProbe: Microsoft.PowerShell.LocalAccounts cmdlets are NOT available - account work will use ADSI/WinNT, CIM and net.exe instead');
+  if RDPGroupPresenceKnown and (not RDPGroupPresent) then
+    WriteInstallerLog('CapabilityProbe: Remote Desktop Users group is not present on this system (expected on Windows Home editions; Administrators membership is the RDP path)');
+  if (not NetExeAvailable) and (not LocalAccountsModuleAvailable) then
+    WriteInstallerLog('CapabilityProbe: WARNING - neither net.exe nor the LocalAccounts cmdlets are available; user creation may be impossible on this host');
+
+  Result := True;
+  LogExit('LogCapabilityProbe');
+end;
+
+// -----------------------------------------------------------------------------
+// MODULE-INDEPENDENT LOCAL ACCOUNT AND GROUP HELPERS (ADSI / WinNT)
+// -----------------------------------------------------------------------------
+// These helpers deliberately avoid the Microsoft.PowerShell.LocalAccounts cmdlets
+// (Get-LocalUser / New-LocalUser / Get-LocalGroup / Add-LocalGroupMember). That
+// module is missing on many Windows 11 24H2+ / Server 2025 and debloated images,
+// which is exactly what made every account operation fail silently in the field:
+// the WMI/CIM style script failed, the cmd.exe-based fallback never actually ran,
+// and the installer still reported success. The WinNT ADSI provider, SID
+// translation and net.exe are always present, so they are the primary path now.
+// -----------------------------------------------------------------------------
+
+function BoolToIntStr(const Value: Boolean): string;
+begin
+  if Value then
+    Result := '1'
+  else
+    Result := '0';
+end;
+
+// Log every line of a captured output file, then delete it.
+// Everything passes through the logger, which scrubs registered secrets.
+procedure DumpOutputFileToLog(const Tag, OutPath: string);
+var
+  SL: TStringList;
+  j: Integer;
+begin
+  if not FileExists(OutPath) then
+  begin
+    LogDebug(Tag + ': no output file (' + OutPath + ')');
+    exit;
+  end;
+
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(OutPath);
+      if SL.Count > 0 then
+      begin
+        LogDebug(Tag + ' output (' + IntToStr(SL.Count) + ' lines):');
+        for j := 0 to SL.Count - 1 do
+          LogDebug('  ' + SL[j]);
+      end
+      else
+        LogDebug(Tag + ': output file is empty');
+    except
+      LogWarn(Tag + ': failed to read output file: ' + OutPath);
+    end;
+  finally
+    SL.Free;
+    DeleteFile(OutPath);
+  end;
+end;
+
+// Find a tagged line in a captured output file (BOM tolerant).
+// Returns the whole matching line, or '' when the tag is absent.
+function ReadOutputTag(const OutPath, Tag: string): string;
+var
+  SL: TStringList;
+  i: Integer;
+  Line: string;
+begin
+  Result := '';
+  if not FileExists(OutPath) then
+    exit;
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(OutPath);
+      for i := 0 to SL.Count - 1 do
+      begin
+        Line := Trim(SL[i]);
+        if Pos(Tag, Line) > 0 then
+        begin
+          Result := Line;
+          break;
+        end;
+      end;
+    except
+      Result := '';
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+// Extract a human readable failure reason from a captured script output file
+function ExtractOutputDetail(const OutPath: string): string;
+var
+  SL: TStringList;
+  i, p: Integer;
+  Line: string;
+begin
+  Result := '';
+  if not FileExists(OutPath) then
+    exit;
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(OutPath);
+      for i := 0 to SL.Count - 1 do
+      begin
+        Line := Trim(SL[i]);
+        p := Pos('Message=', Line);
+        if p > 0 then
+        begin
+          Result := Copy(Line, p + Length('Message='), MaxInt);
+          break;
+        end;
+        p := Pos('Error=', Line);
+        if p > 0 then
+        begin
+          Result := Copy(Line, p + Length('Error='), MaxInt);
+          break;
+        end;
+      end;
+    except
+      Result := '';
+    end;
+  finally
+    SL.Free;
+  end;
+  if Result = '' then
+    Result := 'no detailed reason was reported by PowerShell';
+end;
+
+// --- Account creation / password reset through ADSI -------------------------
+// Success tags: ADSI_CREATE_OK (new account) or ADSI_SETPASSWORD_OK (existing).
+function BuildCreateLocalUserPowerShellScript: string;
+begin
+  Result :=
+    'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'try {' + #13#10 +
+    '  $computerName = $env:COMPUTERNAME' + #13#10 +
+    '  $computer = [ADSI](''WinNT://'' + $computerName + '',computer'')' + #13#10 +
+    '  $user = $null' + #13#10 +
+    '  foreach ($child in $computer.Children) {' + #13#10 +
+    '    if ($child.SchemaClassName -eq ''User'') { if ($child.Name -ieq $UserName) { $user = $child; break } }' + #13#10 +
+    '  }' + #13#10 +
+    '  $created = $false' + #13#10 +
+    '  if ($null -eq $user) {' + #13#10 +
+    '    $user = $computer.Create(''user'', $UserName)' + #13#10 +
+    '    try {' + #13#10 +
+    '      $user.SetPassword($Password)' + #13#10 +
+    '      $user.SetInfo()' + #13#10 +
+    '    } catch {' + #13#10 +
+    '      $user.SetInfo()' + #13#10 +
+    '      $user.SetPassword($Password)' + #13#10 +
+    '      $user.SetInfo()' + #13#10 +
+    '    }' + #13#10 +
+    '    $created = $true' + #13#10 +
+    '  } else {' + #13#10 +
+    '    $user.SetPassword($Password)' + #13#10 +
+    '    $user.SetInfo()' + #13#10 +
+    '  }' + #13#10 +
+    '  $user = [ADSI](''WinNT://'' + $computerName + ''/'' + $UserName + '',user'')' + #13#10 +
+    '  $flags = [int]$user.UserFlags.Value' + #13#10 +
+    // 0x10000 = ADS_UF_DONT_EXPIRE_PASSWD, ~0x2 = clear ADS_UF_ACCOUNTDISABLE
+    '  $flags = $flags -bor 0x10000' + #13#10 +
+    '  $flags = $flags -band (-bnot 0x2)' + #13#10 +
+    '  $user.UserFlags.Value = $flags' + #13#10 +
+    '  $user.SetInfo()' + #13#10 +
+    '  $user = [ADSI](''WinNT://'' + $computerName + ''/'' + $UserName + '',user'')' + #13#10 +
+    '  $user.PasswordExpired = 0' + #13#10 +
+    '  $user.SetInfo()' + #13#10 +
+    '  if ($created) { @(''ADSI_CREATE_OK'', (''User='' + $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8 }' + #13#10 +
+    '  else { @(''ADSI_SETPASSWORD_OK'', (''User='' + $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8 }' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  @(' + #13#10 +
+    '    ''ADSI_USER_FAIL'',' + #13#10 +
+    '    (''User='' + $UserName),' + #13#10 +
+    '    (''ExceptionType='' + $_.Exception.GetType().FullName),' + #13#10 +
+    '    (''Message='' + $_.Exception.Message),' + #13#10 +
+    '    (''HResult='' + $_.Exception.HResult)' + #13#10 +
+    '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+// Enable (Enable=1) or disable (Enable=0) a local account through ADSI
+function BuildSetLocalUserStateScript: string;
+begin
+  Result :=
+    'param([string]$UserName, [int]$Enable, [string]$OutPath)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'try {' + #13#10 +
+    '  $user = [ADSI](''WinNT://'' + $env:COMPUTERNAME + ''/'' + $UserName + '',user'')' + #13#10 +
+    '  $flags = [int]$user.UserFlags.Value' + #13#10 +
+    '  if ($Enable -ne 0) { $flags = $flags -band (-bnot 0x2) } else { $flags = $flags -bor 0x2 }' + #13#10 +
+    '  $user.UserFlags.Value = $flags' + #13#10 +
+    '  $user.SetInfo()' + #13#10 +
+    '  @(''SET_USER_STATE_OK'', (''User='' + $UserName), (''Enable='' + $Enable)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  @(''SET_USER_STATE_FAIL'', (''User='' + $UserName), (''Error='' + $_.Exception.Message)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+// Delete a local account through ADSI and verify that it is really gone.
+// ADSI_DELETE_OK is only written after the account is confirmed absent.
+function BuildDeleteLocalUserPowerShellScript: string;
+begin
+  Result :=
+    'param([string]$UserName, [string]$OutPath)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'try {' + #13#10 +
+    '  $computerName = $env:COMPUTERNAME' + #13#10 +
+    '  $computer = [ADSI](''WinNT://'' + $computerName + '',computer'')' + #13#10 +
+    '  $user = $null' + #13#10 +
+    '  foreach ($child in $computer.Children) {' + #13#10 +
+    '    if ($child.SchemaClassName -eq ''User'') { if ($child.Name -ieq $UserName) { $user = $child; break } }' + #13#10 +
+    '  }' + #13#10 +
+    '  if ($null -ne $user) {' + #13#10 +
+    '    try { $user.DeleteObject(0) } catch { $computer.Delete(''user'', $UserName) }' + #13#10 +
+    '  }' + #13#10 +
+    '  $stillThere = $false' + #13#10 +
+    '  foreach ($child in $computer.Children) {' + #13#10 +
+    '    if ($child.SchemaClassName -eq ''User'') { if ($child.Name -ieq $UserName) { $stillThere = $true; break } }' + #13#10 +
+    '  }' + #13#10 +
+    '  if ($stillThere) {' + #13#10 +
+    '    @(''ADSI_DELETE_FAIL'', (''User='' + $UserName), ''Error=the account still exists after deletion'') | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '    exit 1' + #13#10 +
+    '  }' + #13#10 +
+    '  @(''ADSI_DELETE_OK'', (''User='' + $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  @(''ADSI_DELETE_FAIL'', (''User='' + $UserName), (''Error='' + $_.Exception.Message)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+// Local account existence check without any cmdlets
+function BuildUserExistsPowerShellScript: string;
+begin
+  Result :=
+    'param([string]$UserName, [string]$OutPath)' + #13#10 +
+    'try {' + #13#10 +
+    '  $computer = [ADSI](''WinNT://'' + $env:COMPUTERNAME + '',computer'')' + #13#10 +
+    '  $found = $false' + #13#10 +
+    '  foreach ($child in $computer.Children) {' + #13#10 +
+    '    if ($child.SchemaClassName -eq ''User'') { if ($child.Name -ieq $UserName) { $found = $true; break } }' + #13#10 +
+    '  }' + #13#10 +
+    '  if ($found) { ''EXISTS=1'' | Out-File -FilePath $OutPath -Encoding UTF8 } else { ''EXISTS=0'' | Out-File -FilePath $OutPath -Encoding UTF8 }' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  ''EXISTS=UNKNOWN'' | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+// Group membership check without any cmdlets (ADSI IsMember / Members)
+function BuildGroupMembershipPowerShellScript: string;
+begin
+  Result :=
+    'param([string]$GroupName, [string]$UserName, [string]$OutPath)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    'try {' + #13#10 +
+    '  $computerName = $env:COMPUTERNAME' + #13#10 +
+    '  $group = [ADSI](''WinNT://'' + $computerName + ''/'' + $GroupName + '',group'')' + #13#10 +
+    '  $memberPath = ''WinNT://'' + $computerName + ''/'' + $UserName + '',user''' + #13#10 +
+    '  $found = $false' + #13#10 +
+    '  try { if ($group.IsMember($memberPath)) { $found = $true } } catch { }' + #13#10 +
+    '  if (-not $found) {' + #13#10 +
+    '    try { foreach ($m in $group.Members()) { if ($m.Name -ieq $UserName) { $found = $true; break } } } catch { }' + #13#10 +
+    '  }' + #13#10 +
+    '  if ($found) {' + #13#10 +
+    '    ''MEMBER=True'' | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '    exit 0' + #13#10 +
+    '  }' + #13#10 +
+    '  ''MEMBER=False'' | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 2' + #13#10 +
+    '} catch {' + #13#10 +
+    '  ''CHECK_FAILED'' | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}';
+end;
+
+// Validate group membership through ADSI. Returns False both when the account is
+// not a member and when the check was inconclusive; callers must fall back to a
+// secondary check (net localgroup) rather than treating False as "not a member".
+function ValidateGroupMembershipADSI(const GroupName, UserName: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Text: string;
+  ResultCode: Integer;
+  SL: TStringList;
+begin
+  LogEntry('ValidateGroupMembershipADSI');
+  Result := False;
+  if (GroupName = '') or (UserName = '') then
+  begin
+    LogExit('ValidateGroupMembershipADSI');
+    exit;
+  end;
+
+  OutPath := TempFile('grp_adsi_' + SanitizeFileName(GroupName) + '_' + SanitizeFileName(UserName) + '.txt');
+  ScriptPath := TempFile('group_membership_check.ps1');
+  SaveStringToFile(ScriptPath, BuildGroupMembershipPowerShellScript, False);
+  PSParams :=
+    BuildPSNamedParam('GroupName', GroupName) + ' ' +
+    BuildPSNamedParam('UserName', UserName) + ' ' +
+    BuildPSNamedParam('OutPath', OutPath);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  if FileExists(OutPath) then
+  begin
+    Text := '';
+    SL := TStringList.Create;
+    try
+      try
+        SL.LoadFromFile(OutPath);
+        Text := Trim(SL.Text);
+      except
+        Text := '';
+      end;
+    finally
+      SL.Free;
+      DeleteFile(OutPath);
+    end;
+    if Pos('MEMBER=True', Text) > 0 then
+      Result := True
+    else if Pos('MEMBER=False', Text) > 0 then
+      Result := False
+    else
+      LogWarn('ValidateGroupMembershipADSI: inconclusive check for group=' + GroupName + ' user=' + UserName + ' (exit=' + IntToStr(ResultCode) + ')');
+  end
+  else
+    LogWarn('ValidateGroupMembershipADSI: no output for group=' + GroupName + ' user=' + UserName);
+
+  LogDebug('ValidateGroupMembershipADSI: group=' + GroupName + ' user=' + UserName + ' result=' + BoolToStr(Result));
+  LogExit('ValidateGroupMembershipADSI');
+end;
+
+// Local account existence check (ADSI first, net.exe as fallback)
+function UserExistsLocal(const UserName: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Text: string;
+  ResultCode: Integer;
+  SL: TStringList;
+begin
+  LogEntry('UserExistsLocal');
+  Result := False;
+  if UserName = '' then
+  begin
+    LogExit('UserExistsLocal');
+    exit;
+  end;
+
+  OutPath := TempFile('user_exists_' + SanitizeFileName(UserName) + '.txt');
+  ScriptPath := TempFile('user_exists_check.ps1');
+  SaveStringToFile(ScriptPath, BuildUserExistsPowerShellScript, False);
+  PSParams := BuildPSNamedParam('UserName', UserName) + ' ' + BuildPSNamedParam('OutPath', OutPath);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Text := '';
+  if FileExists(OutPath) then
+  begin
+    SL := TStringList.Create;
+    try
+      try
+        SL.LoadFromFile(OutPath);
+        Text := Trim(SL.Text);
+      except
+        Text := '';
+      end;
+    finally
+      SL.Free;
+      DeleteFile(OutPath);
+    end;
+  end;
+
+  if Pos('EXISTS=1', Text) > 0 then
+    Result := True
+  else if Pos('EXISTS=0', Text) > 0 then
+    Result := False
+  else
+  begin
+    // Inconclusive: net.exe output capture is reliable now, so use it
+    Result := (RunNetHiddenCapture('user ' + QuoteExeArg(UserName), 'exists_' + UserName) = 0);
+    LogDebug('UserExistsLocal: ADSI inconclusive for ' + UserName + '; net.exe fallback result=' + BoolToStr(Result));
+  end;
+
+  LogDebug('UserExistsLocal: user=' + UserName + ' exists=' + BoolToStr(Result));
+  LogExit('UserExistsLocal');
+end;
+
+// Create or reset a local account through ADSI
+function CreateLocalUserViaADSI(const UserName, Password: string; var ErrorText: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Tag: string;
+  ResultCode: Integer;
+begin
+  LogEntry('CreateLocalUserViaADSI');
+  Result := False;
+  ErrorText := '';
+  OutPath := TempFile('user_adsi_' + SanitizeFileName(UserName) + '.log');
+  ScriptPath := TempFile('create_local_user_adsi.ps1');
+  SaveStringToFile(ScriptPath, BuildCreateLocalUserPowerShellScript, False);
+  PSParams :=
+    BuildPSNamedParam('UserName', UserName) + ' ' +
+    BuildPSNamedParam('Password', Password) + ' ' +
+    BuildPSNamedParam('OutPath', OutPath);
+  WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Tag := ReadOutputTag(OutPath, 'ADSI_CREATE_OK');
+  if Tag = '' then
+    Tag := ReadOutputTag(OutPath, 'ADSI_SETPASSWORD_OK');
+  Result := (Tag <> '');
+  if Result and (Pos('ADSI_CREATE_OK', Tag) = 0) then
+    LogWarn('CreateLocalUserViaADSI: user ' + UserName + ' already existed; its password was reset');
+  if not Result then
+    ErrorText := ExtractOutputDetail(OutPath);
+  DumpOutputFileToLog('CreateLocalUserViaADSI', OutPath);
+
+  LogDebug('CreateLocalUserViaADSI: user=' + UserName + ' exit=' + IntToStr(ResultCode) + ' success=' + BoolToStr(Result));
+  LogExit('CreateLocalUserViaADSI');
+end;
+
+// Enable or disable a local account through ADSI
+function SetLocalUserEnabledViaADSI(const UserName: string; const Enable: Boolean; var ErrorText: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Tag: string;
+  ResultCode: Integer;
+begin
+  LogEntry('SetLocalUserEnabledViaADSI');
+  Result := False;
+  ErrorText := '';
+  OutPath := TempFile('user_state_' + SanitizeFileName(UserName) + '.log');
+  ScriptPath := TempFile('set_local_user_state.ps1');
+  SaveStringToFile(ScriptPath, BuildSetLocalUserStateScript, False);
+  PSParams :=
+    BuildPSNamedParam('UserName', UserName) + ' ' +
+    BuildPSNamedParam('Enable', BoolToIntStr(Enable)) + ' ' +
+    BuildPSNamedParam('OutPath', OutPath);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Tag := ReadOutputTag(OutPath, 'SET_USER_STATE_OK');
+  Result := (Tag <> '');
+  if not Result then
+    ErrorText := ExtractOutputDetail(OutPath);
+  DumpOutputFileToLog('SetLocalUserEnabledViaADSI', OutPath);
+
+  LogDebug('SetLocalUserEnabledViaADSI: user=' + UserName + ' enable=' + BoolToStr(Enable) + ' result=' + BoolToStr(Result));
+  LogExit('SetLocalUserEnabledViaADSI');
+end;
+
+// Delete a local account through ADSI and verify that it is really gone
+function DeleteLocalUserViaADSI(const UserName: string; var ErrorText: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Tag: string;
+  ResultCode: Integer;
+begin
+  LogEntry('DeleteLocalUserViaADSI');
+  Result := False;
+  ErrorText := '';
+  OutPath := TempFile('user_delete_' + SanitizeFileName(UserName) + '.log');
+  ScriptPath := TempFile('delete_local_user.ps1');
+  SaveStringToFile(ScriptPath, BuildDeleteLocalUserPowerShellScript, False);
+  PSParams := BuildPSNamedParam('UserName', UserName) + ' ' + BuildPSNamedParam('OutPath', OutPath);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Tag := ReadOutputTag(OutPath, 'ADSI_DELETE_OK');
+  Result := (Tag <> '');
+  if not Result then
+    ErrorText := ExtractOutputDetail(OutPath);
+  DumpOutputFileToLog('DeleteLocalUserViaADSI', OutPath);
+
+  LogDebug('DeleteLocalUserViaADSI: user=' + UserName + ' exit=' + IntToStr(ResultCode) + ' success=' + BoolToStr(Result));
+  LogExit('DeleteLocalUserViaADSI');
+end;
+
+// Containment for an account that could not be removed: disable it so a partial
+// account can never be used to log on. This is a security requirement, because a
+// failed creation sequence used to leave an account holding a known password.
+procedure DisableLocalUserAccount(const UserName: string);
+var
+  ErrText: string;
+  Ok: Boolean;
+begin
+  LogEntry('DisableLocalUserAccount');
+  if UserName = '' then
+  begin
+    LogExit('DisableLocalUserAccount');
+    exit;
+  end;
+
+  Ok := SetLocalUserEnabledViaADSI(UserName, False, ErrText);
+  if Ok then
+    LogWarn('DisableLocalUserAccount: account ' + UserName + ' was disabled to prevent unauthorised use')
+  else
+  begin
+    LogError('DisableLocalUserAccount: could not disable account ' + UserName + ' (' + ErrText + '); trying net.exe');
+    if RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /active:no', 'disable_' + UserName) = 0 then
+      LogWarn('DisableLocalUserAccount: account ' + UserName + ' disabled via net.exe')
+    else
+      LogError('DisableLocalUserAccount: FAILED to disable account ' + UserName + ' - it may still be usable');
+  end;
+
+  LogExit('DisableLocalUserAccount');
+end;
+
+// Add a user to a local group through ADSI, with net.exe fallback, and verify the
+// membership independently before reporting success.
+function AddUserToGroupViaADSI(const GroupSid, GroupName, UserName: string; var ErrorText: string): Boolean;
+var
+  ScriptPath, OutPath, PSParams, Tag: string;
+  ResultCode: Integer;
+begin
+  LogEntry('AddUserToGroupViaADSI');
+  Result := False;
+  ErrorText := '';
+
+  OutPath := TempFile('add_group_' + SanitizeFileName(UserName) + '_' + SanitizeFileName(GroupName) + '.log');
+  ScriptPath := TempFile('add_group_adsi.ps1');
+  SaveStringToFile(ScriptPath, BuildAddGroupMemberPowerShellScript(GroupSid, UserName, OutPath, 'ADD_GROUP_OK'), False);
+  PSParams :=
+    BuildPSNamedParam('GroupSid', GroupSid) + ' ' +
+    BuildPSNamedParam('UserName', UserName) + ' ' +
+    BuildPSNamedParam('OutPath', OutPath) + ' ' +
+    BuildPSNamedParam('SuccessTag', 'ADD_GROUP_OK');
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Tag := ReadOutputTag(OutPath, 'ADD_GROUP_OK');
+  Result := (Tag <> '');
+  if not Result then
+    ErrorText := ExtractOutputDetail(OutPath);
+  DumpOutputFileToLog('AddUserToGroupViaADSI[' + GroupName + ']', OutPath);
+
+  if not Result then
+  begin
+    LogWarn('AddUserToGroupViaADSI: ADSI add failed for group=' + GroupName + ' user=' + UserName + '; trying net.exe');
+    if RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addgroup_' + UserName) = 0 then
+    begin
+      Result := True;
+      ErrorText := '';
+    end
+    else
+      LogWarn('AddUserToGroupViaADSI: net.exe add also failed for group=' + GroupName + ' user=' + UserName);
+  end;
+
+  // Never trust the add itself - confirm the membership independently
+  if Result and (not ValidateGroupMembership(GroupName, UserName)) then
+  begin
+    LogError('AddUserToGroupViaADSI: membership verification failed for group=' + GroupName + ' user=' + UserName);
+    ErrorText := 'the account does not appear in the group after the add';
+    Result := False;
+  end;
+
+  if Result then
+    LogInfo('AddUserToGroupViaADSI: user=' + UserName + ' added to group=' + GroupName);
+
+  LogDebug('AddUserToGroupViaADSI: group=' + GroupName + ' user=' + UserName + ' result=' + BoolToStr(Result));
+  LogExit('AddUserToGroupViaADSI');
 end;
 
 // -----------------------------------------------------------------------------
@@ -3330,7 +4214,7 @@ begin
     ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
     ' exit 0' +
     '} catch { exit 1 }';
-  Exec(EXE_POWERSHELL, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(PSHost, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
   if not FileExists(PSPath) then
@@ -5011,7 +5895,7 @@ begin
     '[System.IO.File]::WriteAllText(''' + PSSingleQuote(EncPath) + ''', $encPw)';
 
   ResultCode := -1;
-  Exec(EXE_POWERSHELL, BuildPowerShellArgs(Cmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(PSHost, BuildPowerShellArgs(Cmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if (ResultCode = 0) and FileExists(EncPath) then
   begin
@@ -5191,6 +6075,14 @@ begin
     SL.Add('gatewayprofileusagemethod:i:0');
     SL.Add('promptcredentialonce:i:0');
     SL.Add('use redirection server name:i:0');
+    // Credential storage contract: RDPWrapKit deliberately embeds the credential in
+    // the generated .rdp file as a DPAPI-protected "password 51:b:" blob instead of
+    // creating a Credential Manager entry. This is why nothing appears under
+    // Windows Credentials. A "cmdkey /generic:TERMSRV/..." entry is intentionally NOT
+    // written: the installer runs elevated, so cmdkey would file the credential in
+    // the administrator's vault instead of the target user's profile.
+    // Consequence: the shortcut only works while the blob still matches the account
+    // password, which is why the password is verified before the blob is written.
     if HasEnc then
       SL.Add('password 51:b:' + EncText);
     SL.Add('disableconnectionsharing:i:0');
@@ -5410,7 +6302,7 @@ begin
     '}';
   SaveStringToFile(RunnerPath, RunnerScript, False);
   LogDebug('CreateRDPShortcut: Executing PowerShell script with timeout wrapper');
-  Exec(EXE_POWERSHELL,
+  Exec(PSHost,
     BuildPowerShellFileArgs(
       RunnerPath,
       BuildPSNamedParam('TargetScript', ScriptPath) + ' ' + BuildPSNamedParam('EncPath', EncPath) + ' -TimeoutSec 30',
@@ -5458,38 +6350,40 @@ end;
 
 procedure CreateRDPUsers;
 var
-  ResultCode: Integer;
   i: Integer;
   UserInfo: string;
   UserName: string;
   Password: string;
   StartTick: Cardinal;
   UserStartTick: Cardinal;
-  OutPath: string;
-  ScriptPath: string;
-  PSScript: string;
-  PSParams: string;
-  SL: TStringList;
-  j: Integer;
   NetRc: Integer;
-  ExecOk: Boolean;
-  UserCreateOutputAlreadyLogged: Boolean;
   UserCreatePath: string;
   CredentialMatchesEnteredPassword: Boolean;
   ValidationError: string;
+  FailureReason: string;
+  CreateErr: string;
+  GroupErr: string;
+  TempPw: string;
 begin
   LogEntry('CreateRDPUsers');
-  // Lazy-resolve group names on first use (avoids blocking during InitializeWizard)
-  if GroupAdministratorsName = 'Administrators' then
-  begin
-    GroupAdministratorsName := GetLocalizedGroupName('S-1-5-32-544', 'Administrators');
-    LogDebug('CreateRDPUsers: Resolved Administrators group name to: ' + GroupAdministratorsName);
-  end;
-  if GroupRDPUsersName = 'Remote Desktop Users' then
-  begin
-    GroupRDPUsersName := GetLocalizedGroupName('S-1-5-32-555', 'Remote Desktop Users');
-    LogDebug('CreateRDPUsers: Resolved Remote Desktop Users group name to: ' + GroupRDPUsersName);
-  end;
+  // Make sure the one-shot capability probe has run (it also runs during
+  // InitializeWizard; this is a safety net for other entry points).
+  if not CapabilityProbeDone then
+    LogCapabilityProbe;
+
+  // Group names were already resolved from the well-known SIDs by the probe using
+  // pure .NET SID translation, which does not need the LocalAccounts cmdlets.
+  // Only fall back to the PowerShell translate helper if the probe could not.
+  if GroupAdministratorsName = '' then
+    GroupAdministratorsName := GetLocalizedGroupName(SID_ADMINISTRATORS, GROUP_ADMINISTRATORS);
+  if GroupRDPUsersName = '' then
+    GroupRDPUsersName := GetLocalizedGroupName(SID_RDP_USERS, GROUP_RDP_USERS);
+  LogDebug('CreateRDPUsers: Administrators group=' + GroupAdministratorsName +
+    ' | Remote Desktop Users group=' + GroupRDPUsersName +
+    ' | RDP group present=' + BoolToStr(RDPGroupPresent) + ' (known=' + BoolToStr(RDPGroupPresenceKnown) + ')' +
+    ' | LocalAccounts available=' + BoolToStr(LocalAccountsModuleAvailable));
+  if RDPGroupPresenceKnown and (not RDPGroupPresent) then
+    WriteInstallerLog('INFO: Remote Desktop Users group is absent on this edition; new users are authorised for RDP through ' + GroupAdministratorsName + ' only');
   
   // Start overall watchdog timer
   StartTick := GetTickCount;
@@ -5524,232 +6418,162 @@ begin
 
     StatusOverlay.Caption := 'Creating user account (' + IntToStr(i + 1) + ' of ' + IntToStr(UsersList.Count) + '): ' + UserName;
     LogDebug('Creating user: ' + UserName + ' (user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count) + ')');
-    UserCreateOutputAlreadyLogged := False;
-    UserCreatePath := 'POWERSHELL';
+    // Register the live password with the logger so it can never be written to the
+    // install log, even if a child process echoes it back inside an error message
+    // or a stack trace. Cleared again as soon as this user is finished.
+    RegisterLoggerSecret(Password);
+    UserCreatePath := 'ADSI';
     LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
+    FailureReason := '';
 
-    // PRIMARY PATH: Create user via PowerShell New-LocalUser with PasswordNeverExpires.
-    // PowerShell native cmdlets properly set the password-never-expires flag on the
-    // user account, unlike net.exe /expires:never which only controls account expiration.
-    // Falls back to net.exe on failure (with net accounts /maxpwage:unlimited).
-    OutPath := TempFile('user_create_' + SanitizeFileName(UserName) + '.log');
-    PSScript :=
-      'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
-      '$ErrorActionPreference = ''Stop''' + #13#10 +
-      'try {' + #13#10 +
-      '  $outDir = [System.IO.Path]::GetDirectoryName($OutPath)' + #13#10 +
-      '  if (-not [string]::IsNullOrWhiteSpace($outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }' + #13#10 +
-      '  $pw = ConvertTo-SecureString -String $Password -AsPlainText -Force' + #13#10 +
-      '  $existing = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue' + #13#10 +
-      '  if ($null -ne $existing) {' + #13#10 +
-      '    Set-LocalUser -Name $UserName -Password $pw -PasswordNeverExpires $true -ErrorAction Stop' + #13#10 +
-      '    @(''SETLOCALUSER_PASSWORD_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-      '    exit 0' + #13#10 +
-      '  }' + #13#10 +
-      '  New-LocalUser -Name $UserName -Password $pw -FullName $UserName -PasswordNeverExpires -ErrorAction Stop | Out-Null' + #13#10 +
-      '  @(''NEWLOCALUSER_OK'', ''User='' + $UserName) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-      '  exit 0' + #13#10 +
-      '} catch {' + #13#10 +
-      '  @(' + #13#10 +
-      '    ''NEWLOCALUSER_FAIL'',' + #13#10 +
-      '    ''User='' + $UserName,' + #13#10 +
-      '    ''ExceptionType='' + $_.Exception.GetType().FullName,' + #13#10 +
-      '    ''Message='' + $_.Exception.Message,' + #13#10 +
-      '    ''HResult='' + $_.Exception.HResult,' + #13#10 +
-      '    ''CategoryInfo='' + $_.CategoryInfo.ToString(),' + #13#10 +
-      '    ''FullyQualifiedErrorId='' + $_.FullyQualifiedErrorId,' + #13#10 +
-      '    ''StackTrace:'',' + #13#10 +
-      '    ($_ | Out-String)' + #13#10 +
-      '  ) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
-      '  exit 1' + #13#10 +
-      '}';
-    ScriptPath := TempFile('create_local_user_script_' + SanitizeFileName(UserName) + '.ps1');
-    SaveStringToFile(ScriptPath, PSScript, False);
-    PSParams :=
-      BuildPSNamedParam('UserName', UserName) + ' ' +
-      BuildPSNamedParam('Password', Password) + ' ' +
-      BuildPSNamedParam('OutPath', OutPath);
-    WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
-    ExecOk := Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    if not ExecOk then
-      WriteInstallerLog('ERROR: Failed to launch PowerShell for user creation: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
-    WriteInstallerLog('New-LocalUser exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-    DeleteFile(ScriptPath);
-    if not FileExists(OutPath) then
+    // PRIMARY PATH: create (or reset) the account through the WinNT ADSI provider.
+    // ADSI does not depend on Microsoft.PowerShell.LocalAccounts (Get-LocalUser /
+    // New-LocalUser), which is missing on a growing number of Windows builds, and it
+    // avoids every cmd.exe quoting trap - making it the most reliable path here.
+    CreateErr := '';
+    if CreateLocalUserViaADSI(UserName, Password, CreateErr) then
+      LogInfo('User account created/reset via ADSI for ' + UserName)
+    else
     begin
-      WriteInstallerLog('WARNING: Missing user-create output file after PowerShell for ' + UserName + ': ' + OutPath);
-      SaveStringToFile(OutPath,
-        'NO_USER_CREATE_OUTPUT_FILE' + #13#10 +
-        'Method=' + UserCreatePath + #13#10 +
-        'ResultCode=' + IntToStr(ResultCode) + #13#10 +
-        'User=' + UserName + #13#10,
-        False);
-    end;
-
-    // FALLBACK PATH: If PowerShell failed, fall back to net.exe.
-    // Sets system-wide max password age to unlimited via net accounts first.
-    if ResultCode <> 0 then
-    begin
+      WriteInstallerLog('WARNING: ADSI user creation failed for ' + UserName + ' (' + CreateErr + '); falling back to net.exe');
       UserCreatePath := 'NET';
-      WriteInstallerLog('WARNING: PowerShell user creation failed for ' + UserName + ', falling back to net.exe path');
 
-      // Set system-wide maximum password age to unlimited (all passwords
-      // will not expire). Combined with /expires:never below, this ensures the user
-      // account and its password never expire.
+      if UserExistsLocal(UserName) then
+        LogWarn('User ' + UserName + ' already exists on this system; the net.exe fallback will reset its password');
+
+      // Set system-wide maximum password age to unlimited so that already issued
+      // passwords do not expire. With /expires:never below the account itself also
+      // stays valid indefinitely.
       RunNetHiddenCapture('accounts /maxpwage:unlimited', 'maxpwage_' + UserName);
 
-      // Two-step net.exe creation (avoids 14-char LM password prompt).
-      // Step 1: create with short throwaway password (no LM prompt)
-      // Step 2: set real password (password change does not trigger the LM prompt)
-      // If either step fails, delete the partial user.
-      NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(NET_USER_TEMP_PASSWORD) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never', 'create_' + UserName);
+      // Two-step net.exe creation. Step 1 uses a RANDOM throwaway password so that
+      // the >14 character LM confirmation prompt is avoided and no known-password
+      // account can ever be left behind if this run is interrupted between steps.
+      TempPw := GenerateRandomPassword;
+      RegisterLoggerSecret(TempPw);
+      NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(TempPw) + ' /add /fullname:' + QuoteExeArg(UserName) + ' /expires:never', 'create_' + UserName);
       if NetRc = 0 then
       begin
         NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' ' + QuoteExeArg(Password), 'setpwd_' + UserName);
         if NetRc <> 0 then
         begin
-          WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + ', deleting partial user');
-          RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /delete', 'del_' + UserName);
+          FailureReason := 'the account password could not be applied';
+          WriteInstallerLog('WARNING: NET user password set failed for ' + UserName + '; removing the partial account');
+          NetRc := RunNetHiddenCapture('user ' + QuoteExeArg(UserName) + ' /delete', 'del_' + UserName);
+          if (NetRc <> 0) or UserExistsLocal(UserName) then
+          begin
+            WriteInstallerLog('ERROR: NET user delete did not remove ' + UserName + '; trying an ADSI deletion');
+            if not DeleteLocalUserViaADSI(UserName, CreateErr) then
+            begin
+              FailureReason := 'the partial account could not be removed';
+              DisableLocalUserAccount(UserName);
+            end;
+          end;
         end;
-      end;
-      // Only overwrite ResultCode if net.exe succeeded (otherwise preserve PS error code)
-      if NetRc = 0 then
-        ResultCode := 0;
+      end
+      else
+        FailureReason := 'net.exe could not create the local account';
     end;
 
+    // Verify the credential BEFORE group membership or a shortcut is created, so a
+    // shortcut can never point at a password that does not work.
     CredentialMatchesEnteredPassword := ValidateLocalCredential(UserName, Password);
     WriteInstallerLog('PASSWORD_DIAG [POST_CREATE_CREDENTIAL_TEST] user=' + UserName +
       ' | method=' + UserCreatePath +
       ' | enteredPasswordValid=' + BoolToStr(CredentialMatchesEnteredPassword));
     if not CredentialMatchesEnteredPassword then
+    begin
       WriteInstallerLog('ERROR: Credential validation failed immediately after user creation for ' + UserName + ' (method=' + UserCreatePath + ')');
+      if FailureReason = '' then
+        FailureReason := 'the password set on the account was not accepted';
 
-    // If any output produced, dump it to the installer log for diagnostics
-    if FileExists(OutPath) then
-    begin
-      if not UserCreateOutputAlreadyLogged then
+      // Never leave an account behind that might be holding a temporary password.
+      // Deletion is verified; if that fails the account is disabled instead.
+      if UserExistsLocal(UserName) then
       begin
-        SL := TStringList.Create;
-        try
-          try
-            SL.LoadFromFile(OutPath);
-            WriteInstallerLog('DEBUG: User-creation output for ' + UserName + ':');
-            for j := 0 to SL.Count - 1 do
-              WriteInstallerLog('DEBUG: ' + SL[j]);
-          except
-            // ignore logging errors
-          end;
-        finally
-          SL.Free;
+        WriteInstallerLog('WARNING: Removing the unusable account ' + UserName);
+        if DeleteLocalUserViaADSI(UserName, CreateErr) then
+        begin
+          WriteInstallerLog('WARNING: Account ' + UserName + ' was removed because its password could not be applied');
+          FailureReason := FailureReason + ' (the unusable account was removed)';
+        end
+        else
+        begin
+          WriteInstallerLog('ERROR: Could not remove account ' + UserName + ' (' + CreateErr + '); disabling it instead');
+          DisableLocalUserAccount(UserName);
+          FailureReason := FailureReason + ' (the leftover account was disabled, but it still exists)';
         end;
       end;
-      DeleteFile(OutPath);
-    end;
-    Sleep(SLEEP_SHORT);
-
-    // Add to Administrators group (prefer net localgroup)
-    OutPath := TempFile('user_add_admin_' + SanitizeFileName(UserName) + '.log');
-    NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupAdministratorsName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addadmin_' + UserName);
-    ResultCode := NetRc;
-    if ResultCode <> 0 then
-    begin
-      PSScript := BuildAddGroupMemberPowerShellScript('S-1-5-32-544', UserName, OutPath, 'ADD_ADMIN_OK');
-      WriteInstallerLog('DEBUG: Fallback: Adding user to Administrators via PowerShell (SID: S-1-5-32-544) - resolved name=' + GroupAdministratorsName + ' user=' + UserName);
-      PSParams :=
-        BuildPSNamedParam('GroupSid', 'S-1-5-32-544') + ' ' +
-        BuildPSNamedParam('UserName', UserName) + ' ' +
-        BuildPSNamedParam('OutPath', OutPath) + ' ' +
-        BuildPSNamedParam('SuccessTag', 'ADD_ADMIN_OK');
-      ExecSavedPowerShellDebugScriptParams('add_admin_member', UserName, PSScript, PSParams, True, ResultCode);
-      WriteInstallerLog('PowerShell add to Administrators exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-    end;
-    if FileExists(OutPath) then
-    begin
-      SL := TStringList.Create;
-      try
-        try
-          SL.LoadFromFile(OutPath);
-          WriteInstallerLog('DEBUG: Add-LocalGroupMember (Administrators) output for ' + UserName + ':');
-          for j := 0 to SL.Count - 1 do
-            WriteInstallerLog('DEBUG: ' + SL[j]);
-        except
-        end;
-      finally
-        SL.Free;
-        DeleteFile(OutPath);
-      end;
     end;
 
-    // Check if Remote Desktop Users group exists before adding
-    // Fast check via net localgroup first (avoids hangs in some PowerShell hosts)
-    NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupRDPUsersName), 'checkrdp_' + UserName);
-    if NetRc = 0 then
-      ResultCode := 0
-    else
+    if CredentialMatchesEnteredPassword then
     begin
-      PSScript :=
-        'param([string]$GroupName)' + #13#10 +
-        '$exists = $false' + #13#10 +
-        'try { $null = Get-LocalGroup -SID ''S-1-5-32-555'' -ErrorAction Stop; $exists = $true } catch { }' + #13#10 +
-        'if (-not $exists) { try { $null = Get-LocalGroup -Name $GroupName -ErrorAction Stop; $exists = $true } catch { } }' + #13#10 +
-        'if ($exists) { exit 0 } else { exit 2 }';
-      PSParams := BuildPSNamedParam('GroupName', GroupRDPUsersName);
-      ExecPowerShellScriptContent('check_rdp_group.ps1', PSScript, PSParams, True, ResultCode);
-    end;
-    // Skip adding to the group only when we confirmed it is missing (PS returned 2)
-    if ResultCode <> 2 then
-    begin
-      OutPath := TempFile('user_add_rdp_' + SanitizeFileName(UserName) + '.log');
-      NetRc := RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupRDPUsersName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addrdp_' + UserName);
-      ResultCode := NetRc;
-      if ResultCode <> 0 then
-      begin
-        PSScript := BuildAddGroupMemberPowerShellScript('S-1-5-32-555', UserName, OutPath, 'ADD_RDP_OK');
-        WriteInstallerLog('DEBUG: Fallback: Adding user to Remote Desktop Users via PowerShell (SID: S-1-5-32-555) - resolved name=' + GroupRDPUsersName + ' user=' + UserName);
-        PSParams :=
-          BuildPSNamedParam('GroupSid', 'S-1-5-32-555') + ' ' +
-          BuildPSNamedParam('UserName', UserName) + ' ' +
-          BuildPSNamedParam('OutPath', OutPath) + ' ' +
-          BuildPSNamedParam('SuccessTag', 'ADD_RDP_OK');
-        ExecSavedPowerShellDebugScriptParams('add_rdp_member', UserName, PSScript, PSParams, True, ResultCode);
-        WriteInstallerLog('PowerShell add to Remote Desktop Users exit=' + IntToStr(ResultCode) + ' for ' + UserName);
-      end;
-
-      if FileExists(OutPath) then
-      begin
-        SL := TStringList.Create;
-        try
-          try
-            SL.LoadFromFile(OutPath);
-            WriteInstallerLog('DEBUG: Add to Remote Desktop Users output for ' + UserName + ':');
-            for j := 0 to SL.Count - 1 do
-              WriteInstallerLog('DEBUG: ' + SL[j]);
-          except
-          end;
-        finally
-          SL.Free;
-          DeleteFile(OutPath);
-        end;
-      end;
-
-      if ValidateGroupMembership(GroupRDPUsersName, UserName) then
-        WriteInstallerLog('GROUP_DIAG [POST_ADD_VALIDATE] group=' + GroupRDPUsersName + ' user=' + UserName + ' | member=True')
+      // --- Administrators: the guaranteed RDP authorisation path ----------------
+      // Windows Home editions have no Remote Desktop Users group at all, so this
+      // membership is what actually grants RDP access. Failing to establish it means
+      // the account is unusable for RDP and must be reported as a failure, not as a
+      // warning - that silent downgrade is what produced the original bug report.
+      GroupErr := '';
+      if AddUserToGroupViaADSI(SID_ADMINISTRATORS, GroupAdministratorsName, UserName, GroupErr) then
+        LogInfo('User ' + UserName + ' added to group ' + GroupAdministratorsName)
       else
-        WriteInstallerLog('ERROR: GROUP_DIAG [POST_ADD_VALIDATE] group=' + GroupRDPUsersName + ' user=' + UserName + ' | member=False');
+      begin
+        LogError('ERROR: Could not add ' + UserName + ' to ' + GroupAdministratorsName + ': ' + GroupErr);
+        if FailureReason = '' then
+          FailureReason := 'the account could not be added to ' + GroupAdministratorsName + ' (' + GroupErr + ')';
+      end;
+
+      // --- Remote Desktop Users (only when this edition actually has the group) --
+      if RDPGroupPresenceKnown and (not RDPGroupPresent) then
+        WriteInstallerLog('INFO: Remote Desktop Users group does not exist on this system; skipping that membership for ' + UserName)
+      else
+      begin
+        GroupErr := '';
+        if AddUserToGroupViaADSI(SID_RDP_USERS, GroupRDPUsersName, UserName, GroupErr) then
+          LogInfo('User ' + UserName + ' added to group ' + GroupRDPUsersName)
+        else
+          LogWarn('WARNING: Could not add ' + UserName + ' to ' + GroupRDPUsersName + ': ' + GroupErr +
+            ' (Administrators membership already grants RDP access)');
+      end;
+
+      // --- RDP shortcut: created only for an account that is verified usable ----
+      if FailureReason = '' then
+      begin
+        CreateRDPShortcut(UserName, Password, UserCreatePath);
+        LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
+      end
+      else
+        WriteInstallerLog('INFO: No RDP shortcut was created for ' + UserName + ' because the account is not usable for RDP');
+    end
+    else
+      WriteInstallerLog('INFO: Group membership and shortcut creation were skipped for ' + UserName + ' because its credential could not be verified');
+
+    // Record the outcome so the finish page reports reality instead of intent.
+    // Only accounts that were both created and verified are reported as successful.
+    if (FailureReason = '') and CredentialMatchesEnteredPassword then
+    begin
+      CreatedUsersList.Add(UserName);
+      LogInfo('User ' + UserName + ' created, verified and authorised successfully');
     end
     else
     begin
-      WriteInstallerLog('INFO: Remote Desktop Users group does not exist on this system. Skipping group membership for ' + UserName);
+      if FailureReason = '' then
+        FailureReason := 'the account could not be set up completely';
+      UserCreateFailures.Add(UserName + '|' + FailureReason);
+      LogError('ERROR: User ' + UserName + ' was NOT set up correctly: ' + FailureReason);
     end;
-
-    // Create RDP shortcut using helper function
-    CreateRDPShortcut(UserName, Password, UserCreatePath);
-    LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
+    ClearLoggerSecrets;
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
       LogWarn('CreateRDPUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
   end;
-  LogInfo('CreateRDPUsers completed: ' + IntToStr(UsersList.Count) + ' users processed [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
+
+  if UserCreateFailures.Count > 0 then
+    LogError('CreateRDPUsers finished with ' + IntToStr(UserCreateFailures.Count) + ' failed account(s) and ' +
+      IntToStr(CreatedUsersList.Count) + ' verified account(s)')
+  else
+    LogInfo('CreateRDPUsers completed: ' + IntToStr(CreatedUsersList.Count) + ' account(s) created and verified');
+  LogInfo('CreateRDPUsers processed ' + IntToStr(UsersList.Count) + ' users [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
   LogExit('CreateRDPUsers');
 end;
 
@@ -5786,16 +6610,32 @@ begin
     end;
     Entry := ShortcutsList[i];
     ParseUserEntry(Entry, UserName, Password);
+    // Register the live password so it can never reach the log file, and clear it
+    // again at the end of this iteration.
+    RegisterLoggerSecret(Password);
     LogDebug('CreateShortcutsForExistingUsers: User=' + UserName + ' hasPassword=' + BoolToStr(Password <> ''));
 
     StatusOverlay.Caption := 'Creating RDP shortcut (' + IntToStr(i + 1) + ' of ' + IntToStr(ShortcutsList.Count) + '): ' + UserName;
 
-    // Create RDP shortcut using helper function
-    CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
-    LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
+    // Only build a shortcut whose embedded password is known to work: a shortcut
+    // pointing at a credential that does not match the account is a trap for the
+    // end user. Runs when a password was supplied for this entry.
+    if (Password <> '') and (not ValidateLocalCredential(UserName, Password)) then
+    begin
+      WriteInstallerLog('ERROR: Skipping shortcut for ' + UserName + ' because the supplied password was not accepted');
+      UserCreateFailures.Add(UserName + '|the supplied password was not accepted, so no shortcut was created');
+    end
+    else
+    begin
+      // Create RDP shortcut using helper function
+      CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
+      LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
+    end;
 
     if (GetTickCount - UserStartTick) > PER_USER_TIMEOUT then
       LogWarn('CreateShortcutsForExistingUsers per-user time exceeded ' + IntToStr(PER_USER_TIMEOUT) + ' ms for ' + UserName);
+
+    ClearLoggerSecrets;
   end;
   LogInfo('CreateShortcutsForExistingUsers completed: ' + IntToStr(ShortcutsList.Count) + ' shortcuts [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
   LogExit('CreateShortcutsForExistingUsers');
@@ -5970,7 +6810,7 @@ begin
 
   ScriptPath := TempFile('read_rdp_settings.ps1');
   SaveStringToFile(ScriptPath, PSScript, False);
-  Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   WriteInstallerLog('ReadShortcutSettingsFromRdpFile: PS exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
 
   if not FileExists(OutPath) then exit;
@@ -6113,7 +6953,7 @@ begin
   SaveStringToFile(ScriptPath, PSScript, False);
   LogDebug('WriteShortcutSettingsToRdpFile: Starting PS update for ' + RdpPath);
   OpTick := GetTickCount;
-  Exec(EXE_POWERSHELL, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   LogDebug('WriteShortcutSettingsToRdpFile: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   if ResultCode = 0 then
   begin
@@ -6868,6 +7708,12 @@ begin
   WriteInstallerLog('BUILD_FINGERPRINT=' + BUILD_FINGERPRINT);
   WriteInstallerLog('PRESERVE_USER_CREATE_DEBUG_LOGS=' + BoolToStr(PRESERVE_USER_CREATE_DEBUG_LOGS <> 0));
   WriteInstallerLog('PASSWORD_PIPELINE_DIAG=' + BoolToStr(PASSWORD_PIPELINE_DIAG <> 0));
+
+  // One-shot environment probe. Records which account-management facilities exist
+  // on this host (PowerShell host path, LocalAccounts cmdlets, ADSI, net.exe and
+  // whether the Remote Desktop Users group exists) so that failures are explainable
+  // instead of silent.
+  LogCapabilityProbe;
 
   // Extract RdpSignTool.exe upfront so it's available for all signing operations
   ExtractTemporaryFile('RdpSignTool.exe');
@@ -8133,6 +8979,8 @@ begin
   // Initialize UsersList
   UsersList := TStringList.Create;
   CreatedUsersList := TStringList.Create;
+  UserCreateFailures := TStringList.Create;
+  UserCreateFailureShown := False;
   CurrentUserIndex := 0;
   // Shortcuts selections
   // ShortcutsList already initialized above; nothing else needed
@@ -8149,9 +8997,12 @@ begin
   DebugMode := False;
 
   // Initialize group names with defaults (will be resolved on-demand if needed)
-  // Deferring PowerShell calls to avoid blocking the first UI from showing
-  GroupAdministratorsName := 'Administrators';
-  GroupRDPUsersName := 'Remote Desktop Users';
+  // Deferring PowerShell calls to avoid blocking the first UI from showing.
+  // Both names start empty so they can be resolved from the well-known SIDs by
+  // LogCapabilityProbe (pure .NET SID translation, which does not need the
+  // LocalAccounts cmdlets), with a PowerShell fallback and then an English default.
+  GroupAdministratorsName := '';
+  GroupRDPUsersName := '';
 
   // Build the progress steps area on the Installing page (under the progress bar)
   leftPos := WizardForm.ProgressGauge.Left;
@@ -9065,7 +9916,6 @@ var
   ResultCode: Integer;
   VCRedistPath: string;
   i: Integer;
-  UserInfo: string;
   UserName: string;
   Password: string;
   DeleteErrMsg: string;
@@ -9502,7 +10352,7 @@ begin
         LogKeyValue('Installer temp path', VCRedistPath);
         
         // Start download process
-           Exec(EXE_POWERSHELL, BuildPowerShellArgs(
+           Exec(PSHost, BuildPowerShellArgs(
              '$ProgressPreference = ''SilentlyContinue''; ' +
              '$url = ''' + URL_VCREDIST_X64 + '''; ' +
              '$output = ''' + VCRedistPath + '''; ' +
@@ -9659,18 +10509,22 @@ begin
         except
           // Defensive: avoid crashing installer when logging fails
         end;
+        // CreateRDPUsers populates CreatedUsersList with verified accounts only and
+        // records every failure (with its reason) in UserCreateFailures.
+        CreatedUsersList.Clear;
+        UserCreateFailures.Clear;
         CreateRDPUsers;
         SetStepDone(StepCreateUsers, TXT_CreateUsers);
+        if UserCreateFailures.Count > 0 then
+          StatusOverlay.Caption := 'Some user accounts could not be created correctly.'
+        else
+          StatusOverlay.Caption := 'User accounts created successfully.';
       end;
       
-      // Save usernames before clearing passwords from memory
-      CreatedUsersList.Clear;
-      for i := 0 to UsersList.Count - 1 do
-      begin
-        UserInfo := UsersList[i];
-        ParseUserEntry(UserInfo, UserName, Password);
-        CreatedUsersList.Add(UserName);
-      end;
+      // CreatedUsersList was populated inside CreateRDPUsers with the accounts that
+      // were created AND verified. Accounts that could not be set up are recorded in
+      // UserCreateFailures and are reported on the finish page instead of being
+      // listed as successes.
       
       // Clear passwords from memory immediately after use
       ClearPasswordsFromMemory;
@@ -9775,7 +10629,7 @@ begin
         PortNumber := RDP_LISTEN_PORT;
       
       ResultCode := 0;
-      Exec(EXE_POWERSHELL, BuildPowerShellArgs('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) + ' -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { exit 0 } else { exit 1 }', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(PSHost, BuildPowerShellArgs('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) + ' -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { exit 0 } else { exit 1 }', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       
       if ResultCode = 0 then
       begin
@@ -10487,6 +11341,26 @@ begin
           WriteInstallerLog('CurPageChanged: Created ' + IntToStr(CreatedUsersList.Count) + ' users');
         end;
 
+        // Report anything that did NOT complete, including the reason, so the wizard
+        // can never present a half-finished account as a success again.
+        if UserCreateFailures.Count > 0 then
+        begin
+          WizardForm.FinishedHeadingLabel.Caption := 'Installation Completed With Problems';
+          CompletionText := CompletionText +
+            'The following user account(s) could NOT be set up correctly:' + #13#10;
+          for i := 0 to UserCreateFailures.Count - 1 do
+          begin
+            ParseUserEntry(UserCreateFailures[i], UserName, Password);
+            CompletionText := CompletionText + '- ' + UserName + ': ' + Password + #13#10;
+          end;
+          CompletionText := CompletionText + #13#10 +
+            'These accounts were not added to ' + GroupAdministratorsName + ' and no RDP shortcut was created for them.' + #13#10 +
+            'Any account that could not be cleaned up was disabled, so it cannot be used to sign in.' + #13#10#13#10 +
+            'Click "Save Install Log" for the full details, then re-run the installer and choose ' +
+            '"Create Users Only" once the problem above has been resolved.' + #13#10#13#10;
+          WriteInstallerLog('CurPageChanged: Reported ' + IntToStr(UserCreateFailures.Count) + ' failed user account(s) on the finish page');
+        end;
+
         // List shortcuts created for existing users (if any)
         if ShortcutsList.Count > 0 then
         begin
@@ -10533,6 +11407,24 @@ begin
         'It is highly recommended to set it to Off via: Windows Security app > App & browser control > Smart App Control.';
       MsgBox('Smart App Control is enabled. It is highly recommended to set it to Off under:' + #13#10 +
              'Windows Security app > App & browser control > Smart App Control', mbInformation, MB_OK);
+    end;
+
+    // Surface a popup when user creation had problems (shown only once), so a
+    // failed account can never be mistaken for a successful installation.
+    if (UserCreateFailures.Count > 0) and (not UserCreateFailureShown) then
+    begin
+      UserCreateFailureShown := True;
+      FailNames := '';
+      for i := 0 to UserCreateFailures.Count - 1 do
+      begin
+        ParseUserEntry(UserCreateFailures[i], UserName, Password);
+        FailNames := FailNames + '- ' + UserName + ': ' + Password + #13#10;
+      end;
+      MsgBox('Some user accounts could not be set up correctly.' + #13#10#13#10 +
+             FailNames + #13#10 +
+             'No RDP shortcut was created for these accounts, and anything that could not be ' + #13#10 +
+             'cleaned up was disabled so it cannot be used to sign in.' + #13#10#13#10 +
+             'Please use "Save Install Log" and re-run the installer after resolving the issue.', mbError, MB_OK);
     end;
 
     WizardForm.FinishedLabel.Caption := CompletionText;
@@ -10620,7 +11512,7 @@ begin
     InstallerPath := TempFile('mstsc_installer.exe');
     LogDebug('Installer temp path: ' + InstallerPath);
     DownloadTick := GetTickCount;
-    Exec(EXE_POWERSHELL, BuildPowerShellArgs('$out = ''' + InstallerPath + '''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(PSHost, BuildPowerShellArgs('$out = ''' + InstallerPath + '''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     LogDebug('Download exit code=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - DownloadTick) + 'ms]');
     LogDebug('Installer file exists after download: ' + BoolToStr(FileExists(InstallerPath)));
     if (ResultCode = 0) and FileExists(InstallerPath) and IsSignedByMicrosoftCorporation(InstallerPath) then
