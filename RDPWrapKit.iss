@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.6.3"
-#define APP_VERSION_FILEINFO "0.6.3.0"
+#define APP_VERSION_STRING "0.6.4"
+#define APP_VERSION_FILEINFO "0.6.4.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
@@ -447,6 +447,10 @@ var
   AdsiAvailable: Boolean;
   RDPGroupPresent: Boolean;          // True only when SID S-1-5-32-555 resolved to a real group
   RDPGroupPresenceKnown: Boolean;    // False when group presence could not be determined
+  // Outcome of the startup GitHub release check. That check runs before the logger
+  // is initialized, which is why its cost was invisible in field logs; the result is
+  // buffered here and written once the log file exists.
+  UpdateCheckStatus: string;
 
   // -------------------------------------------------------------------------
   // USER CREATION OUTCOME TRACKING
@@ -622,7 +626,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = '2026-10-16-1-56-17';
+  BUILD_FINGERPRINT = '2026-10-16-13-40-44';
 
 // External Windows API declarations
 
@@ -671,6 +675,114 @@ function GetSysColor(nIndex: DWORD): DWORD;
 
 function MessageBox(hWnd: Integer; lpText, lpCaption: String; uType: Cardinal): Integer;
   external 'MessageBoxW@user32.dll stdcall';
+
+// ---------------------------------------------------------------------------
+// SPAWN-FREE IDENTITY HELPERS
+// ---------------------------------------------------------------------------
+// These replace child-process calls on the startup path: well-known SID to
+// localized-name resolution and the administrator check now cost microseconds
+// instead of a PowerShell process (measured at ~1s per spawn in field logs).
+function ConvertStringSidToSidW(StringSid: String; var Sid: Cardinal): Boolean;
+  external 'ConvertStringSidToSidW@advapi32.dll stdcall';
+
+function LookupAccountSidW(lpSystemName: String; lpSid: Cardinal; lpName: String; var cchName: Cardinal; lpReferencedDomainName: String; var cchReferencedDomainName: Cardinal; var peUse: Cardinal): Boolean;
+  external 'LookupAccountSidW@advapi32.dll stdcall';
+
+function CheckTokenMembership(TokenHandle: Cardinal; SidToCheck: Cardinal; var IsMember: Cardinal): Boolean;
+  external 'CheckTokenMembership@advapi32.dll stdcall';
+
+function GetUserNameW(lpBuffer: String; var pcbBuffer: Cardinal): Boolean;
+  external 'GetUserNameW@advapi32.dll stdcall';
+
+function LocalFreeMem(hMem: Cardinal): Cardinal;
+  external 'LocalFree@kernel32.dll stdcall';
+
+function CreateFileW(lpFileName: String; dwDesiredAccess, dwShareMode, lpSecurityAttributes: Cardinal; dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile: Cardinal): Cardinal;
+  external 'CreateFileW@kernel32.dll stdcall';
+
+function GetFileSize(hFile: Cardinal; lpFileSizeHigh: Cardinal): Cardinal;
+  external 'GetFileSize@kernel32.dll stdcall';
+
+// Copy a Win32 name buffer into a Pascal string, stopping at the first null.
+// The Win32 name APIs disagree about whether the returned length includes the
+// terminating null - verified empirically: GetUserNameW *does* count it while
+// LookupAccountSidW does *not*. Length arithmetic therefore silently truncates
+// names ("Administrators" becomes "Administrator"), which in turn makes every
+// net.exe fallback that uses the name fail with "group not found". Walking the
+// buffer until the terminator is the only safe option.
+function TrimWin32Buffer(const S: string): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+  begin
+    if S[i] = #0 then
+      break;
+    Result := Result + S[i];
+  end;
+  Result := Trim(Result);
+end;
+
+// Name of the account that owns the current (possibly elevated) process token
+function WinGetCurrentUserName: string;
+var
+  Buf: string;
+  Size: Cardinal;
+begin
+  Result := '';
+  Size := 256;
+  SetLength(Buf, Size);
+  if GetUserNameW(Buf, Size) then
+  begin
+    if (Size > 0) and (Size <= Length(Buf)) then
+      SetLength(Buf, Size);
+    Result := TrimWin32Buffer(Buf);
+  end;
+end;
+
+// True when the current process token is a member of the given well-known SID.
+// CheckTokenMembership inspects the effective token, so this correctly reports
+// the privilege the installer is actually running with.
+function TokenContainsSid(const SidString: string): Boolean;
+var
+  SidPtr: Cardinal;
+  IsMember: Cardinal;
+begin
+  Result := False;
+  SidPtr := 0;
+  if not ConvertStringSidToSidW(SidString, SidPtr) then
+    exit;
+  try
+    IsMember := 0;
+    if CheckTokenMembership(0, SidPtr, IsMember) then
+      Result := (IsMember <> 0);
+  finally
+    LocalFreeMem(SidPtr);
+  end;
+end;
+
+// File size in bytes, or -1 when the file cannot be opened.
+// Uses CreateFileW/GetFileSize so no Inno file API version differences apply and
+// no child process is created. TermWrap.dll is far below the 4 GB that
+// GetFileSize can express without the high-order DWORD.
+function WinGetFileSize(const FileName: string): Int64;
+var
+  H: Cardinal;
+  Sz: Cardinal;
+begin
+  Result := -1;
+  H := CreateFileW(FileName, 0, 7, 0, 3, 0, 0);
+  if H = $FFFFFFFF then
+    exit;
+  try
+    Sz := GetFileSize(H, 0);
+    if Sz <> $FFFFFFFF then
+      Result := Sz;
+  finally
+    CloseHandle(H);
+  end;
+end;
 
 // ---------------------------------------------------------------------------
 // INTERACTIVE (LAUNCHER) USER PATH RESOLUTION
@@ -755,12 +867,24 @@ begin
   Result := '';
   try
     Http := CreateOleObject('WinHttp.WinHttpRequest.5.1');
-    Http.Open('GET', 'https://api.github.com/repos/cpdx4/RDPWrapKit/releases/latest', False);
+    // Bound every phase before opening: this runs before the first UI is shown, and
+    // with WinHTTP's defaults an unreachable or proxied GitHub endpoint stalled the
+    // wizard for tens of seconds with no timeout. The wait below is capped again.
+    Http.SetTimeouts(3000, 3000, 3000, 5000);
+    // Asynchronous request so a slow network cannot delay the wizard
+    Http.Open('GET', 'https://api.github.com/repos/cpdx4/RDPWrapKit/releases/latest', True);
     Http.SetRequestHeader('User-Agent', 'RDPWrapKit-Installer');
     Http.Send('');
+    // Wait at most 1.2s for the response, then give up silently. A timed out or
+    // failed request leaves Status at 0, so the check below skips the prompt.
+    Http.WaitForResponse(1200);
     if Http.Status <> 200 then
+    begin
+      UpdateCheckStatus := 'no usable response within 1200ms, check skipped';
       Exit;
+    end;
     Response := Http.ResponseText;
+    UpdateCheckStatus := 'HTTP 200 but no release tag could be parsed';
     // Extract the value of "tag_name":"..."
     TagStart := Pos('"tag_name"', Response);
     if TagStart = 0 then
@@ -782,8 +906,10 @@ begin
     if (Length(Tag) > 0) and (Tag[1] = 'v') then
       Tag := Copy(Tag, 2, Length(Tag) - 1);
     Result := Tag;
+    UpdateCheckStatus := 'latest release tag=' + Tag;
   except
     Result := '';
+    UpdateCheckStatus := 'no response / blocked (offline, proxy, or GitHub API rate limit)';
   end;
 end;
 
@@ -803,6 +929,7 @@ begin
   // Only prompt when a version string was returned and it is strictly newer
   if (LatestVersion <> '') and (CompareVersions(LatestVersion, CurrentVersion) > 0) then
   begin
+    UpdateCheckStatus := UpdateCheckStatus + ' | newer version ' + LatestVersion + ' found, prompt shown';
     Msg := 'A newer version (v' + LatestVersion + ') is available.' + #13#10#13#10
          + 'Open the latest release page instead?';
     Answer := MsgBox(Msg, mbConfirmation, MB_YESNOCANCEL);
@@ -813,7 +940,9 @@ begin
     end else if Answer = IDCANCEL then
       Result := False;
     // IDNO falls through with Result = True (install anyway)
-  end;
+  end
+  else
+    UpdateCheckStatus := UpdateCheckStatus + ' | current version is up to date, no prompt';
 end;
 
 // =============================================================================
@@ -1460,6 +1589,28 @@ begin
   end;
 
   AdminGroupName := GetLocalizedGroupName('S-1-5-32-544', 'Administrators');
+
+  // Fast path (no child process at all): compare the account owning this elevated
+  // process with the account that launched it. When they are the same account, the
+  // elevated Administrator token this process already holds proves the launcher is
+  // an administrator, so no group enumeration is required. Both the SID lookup and
+  // the token check are in-process Win32 calls (microseconds).
+  if CompareText(WinGetCurrentUserName, LauncherName) = 0 then
+  begin
+    Result := TokenContainsSid('S-1-5-32-544');
+    LauncherIsAdmin := Result;
+    if Result then
+      WriteInstallerLog('Launcher admin check: user=' + LauncherName +
+                        ' isAdmin=True (elevated token, no group lookup needed) -> advisory page skipped')
+    else
+      WriteInstallerLog('Launcher admin check: user=' + LauncherName +
+                        ' isAdmin=False (token check) -> advisory page shown');
+    exit;
+  end;
+
+  // Slow path: Setup is elevated with a DIFFERENT administrator's credentials
+  // ("Run as different user"), so the launcher's own membership has to be checked.
+  WriteInstallerLog('Launcher admin check: elevated as a different account; checking group membership of ' + LauncherName);
   Result := ValidateGroupMembership(AdminGroupName, LauncherName);
   LauncherIsAdmin := Result;
   if Result then
@@ -2731,11 +2882,54 @@ begin
   LogExit('PromptManualDownload');
 end;
 
+// Keep the persistent log directory bounded. Timestamped file names sort
+// chronologically, so the oldest logs are dropped first.
+procedure PruneOldInstallerLogs(const LogDir: string; const Keep: Integer);
+var
+  FindRec: TFindRec;
+  Names: TStringList;
+  i: Integer;
+begin
+  if not DirExists(LogDir) then
+    exit;
+  Names := TStringList.Create;
+  try
+    if FindFirst(LogDir + '\RDPWrapKit_install_*.log', FindRec) then
+    begin
+      try
+        repeat
+          Names.Add(FindRec.Name);
+        until not FindNext(FindRec);
+      finally
+        FindClose(FindRec);
+      end;
+    end;
+    Names.Sort;
+    // If there is nothing to prune this loop simply does not execute
+    for i := 0 to Names.Count - Keep - 1 do
+      DeleteFile(LogDir + '\' + Names[i]);
+  finally
+    Names.Free;
+  end;
+end;
+
 procedure InitInstallerLog;
 var
   HeaderTS: string;
+  LogDir: string;
 begin
-  InstallLogPath := ExpandConstant(INSTALL_LOG_PATH);
+  // Persist the log OUTSIDE {tmp}, because Setup deletes its temp folder on exit -
+  // which destroyed exactly the timing evidence ([DURATION:...ms] lines) this log
+  // exists to provide. A stable path also lets support collect it without the user
+  // pressing "Save Install Log". Falls back to {tmp} if ProgramData is not writable.
+  LogDir := ExpandConstant('{commonappdata}\RDPWrapKit\Logs');
+  if ForceDirectories(LogDir) then
+  begin
+    PruneOldInstallerLogs(LogDir, 10);
+    InstallLogPath := LogDir + '\RDPWrapKit_install_' + GetDateTimeString('yyyymmdd-hhnnss', #0, #0) + '.log';
+  end
+  else
+    InstallLogPath := ExpandConstant(INSTALL_LOG_PATH);
   LoggerProcId := GetCurrentProcessId;
   LoggerThreadId := GetCurrentThreadId;
   LoggerOpActive := False;
@@ -2752,6 +2946,10 @@ begin
   LogSectionHeader('ENVIRONMENT SNAPSHOT');
   LogSystemInfo;
   LogInfo('Logger initialized: PID=0x' + GetProcessIdHex + ' TID=0x' + GetThreadIdHex);
+  // Report the startup release check outcome here: it runs before this log file
+  // exists, so it would otherwise leave no trace at all.
+  LogInfo('UpdateCheck: ' + UpdateCheckStatus);
+  LogInfo('Installer log path: ' + InstallLogPath);
 end;
 
 procedure WriteInstallerLog(const Msg: string);
@@ -3882,32 +4080,41 @@ begin
   Result := Result + '}';
 end;
 
-// Resolve localized group name from a well-known SID; fallback to provided name
+// Resolve a well-known SID to its localized name, with no child process.
+// This used to spawn PowerShell (~1s measured in field logs) and is called from
+// the launcher admin check, so it sat directly on the user-visible path.
 function GetLocalizedGroupName(const Sid, Fallback: string): string;
 var
-  ResultCode: Integer;
-  OutPath: string;
-  NameText: AnsiString;
+  SidPtr: Cardinal;
+  NameBuf: string;
+  DomainBuf: string;
+  ResolvedName: string;
+  CchName: Cardinal;
+  CchDomain: Cardinal;
+  UseType: Cardinal;
 begin
   Result := Fallback;
-  OutPath := TempFile('grp_' + Sid + '.txt');
-  if ExecPowerShellHidden(
-    '$ErrorActionPreference = ''Stop''; ' +
-    '$sid = New-Object System.Security.Principal.SecurityIdentifier(''' + Sid + '''); ' +
-    '$acct = $sid.Translate([System.Security.Principal.NTAccount]).Value; ' +
-    '$grp = $acct.Split([char]92)[-1]; ' +
-    '[System.IO.File]::WriteAllText(''' + OutPath + ''', $grp)'
-    , ResultCode) then
-  begin
-    if (ResultCode = 0) and FileExists(OutPath) then
+  SidPtr := 0;
+  if not ConvertStringSidToSidW(Sid, SidPtr) then
+    exit;
+  try
+    CchName := 256;
+    CchDomain := 256;
+    SetLength(NameBuf, CchName);
+    SetLength(DomainBuf, CchDomain);
+    if LookupAccountSidW('', SidPtr, NameBuf, CchName, DomainBuf, CchDomain, UseType) then
     begin
-      if LoadStringFromFile(OutPath, NameText) then
-      begin
-        if Trim(String(NameText)) <> '' then
-          Result := Trim(String(NameText));
-      end;
+      // Do NOT trust CchName arithmetic: verified empirically that this API does
+      // not count the terminating null the way GetUserNameW does, so subtracting
+      // one truncates the name ("Administrators" -> "Administrator").
+      if (CchName > 0) and (CchName <= Length(NameBuf)) then
+        SetLength(NameBuf, CchName);
+      ResolvedName := TrimWin32Buffer(NameBuf);
+      if ResolvedName <> '' then
+        Result := ResolvedName;
     end;
-    DeleteFile(OutPath);
+  finally
+    LocalFreeMem(SidPtr);
   end;
 end;
 
@@ -4909,33 +5116,47 @@ end;
 
 
 // Returns the version string of the installed TermWrap.dll (e.g. "0.0.6.0").
-// Uses PowerShell to read the FileVersionRaw from the file at the registry-configured path.
+// Reads the version resource directly with the Inno API. This used to spawn
+// PowerShell (about 1s per call, and it is called twice) on the wizard startup
+// path, which was the single largest contributor to the UAC-to-first-page delay.
+// Inno Setup 7 signature: GetVersionNumbersString(FileName, var VersionString).
 // Returns empty string if TermWrap is not installed or the file cannot be read.
 function GetInstalledTermWrapVersion(): string;
 var
   ServiceDllPath: string;
+  VersionStr: string;
 begin
   Result := '';
   if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
   begin
     if (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0) and FileExists(ServiceDllPath) then
-      Result := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString()');
+    begin
+      VersionStr := '';
+      if GetVersionNumbersString(ServiceDllPath, VersionStr) then
+        Result := VersionStr;
+    end;
   end;
 end;
 
 
 // Returns the file size (in bytes) of the installed TermWrap.dll as a string.
-// Uses PowerShell to read the Length property from the file at the registry-configured path.
+// Uses Win32 CreateFileW/GetFileSize directly - no PowerShell process, which is
+// what made this a ~1s cost on the wizard startup path.
 // Returns empty string if TermWrap is not installed or the file cannot be read.
 function GetInstalledTermWrapSize(): string;
 var
   ServiceDllPath: string;
+  Sz: Int64;
 begin
   Result := '';
   if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
   begin
     if (Pos('termwrap.dll', Lowercase(ServiceDllPath)) > 0) and FileExists(ServiceDllPath) then
-      Result := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.Length.ToString()');
+    begin
+      Sz := WinGetFileSize(ServiceDllPath);
+      if Sz >= 0 then
+        Result := Int64ToStr(Sz);
+    end;
   end;
 end;
 
@@ -7709,11 +7930,11 @@ begin
   WriteInstallerLog('PRESERVE_USER_CREATE_DEBUG_LOGS=' + BoolToStr(PRESERVE_USER_CREATE_DEBUG_LOGS <> 0));
   WriteInstallerLog('PASSWORD_PIPELINE_DIAG=' + BoolToStr(PASSWORD_PIPELINE_DIAG <> 0));
 
-  // One-shot environment probe. Records which account-management facilities exist
-  // on this host (PowerShell host path, LocalAccounts cmdlets, ADSI, net.exe and
-  // whether the Remote Desktop Users group exists) so that failures are explainable
-  // instead of silent.
-  LogCapabilityProbe;
+  // NOTE: the environment probe (LogCapabilityProbe) is deliberately NOT run here.
+  // It spawns one PowerShell process (~1s) and its output is log-only, so running
+  // it during InitializeWizard delayed the first page for no user-visible benefit.
+  // It is invoked lazily from CreateRDPUsers, where a short pause on the Installing
+  // page is expected, and its results are cached in CapabilityProbeDone.
 
   // Extract RdpSignTool.exe upfront so it's available for all signing operations
   ExtractTemporaryFile('RdpSignTool.exe');
