@@ -6,17 +6,18 @@ Below is a detailed flowchart of the RDPWrapKit installer wizard pages and user 
 
 ```mermaid
 flowchart TD
-	Welcome[Welcome Page]
-	Options[Install Options Page]
+	Options[Setup Options Page]
 	UserPage[Create Users Page]
 	ExistingShortcuts[Select Existing Users Page]
 	EditShortcuts[Edit Existing Shortcut Settings Page]
 	ShortcutSettings[Shortcut Settings Page]
 	EditSystem[Edit System-wide Settings Page]
+	QuickFixes[Quick Fixes Page]
+	ShowRDPInfo[Show RDP Info Page]
+	RemoveUsers[Remove Users Page]
+	RemoveUsersConfirm[Remove Users Confirm Page]
 	Installing[Installing Page]
 	Finish[Finish Page]
-
-	Welcome --> Options
 
 	%% INSTALL MODE — Path A: Install TermWrap only
 	Options -->|"Install<br/>Install TermWrap ✓<br/>Create RDP shortcuts ✗"| Installing
@@ -36,18 +37,33 @@ flowchart TD
 	%% EDIT SYSTEM-WIDE SETTINGS MODE
 	Options -->|"Edit System-wide<br/>settings"| EditSystem
 
+	%% QUICK FIXES MODE
+	Options -->|"Quick Fixes"| QuickFixes
+	QuickFixes --> Installing
+
+	%% SHOW RDP INFO MODE
+	Options -->|"Show RDP Info"| ShowRDPInfo
+	ShowRDPInfo --> Finish
+	ShowRDPInfo -.->|Back| Options
+
+	%% REMOVE USERS MODE
+	Options -->|"Remove user accounts"| RemoveUsers
+	RemoveUsers --> RemoveUsersConfirm
+	RemoveUsersConfirm --> Installing
+
 	%% UNINSTALL MODE
 	Options -->|"Uninstall (keeps users)"| Installing
 
 	%% CONVERGENCE POINTS
 	ShortcutSettings --> Installing
 	EditSystem --> Installing
+	QuickFixes --> Installing
+	RemoveUsersConfirm --> Installing
 	Installing --> Finish
 ```
 
 ### Page Descriptions
 
-- **Welcome Page**: Shows credits, project links, and a brief intro.
 - **Install Options**: Grouped into three titled sections — **Setup** (the Install mode plus its Install TermWrap / Create RDP shortcuts sub-options), **Settings and troubleshooting** (Edit existing shortcut settings, Edit System-wide RDP settings, Show RDP Info, Quick Fixes) and **Cleanup** (Remove user accounts, Uninstall). The sections are visual grouping only: every radio remains parented to the page surface, so mutual exclusivity, tab order and all seven mode behaviours are unchanged.
 - **Create Users Page**: Add new local users and set passwords for RDP access (shown only when Install + Create RDP shortcuts + Create new users is selected).
 - **Select Existing Users Page**: Pre-populated list of local users with password fields; user selects which to generate shortcuts for (shown only when Install + Create RDP shortcuts + Use existing users is selected).
@@ -61,16 +77,19 @@ flowchart TD
 
 ## Install Mode Architecture
 
-The installer has **four top-level modes**, selected via radio buttons on the Options page. The Install mode is further controlled by two boolean flags and one integer enum:
+The installer has **seven top-level modes**, selected via radio buttons on the Options page. The Install mode is further controlled by two boolean flags and one integer enum:
 
 | Mode Constant | Flags | Description | Pages Shown |
 |---|---|---|---|
-| **`installModeInstall`** | `DoInstallTermWrap=T, DoCreateRdpShortcuts=F` | **Path A**: Install TermWrap only | Welcome → Options → Installing → Finish |
-| | `DoCreateRdpShortcuts=T, CreateUserMode=createUserModeNew` | **Path B**: Create new users + shortcuts (TermWrap optional) | Welcome → Options → UserPage → ShortcutSettings → Installing → Finish |
-| | `DoCreateRdpShortcuts=T, CreateUserMode=createUserModeExisting` | **Path C**: Use existing users + shortcuts (TermWrap optional) | Welcome → Options → ExistingUsers → ShortcutSettings → Installing → Finish |
-| **`installModeEditShortcuts`** | — | Edit, modify, or remove existing .rdp shortcuts | Welcome → Options → EditShortcuts → ShortcutSettings → Installing → Finish |
-| **`installModeEditSystemwideSettings`** | — | Change RDP port, enable/disable RDP, login display, etc. | Welcome → Options → EditSystemwideSettings → Installing → Finish |
-| **`installModeUninstall`** | — | Removes TermWrap components and shortcuts; user accounts are kept | Welcome → Options → Installing → Finish |
+| **`installModeInstall`** | `DoInstallTermWrap=T, DoCreateRdpShortcuts=F` | **Path A**: Install TermWrap only | Options → Installing → Finish |
+| | `DoCreateRdpShortcuts=T, CreateUserMode=createUserModeNew` | **Path B**: Create new users + shortcuts (TermWrap optional) | Options → UserPage → ShortcutSettings → Installing → Finish |
+| | `DoCreateRdpShortcuts=T, CreateUserMode=createUserModeExisting` | **Path C**: Use existing users + shortcuts (TermWrap optional) | Options → ExistingUsers → ShortcutSettings → Installing → Finish |
+| **`installModeEditShortcuts`** | — | Edit, modify, or remove existing .rdp shortcuts | Options → EditShortcuts → ShortcutSettings → Installing → Finish |
+| **`installModeEditSystemwideSettings`** | — | Change RDP port, enable/disable RDP, login display, etc. | Options → EditSystemwideSettings → Installing → Finish |
+| **`installModeShowRDPInfo`** | — | Display-only page with current RDP status and RemoteFX settings | Options → ShowRDPInfo → Finish |
+| **`installModeQuickFixes`** | — | Targeted troubleshooting repairs (e.g. restart RDP, Low FPS and Lag) | Options → QuickFixes → Installing → Finish |
+| **`installModeRemoveUsers`** | — | Deletes selected local user accounts (destructive) | Options → RemoveUsers → Confirm → Installing → Finish |
+| **`installModeUninstall`** | — | Removes TermWrap components and shortcuts; user accounts are kept | Options → Installing → Finish |
 
 ### Key Variables
 
@@ -87,17 +106,18 @@ The installer has **four top-level modes**, selected via radio buttons on the Op
 
 ## Options Page: Mode Selection Flow
 
-1. **Welcome Page**: Displays project info and credits.
-2. **Options Page**: User selects one of the four install modes via radio buttons, laid out in three titled section cards (**Setup**, **Settings and troubleshooting**, **Cleanup**). The first radio is captioned **"Install RDPWrapKit on this PC"** and owns the Install sub-options.
-   - If **"Install"** is selected, two additional controls appear:
+1. **Options Page**: The first page. It shows the RDPWrapKit logo plus a single-line credit, then the user selects the desired mode via radio buttons laid out in three titled section cards (**Setup**, **Settings and troubleshooting**, **Cleanup**). The first radio is captioned **"Install RDPWrapKit on this PC"** and owns the Install sub-options.
+   - If **"Install"** is selected, two sub-options become enabled:
      - `chkInstallTermWrap` (default: checked) — Install TermWrap binaries → sets `DoInstallTermWrap`
-     - `chkCreateRdpShortcuts` — **"Create RDP shortcuts"** (default: unchecked) → sets `DoCreateRdpShortcuts`
-     - If **"Create RDP shortcuts"** is checked, a radio group appears:
-       - `rbCreateUsers` — **"Create new users"** → sets `CreateUserMode = createUserModeNew`
+     - `chkCreateRdpShortcuts` — **"Create RDP shortcuts"** (default: checked) → sets `DoCreateRdpShortcuts`
+     - Both sub-options stay visible but greyed out whenever the Install mode is not selected.
+     - Once **"Create RDP shortcuts"** is checked, the user-source radios are enabled:
+       - `rbCreateUsers` — **"Create new users"** (default) → sets `CreateUserMode = createUserModeNew`
        - `rbUseExistingUsers` — **"Use existing users"** → sets `CreateUserMode = createUserModeExisting`
-3. **Mode-Specific Pages**: Based on selections, relevant pages are shown or skipped.
-4. **Installing Page**: All flows converge here to execute the selected operations.
-5. **Finish Page**: Final summary and log access.
+       - Auto-detection: if a Desktop `.lnk` targets `rdp.exe`, "Use existing users" is pre-selected on first display and its sub-note appears under the radio row.
+2. **Mode-Specific Pages**: Based on selections, relevant pages are shown or skipped.
+3. **Installing Page**: All flows converge here to execute the selected operations.
+4. **Finish Page**: Final summary and log access.
 
 ### Options Page Navigation Logic (Internal Decision Tree)
 
@@ -140,7 +160,7 @@ When the user clicks Next on the Options page, the installer evaluates selection
 #### Path A: Install TermWrap ONLY
 
 ```
-Welcome → Options → Installing → Finish
+Options → Installing → Finish
 ```
 
 **Options page selections**:
@@ -164,7 +184,7 @@ Welcome → Options → Installing → Finish
 #### Path B: Install + Create RDP shortcuts + Create new users
 
 ```
-Welcome → Options → UserPage → ShortcutSettings → Installing → Finish
+Options → UserPage → ShortcutSettings → Installing → Finish
 ```
 
 **Options page selections**:
@@ -195,7 +215,7 @@ When `DoInstallTermWrap = False`, steps 1–6 and 9–11 are skipped; only user 
 #### Path C: Install + Create RDP shortcuts + Use existing users
 
 ```
-Welcome → Options → ExistingUsers → ShortcutSettings → Installing → Finish
+Options → ExistingUsers → ShortcutSettings → Installing → Finish
 ```
 
 **Options page selections**:
@@ -227,7 +247,7 @@ When `DoInstallTermWrap = False`, steps 1–6 and 8–10 are skipped; only short
 **Purpose**: Modify settings of an existing .rdp shortcut file, or open it in the full Remote Desktop Connection editor.
 
 ```
-Welcome → Options → EditShortcuts → ShortcutSettings → Installing → Finish
+Options → EditShortcuts → ShortcutSettings → Installing → Finish
 ```
 
 **User Actions**:
@@ -246,7 +266,7 @@ Welcome → Options → EditShortcuts → ShortcutSettings → Installing → Fi
 **Purpose**: Modify system-level RDP configuration without affecting user accounts or shortcut files.
 
 ```
-Welcome → Options → EditSystemwideSettings → Installing → Finish
+Options → EditSystemwideSettings → Installing → Finish
 ```
 
 **User Actions**:
@@ -268,7 +288,7 @@ Welcome → Options → EditSystemwideSettings → Installing → Finish
 **Purpose**: Remove TermWrap components and generated shortcuts. Local user accounts are preserved.
 
 ```
-Welcome → Options → Installing → Finish
+Options → Installing → Finish
 ```
 
 **No further user interaction** after mode selection — all steps run automatically.
@@ -292,6 +312,11 @@ The installer dynamically shows or skips pages based on the selected mode and fl
 | `Page_ShortcutSettings` | `installModeInstall` AND `DoCreateRdpShortcuts = True`, OR `installModeEditShortcuts` | All other modes |
 | `EditShortcutPage` | `installModeEditShortcuts` only | All other modes |
 | `EditSystemwideSettingsPage` | `installModeEditSystemwideSettings` only | All other modes |
+| `Page_ShowRDPInfo` | `installModeShowRDPInfo` only | All other modes |
+| `QuickFixesPage` | `installModeQuickFixes` only | All other modes |
+| `QuickFixLowFPSPage` | `installModeQuickFixes` AND the "Low FPS and Lag" fix is selected | All other combinations |
+| `Page_RemoveUsers` | `installModeRemoveUsers` only | All other modes |
+| `RemoveUsersConfirmPage` | `installModeRemoveUsers` only | All other modes |
 | `wpSelectDir` (Inno built-in) | Never | Always skipped |
 | `wpReady` (Inno built-in) | Never | Always skipped |
 
@@ -303,30 +328,42 @@ The installer dynamically shows or skips pages based on the selected mode and fl
 - ShortcutSettings → Skipped
 - EditShortcuts → Skipped
 - EditSystemwideSettings → Skipped
+- RemoveUsers / RemoveUsersConfirm → Skipped
 - Installing → Shown ✓
 
 **Path B: Install + Create RDP shortcuts + Create new users**
 - UserPage → Shown ✓
 - ExistingUsers → Skipped
 - ShortcutSettings → Shown ✓
+- RemoveUsers / RemoveUsersConfirm → Skipped
 - Installing → Shown ✓
 
 **Path C: Install + Create RDP shortcuts + Use existing users**
 - UserPage → Skipped
 - ExistingUsers → Shown ✓ (pre-populated with local accounts)
 - ShortcutSettings → Shown ✓
+- RemoveUsers / RemoveUsersConfirm → Skipped
 - Installing → Shown ✓
 
 **Mode: Edit existing shortcut settings**
 - EditShortcuts → Shown ✓
 - ShortcutSettings → Shown ✓
+- RemoveUsers / RemoveUsersConfirm → Skipped
 - Installing → Shown ✓
 
 **Mode: Edit System-wide settings**
 - EditSystemwideSettings → Shown ✓
+- RemoveUsers / RemoveUsersConfirm → Skipped
+- Installing → Shown ✓
+
+**Mode: Remove user accounts**
+- RemoveUsers → Shown ✓
+- RemoveUsersConfirm → Shown ✓
+- All other option pages → Skipped
 - Installing → Shown ✓
 
 **Mode: Uninstall (keeps users)**
+- RemoveUsers / RemoveUsersConfirm → Skipped
 - Installing → Shown ✓
 
 ---

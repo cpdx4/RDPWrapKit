@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.6.2"
-#define APP_VERSION_FILEINFO "0.6.2.0"
+#define APP_VERSION_STRING "0.6.3"
+#define APP_VERSION_FILEINFO "0.6.3.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
@@ -152,7 +152,6 @@ function RunNetHiddenCapture(const Params, OutTag: string): Integer; forward;
 
 var
   Page_InstallOptions: TWizardPage;
-  WelcomePage: TWizardPage;
   UserPage: TInputQueryWizardPage;
   // AdvancedPage removed - single create-shortcuts page retained
   EditSystemwideSettingsPage: TWizardPage;  // Main Edit System-wide settings page
@@ -359,8 +358,6 @@ var
   // Localized group names (resolved at runtime)
   GroupAdministratorsName: string;
   GroupRDPUsersName: string;
-  // Credits / license blurb on welcome page
-  CreditsText: TRichEditViewer;
   // Rich text control on finished page to show long completion messages
   FinishedText: TLabel;
   // Button to open install log on finish page
@@ -543,7 +540,7 @@ const
   URL_TERMWRAP = 'https://github.com/llccd/TermWrap';
   URL_BSGH_COMMUNITY = 'https://discord.gg/bsgh';
   URL_BSS_GRINDERS = 'https://discord.gg/K5U3RdGXh6';
-  URL_PROJECT_HOME = 'https://cpdx4.github.io/RDPWrapKit/';
+  URL_PROJECT_HOME = 'https://rdpwrapkit.cpdx4.space';
 
   // -------------------------------------------------------------------------
   // INSTALL MODE CONSTANTS
@@ -580,7 +577,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = '2026-9-19-21-5-0';
+  BUILD_FINGERPRINT = '2026-10-16-1-56-17';
 
 // External Windows API declarations
 
@@ -2346,7 +2343,6 @@ begin
   else if PageID = wpInstalling then Result := 'Installing'
   else if PageID = wpInfoAfter then Result := 'Info After'
   else if PageID = wpFinished then Result := 'Finished'
-  else if Assigned(WelcomePage) and (PageID = WelcomePage.ID) then Result := 'Custom: Welcome'
   else if Assigned(Page_InstallOptions) and (PageID = Page_InstallOptions.ID) then Result := 'Custom: Setup Options'
   else if Assigned(UserPage) and (PageID = UserPage.ID) then Result := 'Custom: Create RDP User Account'
   else if Assigned(Page_ShortcutSettings) and (PageID = Page_ShortcutSettings.ID) then Result := 'Custom: Shortcut Settings'
@@ -3815,15 +3811,19 @@ begin
   else
     CreateRdpShortcutsGroup.Height := ScaleY(24);
 
-  cardSetup.Height := CreateRdpShortcutsGroup.Top + CreateRdpShortcutsGroup.Height + ScaleY(10);
+  // Height is measured relative to the card top so the header block above the
+  // cards can move without affecting it. 5px of bottom padding inside the card.
+  cardSetup.Height := (CreateRdpShortcutsGroup.Top - cardSetup.Top) +
+    CreateRdpShortcutsGroup.Height + ScaleY(5);
 
-  // Sized to leave a full row of breathing room below the last lower-row radio
-  LowerCardHeight := ScaleY(112);
+  // Halved bottom padding relative to the last lower-row radio
+  LowerCardHeight := ScaleY(103);
 
-  // Place the lower row under the Setup card, clamped to the dark page surface
+  // Place the lower row under the Setup card, clamped to the dark page surface.
+  // 40px is reserved at the bottom for the footer credit line.
   LowerRowTop := cardSetup.Top + cardSetup.Height + ScaleY(8);
-  if LowerRowTop + LowerCardHeight > Page_InstallOptions.SurfaceHeight - ScaleY(4) then
-    LowerRowTop := Page_InstallOptions.SurfaceHeight - ScaleY(4) - LowerCardHeight;
+  if LowerRowTop + LowerCardHeight > Page_InstallOptions.SurfaceHeight - ScaleY(40) then
+    LowerRowTop := Page_InstallOptions.SurfaceHeight - ScaleY(40) - LowerCardHeight;
   if LowerRowTop < cardSetup.Top + cardSetup.Height then
     LowerRowTop := cardSetup.Top + cardSetup.Height + ScaleY(2);
 
@@ -4949,6 +4949,12 @@ if Assigned(Page_CreateShortcutAdvanced) and (PageID = Page_CreateShortcutAdvanc
   //   Install mode + Create RDP shortcuts + Use existing users
   if PageID = Page_CreateShortcutsForExistingUsers.ID then
     Result := not ((SelectedInstallMode = installModeInstall) and DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting));
+
+  // Show the Remove Users page and its confirmation page only in Remove Users mode.
+  // Both pages are created after every other option page, so without these checks
+  // the wizard falls through to them whenever the selected mode skips its own pages.
+  if (PageID = Page_RemoveUsers.ID) or (PageID = RemoveUsersConfirmPage.ID) then
+    Result := SelectedInstallMode <> installModeRemoveUsers;
 
   // Show Shortcut Settings page when creating shortcuts (any method) or editing shortcuts
   if PageID = Page_ShortcutSettings.ID then
@@ -6806,18 +6812,15 @@ var
   TermWrapAlreadyInstalled: Boolean;
   InstallHintOffset: Integer;
   childIndent, childLeft, valueLeft: Integer;
-  WelcomeExpLabel: TLabel;
-  WelcomeIcon: TBitmapImage;
-  // Credits labels (non-selectable) and link labels
-  lblCreditsHeader: TLabel;
-  lblBullet1: TLabel;
-  lblStasName: TLabel;
-  lblStasSuffix: TLabel;
-  lblBullet2: TLabel;
+  // Setup Options page header: shrunk logo plus the intro sentence, and the
+  // single-line credit rendered as a footer below the section cards
+  OptionsLogo: TBitmapImage;
+  OptionsIntroLabel: TLabel;
+  lblCreditLead: TLabel;
+  lblCreditMid1: TLabel;
+  lblCreditMid2: TLabel;
+  // Credit link labels
   lblTermName: TLabel;
-  lblTermSuffix: TLabel;
-  lblBullet4: TLabel;
-  lblBullet5: TLabel;
   lblBSGHName: TLabel;
   lblAnd: TLabel;
   lblBSSName: TLabel;
@@ -6833,9 +6836,10 @@ var
 
   LinkColor: TColor;
   LabelColor: TColor;
-  DesiredBottom: Integer;
-  BlockTop: Integer;
-  Delta: Integer;
+  // Setup Options page header layout (logo plus single-line credit)
+  creditX: Integer;
+  creditTop: Integer;
+  optionsCardTop: Integer;
     regVal: Cardinal;
     manageCardWidth: Integer;
     cleanupCardWidth: Integer;
@@ -6911,23 +6915,16 @@ begin
   // DON'T stop TermService here - it delays the wizard from showing by 5 seconds
   // It will be stopped later in the ssInstall step instead
   
-  // Welcome intro page (shows description + credits)
-  WelcomePage := CreateCustomPage(
-    wpWelcome,
-    'Welcome',
-    ''
-  );
-
   // -------------------------------------------------------------------------
-  // Administrator advisory page.
+  // Administrator advisory page — the FIRST page of the wizard.
   // Only displayed when the LAUNCHING user is not an administrator; see
   // ShouldSkipPage().  Without administrator rights the saved RDP password is
   // bound to the UAC-elevated admin (DPAPI), so auto-login will not work for
   // the launcher's own account.
   //
-  // NOTE: created AFTER WelcomePage on purpose.  This Inno build orders pages
-  // that share an anchor newest-first, so creating it later places it BEFORE
-  // WelcomePage (i.e. the first page the user sees after the built-in welcome).
+  // NOTE: the separate Welcome page was removed; its logo and credit line now
+  // live on the Setup Options page.  Page_InstallOptions anchors to THIS page's
+  // ID so it is guaranteed to follow the advisory in the page order.
   // -------------------------------------------------------------------------
   Page_AdminWarning := CreateCustomPage(
     wpWelcome,
@@ -7019,49 +7016,12 @@ begin
   WriteInstallerLog('Administrator advisory page created (ID=' + IntToStr(Page_AdminWarning.ID) + ')');
 
 
-  // Explanatory text in the main body of the welcome page
-  WelcomeExpLabel := TLabel.Create(WelcomePage);
-  WelcomeExpLabel.Parent := WelcomePage.Surface;
-  WelcomeExpLabel.Left := ScaleX(10);
-  WelcomeExpLabel.Top := ScaleY(10);
-  // Ensure enough horizontal space and dynamic resizing in modern wizard styles
-  WelcomeExpLabel.AutoSize := False;
-  WelcomeExpLabel.Width := WelcomePage.SurfaceWidth - ScaleX(30);
-  WelcomeExpLabel.Caption := 'RDPWrapKit sets up local RDP access, allowing you to run multiple users on your computer via Remote Desktop Protocol (RDP).';
-  WelcomeExpLabel.WordWrap := True;
-  WelcomeExpLabel.Alignment := taLeftJustify;
-  WelcomeExpLabel.Font.Size := WelcomeExpLabel.Font.Size + 2;
-  // Anchor left+right so label width tracks page surface on dynamic layouts
-  WelcomeExpLabel.Anchors := [akLeft, akRight];
-  // Set a fixed height large enough for wrapped text
-  WelcomeExpLabel.Height := ScaleY(150);
 
-  // Add an image on the left side of the welcome page
-  WelcomeIcon := TBitmapImage.Create(WelcomePage);
-  WelcomeIcon.Parent := WelcomePage.Surface;
-  WelcomeIcon.Left := ScaleX(8);
-  WelcomeIcon.Top := ScaleY(8);
-  WelcomeIcon.Width := ScaleX(96);
-  WelcomeIcon.Height := ScaleY(96);
-  WelcomeIcon.Stretch := True;
-  try
-    // Explicitly extract the file to ensure it exists
-    ExtractTemporaryFile(FILE_ICON_BMP);
-    WelcomeIcon.Bitmap.LoadFromFile(ExpandConstant(TEMP_ICON_BMP));
-  except
-    // Log error and continue without icon
-    Log('[Icon Load Error] Failed to load RDPWrapKitIcon.bmp');
-  end;
-
-  // Shift welcome text to the right of the icon
-  WelcomeExpLabel.Left := WelcomeIcon.Left + WelcomeIcon.Width + ScaleX(10);
-  WelcomeExpLabel.Width := WelcomePage.SurfaceWidth - WelcomeExpLabel.Left - ScaleX(20);
-
-  // Choices page (placed after the welcome intro)
+  // Choices page — the first content page, anchored after the administrator advisory
   Page_InstallOptions := CreateCustomPage(
-    WelcomePage.ID,
+    Page_AdminWarning.ID,
     'Setup Options',
-    'Select what you would like to do:'
+    ''
   );
   Page_InstallOptions.Surface.Color := RGBToColor(11, 16, 24);
 
@@ -7080,6 +7040,8 @@ begin
 
   manageCardWidth   := ((Page_InstallOptions.SurfaceWidth - ScaleX(18)) * 62) div 100;
   cleanupCardWidth  := (Page_InstallOptions.SurfaceWidth - ScaleX(18)) - manageCardWidth;
+  // Top of the Setup card: the logo and credit line occupy the space above it
+  optionsCardTop    := ScaleY(56);
 
   cardSetup := TPanel.Create(Page_InstallOptions);
   cardSetup.Parent := Page_InstallOptions.Surface;
@@ -7090,7 +7052,7 @@ begin
   cardSetup.BevelWidth := 0;
   cardSetup.Color := Page_InstallOptions.Surface.Color;
   // Final height is set below, once InstallHintOffset is known
-  cardSetup.SetBounds(ScaleX(6), ScaleY(2), Page_InstallOptions.SurfaceWidth - ScaleX(12), ScaleY(138));
+  cardSetup.SetBounds(ScaleX(6), optionsCardTop, Page_InstallOptions.SurfaceWidth - ScaleX(12), ScaleY(138));
 
   cardManage := TPanel.Create(Page_InstallOptions);
   cardManage.Parent := Page_InstallOptions.Surface;
@@ -7101,7 +7063,7 @@ begin
   cardManage.BevelWidth := 0;
   cardManage.Color := Page_InstallOptions.Surface.Color;
   // Final top is set below, once the Setup card height is known
-  cardManage.SetBounds(ScaleX(6), ScaleY(146), manageCardWidth, ScaleY(112));
+  cardManage.SetBounds(ScaleX(6), optionsCardTop + ScaleY(144), manageCardWidth, ScaleY(103));
 
   cardCleanup := TPanel.Create(Page_InstallOptions);
   cardCleanup.Parent := Page_InstallOptions.Surface;
@@ -7112,13 +7074,13 @@ begin
   cardCleanup.BevelWidth := 0;
   cardCleanup.Color := Page_InstallOptions.Surface.Color;
   cardCleanup.SetBounds(cardManage.Left + cardManage.Width + ScaleX(6), cardManage.Top,
-    cleanupCardWidth, ScaleY(112));
+    cleanupCardWidth, ScaleY(103));
 
   // --- Setup card: the Install mode and its children ---
   rbInstall := TRadioButton.Create(Page_InstallOptions);
   rbInstall.Parent := Page_InstallOptions.Surface;
   rbInstall.Left := ScaleX(16);
-  rbInstall.Top := ScaleY(26);
+  rbInstall.Top := optionsCardTop + ScaleY(24);
   rbInstall.Width := Page_InstallOptions.SurfaceWidth - ScaleX(40);
   rbInstall.Caption := 'Install RDPWrapKit on this PC';
   rbInstall.Checked := True;
@@ -7128,7 +7090,7 @@ begin
   chkInstallTermWrap := TCheckBox.Create(Page_InstallOptions);
   chkInstallTermWrap.Parent := Page_InstallOptions.Surface;
   chkInstallTermWrap.Left := ScaleX(32);
-  chkInstallTermWrap.Top := ScaleY(44);
+  chkInstallTermWrap.Top := optionsCardTop + ScaleY(42);
   chkInstallTermWrap.Width := Page_InstallOptions.SurfaceWidth - ScaleX(60);
   TermWrapAlreadyInstalled := IsTermWrapInstalled();
   InstallHintOffset := 0;
@@ -7174,7 +7136,7 @@ begin
   chkCreateRdpShortcuts := TCheckBox.Create(Page_InstallOptions);
   chkCreateRdpShortcuts.Parent := Page_InstallOptions.Surface;
   chkCreateRdpShortcuts.Left := ScaleX(32);
-  chkCreateRdpShortcuts.Top := ScaleY(64) + InstallHintOffset;
+  chkCreateRdpShortcuts.Top := optionsCardTop + ScaleY(62) + InstallHintOffset;
   chkCreateRdpShortcuts.Width := Page_InstallOptions.SurfaceWidth - ScaleX(60);
   chkCreateRdpShortcuts.Caption := 'Create RDP shortcuts';
   chkCreateRdpShortcuts.Checked := True;
@@ -7326,135 +7288,148 @@ begin
   // lower-row positions.
   RelayoutInstallOptionsPage();
 
-  // Add credits text at bottom of the welcome intro page
-  CreditsText := TRichEditViewer.Create(WelcomePage);
-  CreditsText.Parent := WelcomePage.Surface;
-  CreditsText.Left := ScaleX(10);
-  CreditsText.Top := ScaleY(10);
-  CreditsText.Width := WelcomePage.SurfaceWidth - ScaleX(20);
-  CreditsText.Height := ScaleY(120);
-  CreditsText.ScrollBars := ssNone;
-  CreditsText.BorderStyle := bsNone;
-  CreditsText.Color := WelcomePage.Surface.Color;
-  CreditsText.Font.Size := 9;
-  // Use the wizard's default font color so the credits follow the current theme
-  CreditsText.Font.Color := WizardForm.Font.Color;
-  // Use the standard Windows link blue which contrasts well in light/dark themes
+  // ---------------------------------------------------------------------------
+  // Page header: shrunken logo plus a single-line credit.  This replaces the
+  // separate Welcome page that used to hold them.
+  // ---------------------------------------------------------------------------
   LinkColor := RGBToColor(0,120,215);
 
-  // Hide the rich viewer and render credits as non-selectable labels; links remain clickable
-  CreditsText.Visible := False;
+  OptionsLogo := TBitmapImage.Create(Page_InstallOptions);
+  OptionsLogo.Parent := Page_InstallOptions.Surface;
+  OptionsLogo.Stretch := True;
+  try
+    ExtractTemporaryFile(FILE_ICON_BMP);
+    OptionsLogo.Bitmap.LoadFromFile(ExpandConstant(TEMP_ICON_BMP));
+  except
+    Log('[Icon Load Error] Failed to load RDPWrapKitIcon.bmp for the Setup Options page');
+  end;
+  // Sized AFTER loading: LoadFromFile resets the control bounds to the bitmap size
+  OptionsLogo.Left := ScaleX(6);
+  OptionsLogo.Top := ScaleY(2);
+  OptionsLogo.Width := ScaleX(48);
+  OptionsLogo.Height := ScaleY(48);
 
-  // Header (bold / slightly larger)
-  lblCreditsHeader := TLabel.Create(WelcomePage);
-  lblCreditsHeader.Parent := WelcomePage.Surface;
-  lblCreditsHeader.Left := CreditsText.Left;
-  lblCreditsHeader.Top := CreditsText.Top + ScaleY(18);
-  lblCreditsHeader.Caption := 'Credits:';
-  lblCreditsHeader.Font.Style := [fsBold];
-  lblCreditsHeader.Font.Size := CreditsText.Font.Size + 1;
-  lblCreditsHeader.Font.Color := CreditsText.Font.Color;
-  lblCreditsHeader.Transparent := True;
-  lblCreditsHeader.AutoSize := True;
+  // Intro sentence carried over verbatim from the removed Welcome page
+  OptionsIntroLabel := TLabel.Create(Page_InstallOptions);
+  OptionsIntroLabel.Parent := Page_InstallOptions.Surface;
+  OptionsIntroLabel.Left := ScaleX(62);
+  OptionsIntroLabel.Top := ScaleY(6);
+  // Two explicit lines with AutoSize: the label then always sizes itself to the
+  // text, so no fixed width can clip it at the page edge.
+  OptionsIntroLabel.Caption :=
+    'RDPWrapKit sets up local RDP access, allowing you to run multiple' + #13#10 +
+    'users on your computer via Remote Desktop Protocol (RDP).';
+  OptionsIntroLabel.WordWrap := False;
+  OptionsIntroLabel.AutoSize := True;
+  OptionsIntroLabel.ParentFont := False;
+  OptionsIntroLabel.Font.Size := WizardForm.Font.Size;
+  OptionsIntroLabel.Font.Color := LabelColor;
+  OptionsIntroLabel.Transparent := True;
 
-  // Start placing bullet lines under the header
-  topPos := lblCreditsHeader.Top + ScaleY(18);
+  // Single credit line, rendered as a footer below the three section cards
+  creditTop := Page_InstallOptions.SurfaceHeight - ScaleY(20);
+  creditX := ScaleX(10);
 
+  lblCreditLead := TLabel.Create(Page_InstallOptions);
+  lblCreditLead.Parent := Page_InstallOptions.Surface;
+  lblCreditLead.Left := creditX;
+  lblCreditLead.Top := creditTop;
+  lblCreditLead.Caption := 'Credit: Uses ';
+  lblCreditLead.ParentFont := False;
+  lblCreditLead.Font.Size := 8;
+  lblCreditLead.Font.Color := LabelColor;
+  lblCreditLead.Transparent := True;
+  lblCreditLead.AutoSize := True;
+  creditX := lblCreditLead.Left + lblCreditLead.Width;
 
-
-  lblBullet2 := TLabel.Create(WelcomePage);
-  lblBullet2.Parent := WelcomePage.Surface;
-  lblBullet2.Left := CreditsText.Left;
-  lblBullet2.Top := topPos;
-  lblBullet2.Caption := '> ';
-  lblBullet2.Font.Color := CreditsText.Font.Color;
-  lblBullet2.Transparent := True;
-  lblBullet2.AutoSize := True;
-
-  lblTermName := TLabel.Create(WelcomePage);
-  lblTermName.Parent := WelcomePage.Surface;
-  lblTermName.Left := lblBullet2.Left + lblBullet2.Width;
-  lblTermName.Top := topPos;
+  lblTermName := TLabel.Create(Page_InstallOptions);
+  lblTermName.Parent := Page_InstallOptions.Surface;
+  lblTermName.Left := creditX;
+  lblTermName.Top := creditTop;
   lblTermName.Caption := 'llccd''s TermWrap';
+  lblTermName.ParentFont := False;
+  lblTermName.Font.Size := 8;
   lblTermName.Font.Color := LinkColor;
   lblTermName.Font.Style := [fsUnderline];
   lblTermName.Cursor := crHand;
   lblTermName.OnClick := @OpenTermWrap;
   lblTermName.Transparent := True;
   lblTermName.AutoSize := True;
+  creditX := lblTermName.Left + lblTermName.Width;
 
-  lblTermSuffix := TLabel.Create(WelcomePage);
-  lblTermSuffix.Parent := WelcomePage.Surface;
-  lblTermSuffix.Left := lblTermName.Left + lblTermName.Width + ScaleX(4);
-  lblTermSuffix.Top := topPos;
-  lblTermSuffix.Caption := '(it''s fantastic!)';
-  lblTermSuffix.Font.Color := CreditsText.Font.Color;
-  lblTermSuffix.Transparent := True;
-  lblTermSuffix.AutoSize := True;
+  lblCreditMid1 := TLabel.Create(Page_InstallOptions);
+  lblCreditMid1.Parent := Page_InstallOptions.Surface;
+  lblCreditMid1.Left := creditX;
+  lblCreditMid1.Top := creditTop;
+  lblCreditMid1.Caption := '. Inspired by ';
+  lblCreditMid1.ParentFont := False;
+  lblCreditMid1.Font.Size := 8;
+  lblCreditMid1.Font.Color := LabelColor;
+  lblCreditMid1.Transparent := True;
+  lblCreditMid1.AutoSize := True;
+  creditX := lblCreditMid1.Left + lblCreditMid1.Width;
 
-  topPos := topPos + ScaleY(18);
-
-  // Line 3: Special thanks with two clickable names
-  lblBullet5 := TLabel.Create(WelcomePage);
-  lblBullet5.Parent := WelcomePage.Surface;
-  lblBullet5.Left := CreditsText.Left;
-  lblBullet5.Top := topPos;
-  lblBullet5.Caption := '> Special thanks to Bee Swarm Sim communities: ';
-  lblBullet5.Font.Color := CreditsText.Font.Color;
-  lblBullet5.Transparent := True;
-  lblBullet5.AutoSize := True;
-
-  lblBSGHName := TLabel.Create(WelcomePage);
-  lblBSGHName.Parent := WelcomePage.Surface;
-  lblBSGHName.Left := lblBullet5.Left + lblBullet5.Width;
-  lblBSGHName.Top := topPos;
+  lblBSGHName := TLabel.Create(Page_InstallOptions);
+  lblBSGHName.Parent := Page_InstallOptions.Surface;
+  lblBSGHName.Left := creditX;
+  lblBSGHName.Top := creditTop;
   lblBSGHName.Caption := 'BSGH';
+  lblBSGHName.ParentFont := False;
+  lblBSGHName.Font.Size := 8;
   lblBSGHName.Font.Color := LinkColor;
   lblBSGHName.Font.Style := [fsUnderline];
   lblBSGHName.Cursor := crHand;
   lblBSGHName.OnClick := @OpenBSGH;
   lblBSGHName.Transparent := True;
   lblBSGHName.AutoSize := True;
+  creditX := lblBSGHName.Left + lblBSGHName.Width;
 
-  lblAnd := TLabel.Create(WelcomePage);
-  lblAnd.Parent := WelcomePage.Surface;
-  lblAnd.Left := lblBSGHName.Left + lblBSGHName.Width + ScaleX(4);
-  lblAnd.Top := topPos;
-  lblAnd.Caption := 'and ';
-  lblAnd.Font.Color := CreditsText.Font.Color;
+  lblAnd := TLabel.Create(Page_InstallOptions);
+  lblAnd.Parent := Page_InstallOptions.Surface;
+  lblAnd.Left := creditX;
+  lblAnd.Top := creditTop;
+  lblAnd.Caption := ' and ';
+  lblAnd.ParentFont := False;
+  lblAnd.Font.Size := 8;
+  lblAnd.Font.Color := LabelColor;
   lblAnd.Transparent := True;
   lblAnd.AutoSize := True;
+  creditX := lblAnd.Left + lblAnd.Width;
 
-  lblBSSName := TLabel.Create(WelcomePage);
-  lblBSSName.Parent := WelcomePage.Surface;
-  lblBSSName.Left := lblAnd.Left + lblAnd.Width;
-  lblBSSName.Top := topPos;
+  lblBSSName := TLabel.Create(Page_InstallOptions);
+  lblBSSName.Parent := Page_InstallOptions.Surface;
+  lblBSSName.Left := creditX;
+  lblBSSName.Top := creditTop;
   lblBSSName.Caption := 'BSS Grinders';
+  lblBSSName.ParentFont := False;
+  lblBSSName.Font.Size := 8;
   lblBSSName.Font.Color := LinkColor;
   lblBSSName.Font.Style := [fsUnderline];
   lblBSSName.Cursor := crHand;
   lblBSSName.OnClick := @OpenBSSGrinders;
   lblBSSName.Transparent := True;
   lblBSSName.AutoSize := True;
+  creditX := lblBSSName.Left + lblBSSName.Width;
 
-  topPos := topPos + ScaleY(18);
+  lblCreditMid2 := TLabel.Create(Page_InstallOptions);
+  lblCreditMid2.Parent := Page_InstallOptions.Surface;
+  lblCreditMid2.Left := creditX;
+  lblCreditMid2.Top := creditTop;
+  lblCreditMid2.Caption := '. Assembled by ';
+  lblCreditMid2.ParentFont := False;
+  lblCreditMid2.Font.Size := 8;
+  lblCreditMid2.Font.Color := LabelColor;
+  lblCreditMid2.Transparent := True;
+  lblCreditMid2.AutoSize := True;
+  creditX := lblCreditMid2.Left + lblCreditMid2.Width;
 
-  // Line 4: Assembled by cpdx4. Project Home:
-  lblBullet4 := TLabel.Create(WelcomePage);
-  lblBullet4.Parent := WelcomePage.Surface;
-  lblBullet4.Left := CreditsText.Left;
-  lblBullet4.Top := topPos;
-  lblBullet4.Caption := '> Assembled by cpdx4. Project Home: ';
-  lblBullet4.Font.Color := CreditsText.Font.Color;
-  lblBullet4.Transparent := True;
-  lblBullet4.AutoSize := True;
-
-  // Clickable Project Home link (only URL portion)
-  lblProjectHome := TLabel.Create(WelcomePage);
-  lblProjectHome.Parent := WelcomePage.Surface;
-  lblProjectHome.Left := lblBullet4.Left + lblBullet4.Width + ScaleX(4);
-  lblProjectHome.Top := topPos;
-  lblProjectHome.Caption := 'cpdx4.github.io/RDPWrapKit';
+  lblProjectHome := TLabel.Create(Page_InstallOptions);
+  lblProjectHome.Parent := Page_InstallOptions.Surface;
+  lblProjectHome.Left := creditX;
+  lblProjectHome.Top := creditTop;
+  lblProjectHome.Caption := 'cpdx4';
+  lblProjectHome.ParentFont := False;
+  lblProjectHome.Font.Size := 8;
   lblProjectHome.Font.Color := LinkColor;
   lblProjectHome.Font.Style := [fsUnderline];
   lblProjectHome.Cursor := crHand;
@@ -7462,27 +7437,21 @@ begin
   lblProjectHome.Transparent := True;
   lblProjectHome.AutoSize := True;
 
-  // Position the block near the bottom of the welcome page area
-  topPos := topPos + ScaleY(24);
-  DesiredBottom := WelcomePage.SurfaceHeight;
-  BlockTop := DesiredBottom - (topPos - CreditsText.Top);
-  if BlockTop < CreditsText.Top then
-    BlockTop := CreditsText.Top;
-  // Shift all created labels by the delta to align the block (guard against missing labels)
-  Delta := BlockTop - CreditsText.Top;
-  if Assigned(lblCreditsHeader) then lblCreditsHeader.Top := lblCreditsHeader.Top + Delta;
-  if Assigned(lblBullet1) then lblBullet1.Top := lblBullet1.Top + Delta;
-  if Assigned(lblStasName) then lblStasName.Top := lblStasName.Top + Delta;
-  if Assigned(lblStasSuffix) then lblStasSuffix.Top := lblStasSuffix.Top + Delta;
-  if Assigned(lblBullet2) then lblBullet2.Top := lblBullet2.Top + Delta;
-  if Assigned(lblTermName) then lblTermName.Top := lblTermName.Top + Delta;
-  if Assigned(lblTermSuffix) then lblTermSuffix.Top := lblTermSuffix.Top + Delta;
-  if Assigned(lblBullet5) then lblBullet5.Top := lblBullet5.Top + Delta;
-  if Assigned(lblBSGHName) then lblBSGHName.Top := lblBSGHName.Top + Delta;
-  if Assigned(lblAnd) then lblAnd.Top := lblAnd.Top + Delta;
-  if Assigned(lblBSSName) then lblBSSName.Top := lblBSSName.Top + Delta;
-  if Assigned(lblBullet4) then lblBullet4.Top := lblBullet4.Top + Delta;
-  if Assigned(lblProjectHome) then lblProjectHome.Top := lblProjectHome.Top + Delta;
+  // Diagnostic: records the measured header geometry for this page
+  WriteInstallerLog('Options header geometry: surfaceW=' + IntToStr(Page_InstallOptions.SurfaceWidth) +
+    ' surfaceH=' + IntToStr(Page_InstallOptions.SurfaceHeight) +
+    ' cardTop=' + IntToStr(optionsCardTop) + ' cardH=' + IntToStr(cardSetup.Height) +
+    ' logoW=' + IntToStr(OptionsLogo.Width) + ' logoH=' + IntToStr(OptionsLogo.Height) +
+    ' introLeft=' + IntToStr(OptionsIntroLabel.Left) + ' introW=' + IntToStr(OptionsIntroLabel.Width) +
+    ' introH=' + IntToStr(OptionsIntroLabel.Height) +
+    ' introFont=' + IntToStr(OptionsIntroLabel.Font.Size) + ' wizardFont=' + IntToStr(WizardForm.Font.Size) +
+    ' creditTop=' + IntToStr(creditTop) + ' creditRight=' + IntToStr(lblProjectHome.Left + lblProjectHome.Width));
+
+
+
+
+
+
 
   // Initialize derived flags to reflect defaults so page skipping works immediately
   DoInstallTermWrap := chkInstallTermWrap.Checked;
