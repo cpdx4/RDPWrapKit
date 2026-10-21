@@ -301,6 +301,8 @@ var
   lblWrapperVerName: TLabel;
   lblListenerName: TLabel;
   lblListener: TLabel;
+  lblServiceMissingHint: TLabel;  // red guidance shown when TermService is not installed
+  lblTermWrapMissingHint: TLabel; // red guidance shown when TermWrap is not installed/active
 
   lblGenHeader: TLabel;
   chkEnableRDP: TCheckBox;
@@ -7833,6 +7835,72 @@ begin
   end;
 end;
 
+// Returns True when a Show RDP Info status value indicates a problem that should
+// be highlighted in red: unavailable data ("Unknown", "Missing", "not found",
+// "Not installed") or an unhealthy service/listener state ("Stopped", "Paused",
+// "Start Pending", "Disabled", "Not Listening") or no wrapper installed
+// ("None (Windows default)").
+function ShowRDPInfoValueIsBad(const AValue: string): Boolean;
+var
+  LowerValue: string;
+begin
+  LowerValue := Lowercase(Trim(AValue));
+  Result := (Pos('unknown', LowerValue) > 0) or
+            (Pos('missing', LowerValue) > 0) or
+            (Pos('not found', LowerValue) > 0) or
+            (Pos('not installed', LowerValue) > 0) or
+            (Pos('not listening', LowerValue) > 0) or
+            (Pos('none (windows default)', LowerValue) > 0) or
+            (Pos('disabled', LowerValue) > 0) or
+            (Pos('stopped', LowerValue) > 0) or
+            (Pos('paused', LowerValue) > 0) or
+            (Pos('pending', LowerValue) > 0);
+end;
+
+// Returns True when a Show RDP Info status value is a real, healthy reading
+// (a version string, "Running", "Listening on port 3389", "TermWrap <ver>").
+// Loading placeholders ('--', '...') are neither good nor bad.
+function ShowRDPInfoValueIsPositive(const AValue: string): Boolean;
+var
+  TrimmedValue: string;
+begin
+  TrimmedValue := Trim(AValue);
+  Result := (TrimmedValue <> '') and
+            (TrimmedValue <> '--') and
+            (TrimmedValue <> '...') and
+            (not ShowRDPInfoValueIsBad(TrimmedValue));
+end;
+
+// Colours a Show RDP Info value label: red for problem states, green (lime on a
+// dark background) for healthy states, and the page's normal label colour for
+// loading placeholders.
+procedure SetShowRDPInfoValueColor(ALabel: TLabel; const AValue: string);
+var
+  IsDark: Boolean;
+begin
+  if not Assigned(ALabel) then
+    exit;
+  // VCL styles repaint the label font on refresh and silently drop custom
+  // colours unless seFont is removed from StyleElements. This is the same
+  // override SetStepDone uses to make the green progress-page text appear.
+  ALabel.ParentFont := False;
+  ALabel.StyleElements := ALabel.StyleElements - [seFont];
+  IsDark := Assigned(Page_ShowRDPInfo) and IsDarkColor(Page_ShowRDPInfo.Surface.Color);
+  if ShowRDPInfoValueIsBad(AValue) then
+    ALabel.Font.Color := clRed
+  else if ShowRDPInfoValueIsPositive(AValue) then
+  begin
+    if IsDark then
+      ALabel.Font.Color := clLime
+    else
+      ALabel.Font.Color := clGreen;
+  end
+  else if IsDark then
+    ALabel.Font.Color := clWhite
+  else
+    ALabel.Font.Color := clBlack;
+end;
+
 // Writes every recommended value for the Low FPS / lag quick fix.
 procedure ApplyLowFPSRecommended;
 begin
@@ -9043,6 +9111,50 @@ begin
     lblListener.Font.Color := LabelColor;
     lblListener.Transparent := True;
     topPos := topPos + ScaleY(26);
+
+    // Red guidance lines shown in the empty area below the status rows.
+    //   1. Remote Desktop service (TermService) missing -> use Quick Fixes to reinstall it.
+    //   2. TermWrap missing (vanilla termsrv.dll, legacy RDP Wrapper, a custom DLL,
+    //      or a configured TermWrap.dll that is not on disk) -> install it from the
+    //      main setup page.
+    // Both labels are hidden by default; CurPageChanged toggles them and stacks them
+    // so the second hint always sits directly under the first when both are shown.
+    lblServiceMissingHint := TLabel.Create(Page_ShowRDPInfo);
+    lblServiceMissingHint.Parent := Page_ShowRDPInfo.Surface;
+    lblServiceMissingHint.Left := leftPos;
+    lblServiceMissingHint.Top := topPos + ScaleY(4);
+    lblServiceMissingHint.Width := Page_ShowRDPInfo.Surface.Width - ScaleX(40);
+    lblServiceMissingHint.Height := ScaleY(32);
+    lblServiceMissingHint.AutoSize := False;
+    lblServiceMissingHint.WordWrap := True;
+    lblServiceMissingHint.Caption :=
+      'The Remote Desktop service (TermService) is not installed. Run the Quick Fixes ' +
+      'option to reinstall the RDP service.';
+    lblServiceMissingHint.ParentFont := False;
+    // Keep the red font from being overridden by the active VCL style.
+    lblServiceMissingHint.StyleElements := lblServiceMissingHint.StyleElements - [seFont];
+    lblServiceMissingHint.Font.Style := [fsBold];
+    lblServiceMissingHint.Font.Color := clRed;
+    lblServiceMissingHint.Transparent := True;
+    lblServiceMissingHint.Visible := False;
+
+    lblTermWrapMissingHint := TLabel.Create(Page_ShowRDPInfo);
+    lblTermWrapMissingHint.Parent := Page_ShowRDPInfo.Surface;
+    lblTermWrapMissingHint.Left := leftPos;
+    lblTermWrapMissingHint.Top := topPos + ScaleY(4);
+    lblTermWrapMissingHint.Width := Page_ShowRDPInfo.Surface.Width - ScaleX(40);
+    lblTermWrapMissingHint.Height := ScaleY(32);
+    lblTermWrapMissingHint.AutoSize := False;
+    lblTermWrapMissingHint.WordWrap := True;
+    lblTermWrapMissingHint.Caption :=
+      'TermWrap is not installed. Install it from the main setup page using the ' +
+      '''Install and configure TermWrap'' option.';
+    lblTermWrapMissingHint.ParentFont := False;
+    lblTermWrapMissingHint.StyleElements := lblTermWrapMissingHint.StyleElements - [seFont];
+    lblTermWrapMissingHint.Font.Style := [fsBold];
+    lblTermWrapMissingHint.Font.Color := clRed;
+    lblTermWrapMissingHint.Transparent := True;
+    lblTermWrapMissingHint.Visible := False;
 
   end;
 
@@ -10940,6 +11052,8 @@ var
   PortNumber: Cardinal;
   ListenerStatus: string;
   PageName: string;
+  ServiceMissing: Boolean;
+  TermWrapMissing: Boolean;
 begin
   LogEntry('CurPageChanged');
   PageName := GetPageNameById(CurPageID);
@@ -11244,11 +11358,32 @@ begin
     WizardForm.NextButton.Visible := False;
 
     // Reset displayed values to indicate loading when page is shown again (e.g. after Back/Next)
-    if Assigned(lblWinVer) then lblWinVer.Caption := '--';
-    if Assigned(lblRDPService) then lblRDPService.Caption := '--';
-    if Assigned(lblWinRDPVer) then lblWinRDPVer.Caption := '--';
-    if Assigned(lblWrapperVer) then lblWrapperVer.Caption := '--';
-    if Assigned(lblListener) then lblListener.Caption := '--';
+    // Also resets the font colour so a red "Unknown"/"Missing" from a previous visit does not linger.
+    if Assigned(lblWinVer) then
+    begin
+      lblWinVer.Caption := '--';
+      SetShowRDPInfoValueColor(lblWinVer, '--');
+    end;
+    if Assigned(lblRDPService) then
+    begin
+      lblRDPService.Caption := '--';
+      SetShowRDPInfoValueColor(lblRDPService, '--');
+    end;
+    if Assigned(lblWinRDPVer) then
+    begin
+      lblWinRDPVer.Caption := '--';
+      SetShowRDPInfoValueColor(lblWinRDPVer, '--');
+    end;
+    if Assigned(lblWrapperVer) then
+    begin
+      lblWrapperVer.Caption := '--';
+      SetShowRDPInfoValueColor(lblWrapperVer, '--');
+    end;
+    if Assigned(lblListener) then
+    begin
+      lblListener.Caption := '--';
+      SetShowRDPInfoValueColor(lblListener, '--');
+    end;
 
     // System Status — refresh live values each time the page is shown
     DisplayVersion := SafeRegString(HKLM, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion', '');
@@ -11262,10 +11397,13 @@ begin
       lblWinVer.Caption := '10.0.' + BuildNumberStr + '.' + IntToStr(UBRVal)
     else
       lblWinVer.Caption := 'Unknown';
+    SetShowRDPInfoValueColor(lblWinVer, lblWinVer.Caption);
 
     ServiceStatus := GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status');
-    if ServiceStatus = '' then lblRDPService.Caption := 'Not installed'
+    ServiceMissing := (ServiceStatus = '');
+    if ServiceMissing then lblRDPService.Caption := 'Not installed'
     else lblRDPService.Caption := ServiceStatus;
+    SetShowRDPInfoValueColor(lblRDPService, lblRDPService.Caption);
 
     // termsrv.dll exists only in the native System32 directory (SysWOW64 has no
     // counterpart), so this lookup must not depend on how the spawned
@@ -11280,8 +11418,14 @@ begin
       '(Get-Item -LiteralPath $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
     if TermsrvVer = '' then lblWinRDPVer.Caption := 'Unknown'
     else lblWinRDPVer.Caption := TermsrvVer;
+    SetShowRDPInfoValueColor(lblWinRDPVer, lblWinRDPVer.Caption);
 
-    // Read the actual ServiceDll path from registry to determine what DLL is configured
+    // Read the actual ServiceDll path from registry to determine what DLL is configured.
+    // TermWrap counts as installed only when the configured ServiceDll is a TermWrap.dll
+    // that exists on disk. A vanilla termsrv.dll ServiceDll, a legacy RDP Wrapper
+    // install, a custom DLL, or a missing TermWrap.dll all leave TermWrapMissing set,
+    // because the user still has to install TermWrap from the main setup page.
+    TermWrapMissing := True;
     if RegQueryStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ServiceDllPath) then
     begin
       // Check if registry path points to TermWrap.dll
@@ -11292,6 +11436,7 @@ begin
           ServiceDllPath := ExpandConstant('{commonpf64}\RDPWrapKit\TermWrap.dll');
         if FileExists(ServiceDllPath) then
         begin
+          TermWrapMissing := False;
           WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
           if WrapperVersion = '' then lblWrapperVer.Caption := 'TermWrap (unknown version)'
           else lblWrapperVer.Caption := 'TermWrap ' + WrapperVersion;
@@ -11334,6 +11479,8 @@ begin
     end
     else
       lblWrapperVer.Caption := 'None (Windows default)';
+    // Highlight "(unknown version)" / "(file not found)" wrapper states in red.
+    SetShowRDPInfoValueColor(lblWrapperVer, lblWrapperVer.Caption);
 
     // Check if RDP is currently listening on the configured port
     if RegQueryDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', PortNumber) then
@@ -11346,6 +11493,26 @@ begin
       lblListener.Caption := 'Not Listening on port ' + IntToStr(PortNumber)
     else
       lblListener.Caption := ListenerStatus;
+    SetShowRDPInfoValueColor(lblListener, lblListener.Caption);
+
+    // Show the recovery hints in the empty area under the status rows. Each hint is
+    // driven by its own failure state; when both are needed the TermWrap hint is
+    // stacked directly beneath the TermService hint so neither message overlaps.
+    if Assigned(lblServiceMissingHint) then
+    begin
+      lblServiceMissingHint.Visible := ServiceMissing;
+      lblServiceMissingHint.Top := lblListener.Top + ScaleY(28);
+    end;
+    if Assigned(lblTermWrapMissingHint) then
+    begin
+      lblTermWrapMissingHint.Visible := TermWrapMissing;
+      if Assigned(lblServiceMissingHint) and lblServiceMissingHint.Visible then
+        lblTermWrapMissingHint.Top := lblServiceMissingHint.Top + lblServiceMissingHint.Height + ScaleY(2)
+      else
+        lblTermWrapMissingHint.Top := lblListener.Top + ScaleY(28);
+    end;
+    LogDebug('CurPageChanged: Show RDP Info hints - TermService missing=' +
+      BoolToStr(ServiceMissing) + ', TermWrap missing=' + BoolToStr(TermWrapMissing));
 
   end;
 
