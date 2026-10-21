@@ -2923,7 +2923,7 @@ begin
   // Persist the log OUTSIDE {tmp}, because Setup deletes its temp folder on exit -
   // which destroyed exactly the timing evidence ([DURATION:...ms] lines) this log
   // exists to provide. A stable path also lets support collect it without the user
-  // pressing "Save Install Log". Falls back to {tmp} if ProgramData is not writable.
+  // pressing "Show Install Log". Falls back to {tmp} if ProgramData is not writable.
   LogDir := ExpandConstant('{commonappdata}\RDPWrapKit\Logs');
   if ForceDirectories(LogDir) then
   begin
@@ -5163,19 +5163,39 @@ begin
 end;
 
 
+// Opens Windows Explorer with the install log file selected (reveal-in-Explorer).
+// The log itself stays in its stable location (%ProgramData%\RDPWrapKit\Logs);
+// nothing is copied to the Desktop any more.
 procedure OnViewLogButtonClick(Sender: TObject);
 var
-  DestName: string;
-  Saved: Boolean;
+  ResultCode: Integer;
+  LogPath: string;
 begin
   LogEntry('OnViewLogButtonClick');
-  WriteInstallerLog('User clicked Save Install Log button');
-  DestName := GetInteractiveDesktop + '\RDPWrapKit_install.log';
-  Saved := CopyFile(InstallLogPath, DestName, False);
-  if Saved then
-    MsgBox('File RDPWrapKit_install.log was saved to your Desktop', mbInformation, MB_OK)
-  else
-    MsgBox('Failed to save install log to the Desktop location.', mbError, MB_OK);
+  LogPath := InstallLogPath;
+  if LogPath = '' then
+    LogPath := ExpandConstant(INSTALL_LOG_PATH);
+  WriteInstallerLog('User clicked Show Install Log button (reveal: ' + LogPath + ')');
+
+  if not FileExists(LogPath) then
+  begin
+    MsgBox('The install log could not be found at:' + #13#10#13#10 + LogPath,
+      mbError, MB_OK);
+    LogExit('OnViewLogButtonClick');
+    exit;
+  end;
+
+  // "/select,<file>" opens the containing folder and highlights the file.
+  if not ShellExec('open', 'explorer.exe', '/select,"' + LogPath + '"', '',
+    SW_SHOWNORMAL, ewNoWait, ResultCode) then
+  begin
+    LogWarn('OnViewLogButtonClick: ShellExec explorer /select failed');
+    // Fallback: at least show the folder that holds the log.
+    if not ShellExec('open', 'explorer.exe', '"' + ExtractFileDir(LogPath) + '"', '',
+      SW_SHOWNORMAL, ewNoWait, ResultCode) then
+      MsgBox('Failed to open Windows Explorer at:' + #13#10#13#10 + LogPath,
+        mbError, MB_OK);
+  end;
   LogExit('OnViewLogButtonClick');
 end;
 
@@ -9393,14 +9413,15 @@ begin
   FinishedText.Visible := True;
   WizardForm.FinishedLabel.Visible := False;
 
-  // Create a button to save the install log, placed in the bottom button bar next to Finish
+  // Create a button to reveal the install log in Explorer, placed in the bottom
+  // button bar next to Finish
   ViewLogButton := TButton.Create(WizardForm);
   ViewLogButton.Parent := WizardForm;
   ViewLogButton.Width := ScaleX(120);
   ViewLogButton.Height := WizardForm.NextButton.Height;
   ViewLogButton.Left := WizardForm.NextButton.Left - ViewLogButton.Width - ScaleX(10);
   ViewLogButton.Top := WizardForm.NextButton.Top;
-  ViewLogButton.Caption := 'Save Install Log';
+  ViewLogButton.Caption := 'Show Install Log';
   ViewLogButton.OnClick := @OnViewLogButtonClick;
   ViewLogButton.Visible := False;  // only shown on the Finished page
 
@@ -11129,7 +11150,7 @@ begin
     LastLoggedPageTick := NowTick;
   end;
 
-  // Show the Save Install Log button only on the Finished page
+  // Show the Show Install Log button only on the Finished page
   if Assigned(ViewLogButton) then
     ViewLogButton.Visible := (CurPageID = wpFinished);
 
@@ -11744,7 +11765,7 @@ begin
           CompletionText := CompletionText + #13#10 +
             'These accounts were not added to ' + GroupAdministratorsName + ' and no RDP shortcut was created for them.' + #13#10 +
             'Any account that could not be cleaned up was disabled, so it cannot be used to sign in.' + #13#10#13#10 +
-            'Click "Save Install Log" for the full details, then re-run the installer and choose ' +
+            'Click "Show Install Log" for the full details, then re-run the installer and choose ' +
             '"Create Users Only" once the problem above has been resolved.' + #13#10#13#10;
           WriteInstallerLog('CurPageChanged: Reported ' + IntToStr(UserCreateFailures.Count) + ' failed user account(s) on the finish page');
         end;
@@ -11812,7 +11833,7 @@ begin
              FailNames + #13#10 +
              'No RDP shortcut was created for these accounts, and anything that could not be ' + #13#10 +
              'cleaned up was disabled so it cannot be used to sign in.' + #13#10#13#10 +
-             'Please use "Save Install Log" and re-run the installer after resolving the issue.', mbError, MB_OK);
+             'Please use "Show Install Log" and re-run the installer after resolving the issue.', mbError, MB_OK);
     end;
 
     WizardForm.FinishedLabel.Caption := CompletionText;
