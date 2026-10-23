@@ -62,7 +62,11 @@
               <p><strong>RDP listener on port 3389:</strong> Not Listening</p>
             </div>
           </div>
-          <p>The service is technically running, but the part of Windows that actually accepts incoming RDP connections (the <em>listener</em>) is not bound to port 3389. That mismatch is usually caused by a Windows Update corrupting or replacing a system component that RDP depends on. The service still starts, but it can't open its listening port, so no RDP client can connect.</p>
+          <figure class="fix-figure fix-figure-half">
+            <img src="rdp-not-listening-images/RDPInfo-NotListening.png" alt="RDPWrapKit Show RDP Info page listing Windows Version, RDP Service: Running, RDP DLL Version, Wrapper file info, and Listening Status: Not Listening on port 3389 shown in red" loading="lazy" />
+            <figcaption>Show RDP Info: the service reports <strong>Running</strong>, yet the Listening Status reads <strong>Not Listening on port 3389</strong>.</figcaption>
+          </figure>
+          <p>The service is technically running, but the part of Windows that actually accepts incoming RDP connections (the <em>listener</em>) is not bound to port 3389. That mismatch is usually caused by an "Optimizer/Cleaner" utility corrupting or replacing a system component that RDP depends on. The service still starts, but it can't open its listening port, so no RDP client can connect.</p>
           <p>An <strong>in-place Windows repair</strong> reinstalls the affected system files while keeping your apps and data, which normally restores the listener.</p>
         </div>
       </section>
@@ -90,10 +94,10 @@
               <span class="step-number">02</span>
               <div class="step-content">
                 <h3>Choose the multi-edition ISO</h3>
-                <p>Scroll to the third section, <strong>"Download Windows 11 Disk Image (ISO) for x64 devices"</strong>. Open the dropdown and select <strong>Windows 11 (multi-edition ISO)</strong>, then click <strong>Confirm</strong> and <strong>64-bit Download</strong>.</p>
+                <p>Scroll to the third section, <strong>"Download Windows 11 Disk Image (ISO) for x64 devices"</strong>. Open the dropdown and select <strong>Windows 11 (multi-edition ISO)</strong>, choose the <strong>language your Windows 11 already is</strong>, then click <strong>Confirm</strong> and <strong>64-bit Download</strong>.</p>
                 <figure class="fix-figure">
                   <img src="../assets/troubleshooting/win11-iso-download.png" alt="Windows 11 download page showing the 'Windows 11 (multi-edition ISO for x64 devices)' dropdown, with the Confirm button and the 64-bit Download button highlighted" loading="lazy" />
-                  <figcaption>Select "Windows 11 (multi-edition ISO)", then Confirm, then 64-bit Download.</figcaption>
+                  <figcaption>Select "Windows 11 (multi-edition ISO)", your language of Windows 11, then Confirm, then 64-bit Download.</figcaption>
                 </figure>
               </div>
             </li>
@@ -102,6 +106,10 @@
               <div class="step-content">
                 <h3>Mount the ISO</h3>
                 <p>In your <strong>Downloads</strong> folder, right-click the downloaded <code>.iso</code> file and choose <strong>Mount</strong>. It then opens like a virtual DVD drive.</p>
+                <figure class="fix-figure fix-figure-half">
+                  <img src="rdp-not-listening-images/Mount-ISO.png" alt="Windows 11 ISO file context menu with the Mount option highlighted" loading="lazy" />
+                  <figcaption>Right-click the downloaded ISO and select <strong>Mount</strong>.</figcaption>
+                </figure>
                 <p class="step-note">If nothing opens, go to <strong>This PC</strong> in File Explorer and double-click the new DVD drive.</p>
               </div>
             </li>

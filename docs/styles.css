@@ -907,6 +907,12 @@ h2 {
   margin: 1rem 0 0;
 }
 
+.fix-figure-half {
+  width: 50%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .fix-figure img {
   width: 100%;
   display: block;
