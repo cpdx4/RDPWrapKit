@@ -59,7 +59,7 @@
             <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
             <div>
               <p><strong>Am I affected?</strong> You are using a game controller and it is moving your character in RDP when you don't want it to.</p>
-              <p><strong>Cause:</strong> RDP thinks you're trying to use the controller within it, so the input keeps being sent into the remote session.</p>
+              <p><strong>Cause:</strong> RDP thinks you're trying to use the controller within it, so the input keeps being sent into the RDP session.</p>
               <p><strong>The fix:</strong> Use the HidHide app to hide the controller from other apps, in this case RDP.</p>
             </div>
           </div>
@@ -70,7 +70,7 @@
       <section class="section section-border">
         <div class="container narrow">
           <h2>The fix: hide the controller with HidHide</h2>
-          <p class="section-subtitle">Whitelist your games (or blacklist RDP) so the controller input never reaches the remote session</p>
+          <p class="section-subtitle">Thanks to BSGH member mahirishere for these steps!</p>
           <div class="callout callout-safe">
             <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
             <div>
@@ -111,7 +111,7 @@
                 <h3>Add your apps to the list via Task Manager</h3>
                 <p>If you have <strong>Inverse application cloak</strong> unchecked, you will need to add each game you want to use with a controller to the list. If it is checked, you will need to add each RDP to the list.</p>
                 <p>Open <strong>Task Manager</strong> while you have the RDP/games open and go to the <strong>Details</strong> tab. Right-click on the top row and click <strong>Select columns</strong>, then enable <strong>Command line</strong>.</p>
-                <figure class="fix-figure">
+                <figure class="fix-figure fix-figure-half">
                   <img src="../assets/troubleshooting/hidhide-taskmgr-select-columns.webp" alt="Task Manager column picker with the 'Command line' option enabled" loading="lazy" />
                   <figcaption>Enable the "Command line" column in Task Manager.</figcaption>
                 </figure>
@@ -169,7 +169,6 @@
               All fixes
             </a>
           </div>
-          <p class="credit">Credit to BSGH member mahirishere</p>
         </div>
       </section>
     </main>

@@ -240,7 +240,7 @@ h2 {
 
 .card,
 .shot,
-.steps li {
+.steps > li {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -404,7 +404,7 @@ h2 {
   gap: 0.9rem;
 }
 
-.steps li {
+.steps > li {
   padding: 1rem;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -413,7 +413,7 @@ h2 {
   transition: border-color 0.22s ease, box-shadow 0.22s ease, transform 0.22s ease;
 }
 
-.steps li:hover {
+.steps > li:hover {
   background: #0d181b;
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgba(46, 222, 203, 0.28), 0 18px 36px rgba(0, 0, 0, 0.35);
@@ -467,11 +467,11 @@ h2 {
   transform: translateY(-1px);
 }
 
-.steps li.reveal-on-scroll {
+.steps > li.reveal-on-scroll {
   transform: translateX(-24px);
 }
 
-.steps li.reveal-on-scroll.is-visible {
+.steps > li.reveal-on-scroll.is-visible {
   transform: translateX(0);
 }
 
@@ -588,7 +588,7 @@ h2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .steps li {
+  .steps > li {
     grid-template-columns: 1fr;
     row-gap: 0.45rem;
   }
