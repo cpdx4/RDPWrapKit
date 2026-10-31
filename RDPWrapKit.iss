@@ -455,6 +455,16 @@ var
   UpdateCheckStatus: string;
 
   // -------------------------------------------------------------------------
+  // RDP FILE SIGNING WATCHDOG STATE
+  // -------------------------------------------------------------------------
+  // Ensuring the signing certificate is comparatively expensive and only has to
+  // happen once per installation. The result is cached so the certificate work
+  // (and the cryptographic service pre-flight) never runs again for every RDP
+  // shortcut that is created for every user.
+  CryptServicesChecked: Boolean;      // cryptographic service pre-flight already done
+  SigningCertThumbprint: string;      // thumbprint of the trusted RDP signing certificate
+
+  // -------------------------------------------------------------------------
   // USER CREATION OUTCOME TRACKING
   // -------------------------------------------------------------------------
   // Only accounts that were verified as created AND RDP-ready are reported as
@@ -542,11 +552,21 @@ const
   // -------------------------------------------------------------------------
   // TIMEOUTS
   // -------------------------------------------------------------------------
-  // Best-effort timeouts used to avoid extremely long hangs during user
-  // creation/shortcut generation. Note: Exec() calls block the script, so
-  // timeouts are best-effort overall watchers rather than hard per-process
-  // kill timers.
-  PER_USER_TIMEOUT = 120000; // 2 minutes per user (best-effort)
+  // HARD wall-clock limits. Child processes are launched with ewNoWait and are
+  // force-killed when these limits are exceeded (see RunProcessTimed), so a
+  // wedged PowerShell/cmd child can never freeze the wizard forever - which is
+  // exactly what happened in RDPWrapKit_install_20261031-180239.log, where the
+  // installer stopped inside ExecPSCaptureAll during EnsureRDPSigningCert and
+  // never progressed again.
+  PS_TIMEOUT_QUERY = 60000;      // GetPSOutput - short read-only PowerShell queries
+  PS_TIMEOUT_SCRIPT = 90000;     // generated .ps1 helpers (account/group work)
+  PS_TIMEOUT_CAPTURE = 120000;   // ExecPSCaptureAll / certificate setup scripts
+  PS_TIMEOUT_SIGN = 45000;       // cmd.exe + RdpSignTool.exe single-file signing
+  PS_POLL_INTERVAL = 100;        // watchdog poll while waiting for completion
+  PS_ALIVE_INTERVAL = 1000;      // fallback "is the child still alive?" interval
+  PS_HEARTBEAT_INTERVAL = 10000; // log a heartbeat while a child is still running
+  PS_KILL_GRACE = 5000;          // wait for a killed process tree to disappear
+  PER_USER_TIMEOUT = 120000;     // 2 minutes per user (best-effort warning)
   USERS_OVERALL_TIMEOUT = 600000; // 10 minutes overall for user operations
   
   // -------------------------------------------------------------------------
@@ -1821,6 +1841,337 @@ begin
   LogExit('ExecPowerShellHidden');
 end;
 
+// -----------------------------------------------------------------------------
+// PROCESS WATCHDOG HELPERS (hard timeouts for child processes)
+// -----------------------------------------------------------------------------
+// Exec(..., ewWaitUntilTerminated) blocks the installer until the child exits.
+// When a child wedges - a hung PowerShell cmdlet, a crypt32/CNG call waiting on a
+// stopped cryptographic service, a certificate-store provider that never answers -
+// the wizard simply never progresses and the user sees a frozen "Create user"
+// step. That is exactly what the field log
+// RDPWrapKit_install_20261031-180239.log shows: the last line is
+// "ENTER ExecPSCaptureAll" inside EnsureRDPSigningCert, and nothing follows.
+//
+// The helpers below launch the child with ewNoWait (which hands back the process
+// ID) and then wait for completion with a hard wall-clock timeout:
+//   * MarkerPath <> '' : the child writes MarkerPath as its very last action
+//   * MarkerPath = ''  : completion is detected by polling the process itself
+// When the limit is exceeded the whole process tree is killed, so no wedged child
+// can keep the installer (or the wizard) hostage.
+
+function ResolveSystemExe(const FileName: string): string;
+begin
+  Result := ExpandConstant('{sys}\' + FileName);
+  if not FileExists(Result) then
+    Result := ExpandConstant('{win}\System32\' + FileName);
+  if not FileExists(Result) then
+    Result := FileName;
+end;
+
+// Read a whole text file, returning '' when it cannot be read.
+function ReadTextFileSafe(const FilePath: string): string;
+var
+  SL: TStringList;
+begin
+  Result := '';
+  if not FileExists(FilePath) then
+    exit;
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(FilePath);
+      Result := SL.Text;
+    except
+      Result := '';
+    end;
+  finally
+    SL.Free;
+  end;
+end;
+
+// Is the given process ID still running? Implemented with tasklist so that no
+// additional Win32 binding is required. Only called by the watchdog, at most once
+// per PS_ALIVE_INTERVAL, because it spawns a helper process.
+function IsProcessAlive(Pid: Integer): Boolean;
+var
+  OutPath, Text: string;
+  RC: Integer;
+begin
+  Result := False;
+  if Pid <= 0 then
+    exit;
+  OutPath := TempFile('pidcheck_' + IntToStr(Pid) + '.txt');
+  DeleteFile(OutPath);
+  // cmd.exe strips the first and the last quote of a /c command line that starts
+  // with a quote, so the redirect must stay INSIDE the outer quotes.
+  Exec(ResolveSystemExe('cmd.exe'),
+    '/c ""' + ResolveSystemExe('tasklist.exe') + '" /FI "PID eq ' + IntToStr(Pid) + '" /NH > "' + OutPath + '" 2>&1"',
+    '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Text := ReadTextFileSafe(OutPath);
+  DeleteFile(OutPath);
+  Result := Pos(IntToStr(Pid), Text) > 0;
+end;
+
+// Force-terminate a process tree and confirm that it is really gone.
+function KillProcessTree(Pid: Integer): Boolean;
+var
+  RC: Integer;
+  StartTick: Cardinal;
+  ElapsedMs: Int64;
+begin
+  Result := False;
+  if Pid <= 0 then
+    exit;
+  LogWarn('KillProcessTree: force-terminating process tree PID=' + IntToStr(Pid));
+  Exec(ResolveSystemExe('taskkill.exe'), '/F /T /PID ' + IntToStr(Pid), '', SW_HIDE, ewWaitUntilTerminated, RC);
+  StartTick := GetTickCount;
+  repeat
+    if not IsProcessAlive(Pid) then
+    begin
+      LogInfo('KillProcessTree: PID ' + IntToStr(Pid) + ' terminated after ' + IntToStr(GetTickCount - StartTick) + 'ms');
+      Result := True;
+      exit;
+    end;
+    ElapsedMs := GetTickCount - StartTick;
+    if ElapsedMs >= PS_KILL_GRACE then
+      break;
+    Sleep(200);
+  until False;
+  if IsProcessAlive(Pid) then
+    LogError('KillProcessTree: PID ' + IntToStr(Pid) + ' is STILL alive after taskkill /F /T')
+  else
+    Result := True;
+end;
+
+// Run a process hidden and wait for it to finish, but never longer than TimeoutMs.
+// Returns True when the child finished before the timeout (TimedOut = False) and
+// False when it had to be killed (TimedOut = True) or could not be started.
+// ExitCodeOut receives the value the child wrote to MarkerPath, or -1 when the
+// exit code could not be determined (markerless mode or a missing marker).
+function RunProcessTimed(const FileName, Params, MarkerPath, Tag: string; TimeoutMs: Integer;
+  var ExitCodeOut: Integer; var TimedOut: Boolean): Boolean;
+var
+  Pid, LaunchRc: Integer;
+  StartTick, LastAliveCheck, LastHeartbeat: Cardinal;
+  AliveInterval: Cardinal;
+  ElapsedMs, SinceAliveCheck, SinceHeartbeat: Int64;
+  MarkerText: string;
+  RanWithoutMarker: Boolean;
+begin
+  LogEntry('RunProcessTimed');
+  Result := False;
+  TimedOut := False;
+  ExitCodeOut := -1;
+  RanWithoutMarker := False;
+
+  if MarkerPath <> '' then
+    DeleteFile(MarkerPath);
+
+  LaunchRc := 0;
+  if not Exec(FileName, Params, '', SW_HIDE, ewNoWait, LaunchRc) then
+  begin
+    LogError('RunProcessTimed[' + Tag + ']: could not start ''' + FileName + '''');
+    LogExit('RunProcessTimed');
+    exit;
+  end;
+  Pid := LaunchRc;
+  LogDebug('RunProcessTimed[' + Tag + ']: started PID=' + IntToStr(Pid) +
+    ' | timeout=' + IntToStr(TimeoutMs) + 'ms' +
+    ' | waitingForMarker=' + MarkerPath);
+
+  // With a completion marker a slow process is expected, so the (comparatively
+  // expensive) aliveness poll only acts as a safety net. Without a marker the
+  // aliveness poll IS the completion signal.
+  if MarkerPath = '' then
+    AliveInterval := PS_POLL_INTERVAL * 3
+  else
+    AliveInterval := PS_ALIVE_INTERVAL;
+
+  // Without a usable process ID the aliveness poll cannot be trusted, so it is
+  // disabled entirely: the wait then relies on the completion marker or the
+  // timeout, which is slower on failure but never terminates a live child early.
+  if Pid <= 0 then
+  begin
+    LogWarn('RunProcessTimed[' + Tag + ']: no usable process ID was returned; ' +
+      'falling back to marker/timeout only');
+    AliveInterval := 3600000;
+  end;
+
+  StartTick := GetTickCount;
+  LastAliveCheck := StartTick;
+  LastHeartbeat := StartTick;
+
+  repeat
+    if (MarkerPath <> '') and FileExists(MarkerPath) then
+      break;
+
+    ElapsedMs := GetTickCount - StartTick;
+    if ElapsedMs >= TimeoutMs then
+    begin
+      TimedOut := True;
+      break;
+    end;
+
+    SinceAliveCheck := GetTickCount - LastAliveCheck;
+    if SinceAliveCheck >= AliveInterval then
+    begin
+      LastAliveCheck := GetTickCount;
+      if not IsProcessAlive(Pid) then
+      begin
+        // Confirm the miss before trusting it: a freshly started process can be
+        // invisible to the first tasklist call on a busy machine.
+        Sleep(250);
+        if IsProcessAlive(Pid) then
+          continue;
+        RanWithoutMarker := (MarkerPath <> '') and (not FileExists(MarkerPath));
+        break;
+      end;
+    end;
+
+    SinceHeartbeat := GetTickCount - LastHeartbeat;
+    if SinceHeartbeat >= PS_HEARTBEAT_INTERVAL then
+    begin
+      LastHeartbeat := GetTickCount;
+      LogDebug('RunProcessTimed[' + Tag + ']: still waiting | elapsed=' + IntToStr(ElapsedMs) +
+        'ms | PID=' + IntToStr(Pid) + ' | markerPresent=' +
+        BoolToStr((MarkerPath <> '') and FileExists(MarkerPath)));
+    end;
+
+    Sleep(PS_POLL_INTERVAL);
+  until False;
+
+  if TimedOut then
+  begin
+    LogError('RunProcessTimed[' + Tag + ']: TIMEOUT after ' + IntToStr(GetTickCount - StartTick) +
+      'ms (limit ' + IntToStr(TimeoutMs) + 'ms) - terminating process tree PID=' + IntToStr(Pid));
+    KillProcessTree(Pid);
+    ExitCodeOut := -1;
+    LogExit('RunProcessTimed');
+    exit;
+  end;
+
+  if (MarkerPath <> '') and FileExists(MarkerPath) then
+  begin
+    MarkerText := Trim(ReadTextFileSafe(MarkerPath));
+    ExitCodeOut := StrToIntDef(MarkerText, -1);
+    DeleteFile(MarkerPath);
+  end;
+
+  if RanWithoutMarker then
+    LogWarn('RunProcessTimed[' + Tag + ']: child exited without writing its completion marker; exit code unavailable');
+
+  LogDebug('RunProcessTimed[' + Tag + ']: finished | exit=' + IntToStr(ExitCodeOut) +
+    ' | elapsed=' + IntToStr(GetTickCount - StartTick) + 'ms');
+  Result := True;
+  LogExit('RunProcessTimed');
+end;
+
+// Run a generated PowerShell script (invoked with -File) with a hard timeout.
+// The account/group scripts report their outcome through their own output file,
+// so the exit code is only logged (and stays -1 when it cannot be determined).
+function RunPSFileTimed(const ScriptPath, PSParams, Tag: string; TimeoutMs: Integer;
+  var ResultCode: Integer): Boolean;
+var
+  OpTick: Cardinal;
+  TimedOut: Boolean;
+begin
+  LogEntry('RunPSFileTimed');
+  OpTick := GetTickCount;
+  ResultCode := -1;
+  TimedOut := False;
+  LogDebug('RunPSFileTimed[' + Tag + ']: script=' + ScriptPath +
+    ' | timeout=' + IntToStr(TimeoutMs) + 'ms' +
+    ' | args=' + MaskPasswordsInString(PSParams));
+  Result := RunProcessTimed(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True),
+    '', Tag, TimeoutMs, ResultCode, TimedOut);
+  if TimedOut then
+    LogError('RunPSFileTimed[' + Tag + ']: script did not finish within ' + IntToStr(TimeoutMs) +
+      'ms and was terminated');
+  LogDebug('RunPSFileTimed[' + Tag + ']: finished=' + BoolToStr(Result) +
+    ' | timedOut=' + BoolToStr(TimedOut) +
+    ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('RunPSFileTimed');
+end;
+
+// Run a PowerShell -Command string under the watchdog. The command receives a
+// trailing statement that records a successful completion; when the command exits
+// through `exit N` (or never completes) the exit code is reported as -1, which
+// callers must treat as "unknown", never as a specific failure code.
+function RunPSCommandTimed(const PSCommand, Tag: string; TimeoutMs: Integer;
+  var ResultCode: Integer): Boolean;
+var
+  DonePath, FinalCommand: string;
+  TimedOut: Boolean;
+  OpTick: Cardinal;
+begin
+  LogEntry('RunPSCommandTimed');
+  OpTick := GetTickCount;
+  ResultCode := -1;
+  TimedOut := False;
+  DonePath := TempFile('pscmd_' + SanitizeFileName(Tag) + '.done');
+  DeleteFile(DonePath);
+  FinalCommand := PSCommand + '; Set-Content -LiteralPath ''' + DonePath +
+    ''' -Value 0 -Encoding ASCII -Force';
+  LogDebug('RunPSCommandTimed[' + Tag + ']: timeout=' + IntToStr(TimeoutMs) +
+    'ms | command=' + MaskPasswordsInString(PSCommand));
+  Result := RunProcessTimed(PSHost, BuildPowerShellArgs(FinalCommand, True), DonePath, Tag,
+    TimeoutMs, ResultCode, TimedOut);
+  DeleteFile(DonePath);
+  if TimedOut then
+    LogError('RunPSCommandTimed[' + Tag + ']: PowerShell command TIMED OUT after ' +
+      IntToStr(TimeoutMs) + 'ms and was terminated');
+  LogDebug('RunPSCommandTimed[' + Tag + ']: exit=' + IntToStr(ResultCode) +
+    ' finished=' + BoolToStr(Result) + ' timedOut=' + BoolToStr(TimedOut) +
+    ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('RunPSCommandTimed');
+end;
+
+// Run a command through cmd.exe with stdout/stderr captured and returned as text.
+// Completion is guarded by a hard timeout, so a wedged command can never hang the
+// installer. The exit code is recovered through a completion marker written by
+// cmd.exe itself; when the marker cannot be read the exit code is -1.
+function RunCmdCaptureText(const CmdLine, OutTag: string; TimeoutMs: Integer;
+  var ExitCodeOut: Integer): string;
+var
+  OutPath, DonePath, FullCmd: string;
+  TimedOut: Boolean;
+  OpTick: Cardinal;
+begin
+  LogEntry('RunCmdCaptureText');
+  OpTick := GetTickCount;
+  Result := '';
+  ExitCodeOut := -1;
+  TimedOut := False;
+  OutPath := TempFile('cmd_' + SanitizeFileName(OutTag) + '.log');
+  DonePath := TempFile('cmd_' + SanitizeFileName(OutTag) + '.done');
+  DeleteFile(OutPath);
+  DeleteFile(DonePath);
+
+  // CRITICAL cmd.exe /c quoting rules (identical reasoning to RunCmdCapture):
+  // when the command after /c starts with a quote, cmd.exe strips that leading
+  // quote AND the last quote on the line, so the redirection has to live INSIDE
+  // the outer quotes or the redirect target gets mangled.
+  // The trailing "call echo %^ERRORLEVEL%" records the exit code so the watchdog
+  // never has to guess whether the command succeeded.
+  FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1 & call echo %^ERRORLEVEL%> "' + DonePath + '"';
+  LogDebug('RunCmdCaptureText[' + OutTag + ']: ' + EXE_CMD + ' ' + MaskPasswordsInString(FullCmd));
+
+  if not RunProcessTimed(EXE_CMD, FullCmd, DonePath, OutTag, TimeoutMs, ExitCodeOut, TimedOut) then
+    LogError('RunCmdCaptureText[' + OutTag + ']: could not start cmd.exe');
+  if TimedOut then
+    LogError('RunCmdCaptureText[' + OutTag + ']: command TIMED OUT after ' + IntToStr(TimeoutMs) +
+      'ms and was terminated');
+
+  Result := Trim(ReadTextFileSafe(OutPath));
+  DeleteFile(OutPath);
+  DeleteFile(DonePath);
+
+  LogDebug('RunCmdCaptureText[' + OutTag + ']: exit=' + IntToStr(ExitCodeOut) +
+    ' | outputLen=' + IntToStr(Length(Result)) +
+    ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('RunCmdCaptureText');
+end;
+
 // Execute a PowerShell command and capture stdout to a temp file, returning
 // the trimmed output as a string. Returns empty string on failure.
 // NOTE: Temp file usage is required because Exec() does not return stdout.
@@ -1828,19 +2179,43 @@ end;
 // is deleted, so no external log files remain.
 function GetPSOutput(const Command: string): string;
 var
-  PSPath: string;
+  PSPath, DonePath, PSArgs: string;
   RC: Integer;
   SL: TStringList;
   j: Integer;
+  TimedOut: Boolean;
   OpTick: Cardinal;
 begin
   LogEntry('GetPSOutput');
   OpTick := GetTickCount;
   Result := '';
+  RC := -1;
+  TimedOut := False;
   PSPath := TempFile('psout.txt');
-  Exec(PSHost,
-    BuildPowerShellArgs(Command + ' | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force', True),
-    '', SW_HIDE, ewWaitUntilTerminated, RC);
+  DonePath := TempFile('psout.done');
+  DeleteFile(PSPath);
+  DeleteFile(DonePath);
+
+  // The completion marker is written after the Out-File so the watchdog knows the
+  // child finished on purpose instead of disappearing.
+  // The command runs inside a script block because a bare trailing "| Out-File"
+  // is a PARSE ERROR for multi-statement commands ("if ... | Out-File" yields
+  // "An empty pipe element is not allowed"), which silently produced empty
+  // results for callers such as IsRdpWrapperAutoupdateTaskPresent. The error
+  // stream is discarded so a failed command still yields '' instead of an
+  // error record that callers would mistake for a value.
+  PSArgs := BuildPowerShellArgs(
+    '& { ' + Command + ' } 2>$null | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; ' +
+    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 0 -Encoding ASCII -Force', True);
+  LogDebug('GetPSOutput: host=' + PSHost + ' | timeout=' + IntToStr(PS_TIMEOUT_QUERY) +
+    'ms | command=' + MaskPasswordsInString(Command));
+  RunProcessTimed(PSHost, PSArgs, DonePath, 'GetPSOutput', PS_TIMEOUT_QUERY, RC, TimedOut);
+  if TimedOut then
+  begin
+    LogError('GetPSOutput: PowerShell query TIMED OUT after ' + IntToStr(PS_TIMEOUT_QUERY) +
+      'ms and was terminated | command=' + MaskPasswordsInString(Command));
+    RC := -1;
+  end;
   if (RC = 0) and FileExists(PSPath) then
   begin
     SL := TStringList.Create;
@@ -1873,20 +2248,42 @@ end;
 // is deleted, so no external log files remain.
 function ExecPSCaptureAll(const Command: string; var ResultCode: Integer): string;
 var
-  PSPath: string;
+  PSPath, DonePath, WrappedCommand, PSArgs: string;
   SL: TStringList;
   j: Integer;
-  WrappedCommand: string;
+  TimedOut: Boolean;
+  Finished: Boolean;
   OpTick: Cardinal;
 begin
   LogEntry('ExecPSCaptureAll');
   OpTick := GetTickCount;
   Result := '';
+  ResultCode := -1;
+  TimedOut := False;
+  Finished := False;
   PSPath := TempFile('psall.txt');
-  WrappedCommand := '& { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
-  Exec(PSHost,
-    BuildPowerShellArgs(WrappedCommand, True),
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DonePath := TempFile('psall.done');
+  DeleteFile(PSPath);
+  DeleteFile(DonePath);
+
+  // The wrapper keeps the original capture semantics (all streams merged) and
+  // adds a completion marker carrying the outcome, so the watchdog can tell a
+  // finished child from a wedged one. The full command is logged (masked) before
+  // it runs - its absence is what made the original field log impossible to
+  // diagnose: the installer stopped inside this function with no record of the
+  // PowerShell it was waiting for.
+  WrappedCommand :=
+    'try { & { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; ' +
+    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 0 -Encoding ASCII -Force } ' +
+    'catch { try { (''ERROR: '' + $_.Exception.Message) | Out-File -Encoding UTF8 -Append ''' +
+    PSPath + ''' -Force } catch { }; ' +
+    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 1 -Encoding ASCII -Force }';
+  PSArgs := BuildPowerShellArgs(WrappedCommand, True);
+  LogDebug('ExecPSCaptureAll: host=' + PSHost + ' | timeout=' + IntToStr(PS_TIMEOUT_CAPTURE) + 'ms');
+  LogDebug('ExecPSCaptureAll: command=' + MaskPasswordsInString(Command));
+
+  Finished := RunProcessTimed(PSHost, PSArgs, DonePath, 'ExecPSCaptureAll', PS_TIMEOUT_CAPTURE,
+    ResultCode, TimedOut);
 
   if FileExists(PSPath) then
   begin
@@ -1897,7 +2294,11 @@ begin
       // Log captured output to main installer log
       if Length(Result) > 0 then
       begin
-        LogDebug('ExecPSCaptureAll (' + IntToStr(SL.Count) + ' lines):');
+        if TimedOut then
+          LogError('ExecPSCaptureAll: PARTIAL output captured before the timeout (' +
+            IntToStr(SL.Count) + ' lines):')
+        else
+          LogDebug('ExecPSCaptureAll (' + IntToStr(SL.Count) + ' lines):');
         for j := 0 to SL.Count - 1 do
           LogDebug('  ' + SL[j]);
       end
@@ -1908,13 +2309,61 @@ begin
       DeleteFile(PSPath);
     end;
   end
+  else if TimedOut then
+    LogError('ExecPSCaptureAll: TIMEOUT with no output at all - the PowerShell child produced nothing before it was killed')
   else
     LogDebug('ExecPSCaptureAll: no output file');
-  LogDebug('ExecPSCaptureAll exit=' + IntToStr(ResultCode) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  DeleteFile(DonePath);
+
+  if TimedOut then
+  begin
+    LogError('ExecPSCaptureAll: PowerShell did not complete within ' + IntToStr(PS_TIMEOUT_CAPTURE) +
+      'ms and was terminated | command=' + MaskPasswordsInString(Command));
+    ResultCode := -1;
+  end
+  else if not Finished then
+    LogError('ExecPSCaptureAll: PowerShell could not be started at all');
+
+  LogDebug('ExecPSCaptureAll exit=' + IntToStr(ResultCode) + ' resultLen=' + IntToStr(Length(Result)) +
+    ' finished=' + BoolToStr(Finished) + ' timedOut=' + BoolToStr(TimedOut) +
+    ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('ExecPSCaptureAll');
 end;
 
 procedure EnsureRDPSigningCert; forward;
+
+// Does the RDP file carry a signature? This is the definitive success criterion
+// for signing: it does not depend on an exit code that a watchdog wrapper may not
+// be able to report.
+function RdpFileHasSignature(const RdpPath: string): Boolean;
+var
+  SL: TStringList;
+  i: Integer;
+  Line: string;
+begin
+  Result := False;
+  if not FileExists(RdpPath) then
+    exit;
+  SL := TStringList.Create;
+  try
+    try
+      SL.LoadFromFile(RdpPath);
+      for i := 0 to SL.Count - 1 do
+      begin
+        Line := LowerCase(Trim(SL[i]));
+        if Pos('signature:', Line) = 1 then
+        begin
+          Result := True;
+          break;
+        end;
+      end;
+    except
+      Result := False;
+    end;
+  finally
+    SL.Free;
+  end;
+end;
 
 procedure SignRdpFile(const RdpPath: string);
 var
@@ -1924,6 +2373,7 @@ var
   CmdLine: string;
   RdpFound: Boolean;
   ExeFound: Boolean;
+  Signed: Boolean;
 begin
   LogEntry('SignRdpFile');
   OpTick := GetTickCount;
@@ -1975,15 +2425,21 @@ begin
   CmdLine := '"' + RdpPath + '"';
   LogDebug('SignRdpFile: Executing: ' + ExePath + ' ' + CmdLine);
 
-  // Capture RdpSignTool.exe output for diagnostic purposes.
-  // Use RunCmdCapture to redirect stdout/stderr to a temp file and log it on failure.
+  // Capture RdpSignTool.exe output for diagnostic purposes. RunCmdCapture now runs
+  // the tool under the process watchdog, so a wedged crypt32 call can no longer
+  // block the wizard forever. The exit code is logged for diagnosis, but the
+  // signature present in the RDP file is what decides success.
   ResultCode := RunCmdCapture('"' + ExePath + '" ' + CmdLine, 'rdpsign_' + ExtractFileName(RdpPath));
-  LogDebug('SignRdpFile: RdpSignTool.exe exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogDebug('SignRdpFile: RdpSignTool.exe exit=' + IntToStr(ResultCode) +
+    ' (-1 means the watchdog could not report a code) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
-  if ResultCode = 0 then
-    LogInfo('SignRdpFile: signed ' + RdpPath + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
+  Signed := RdpFileHasSignature(RdpPath);
+  if Signed then
+    LogInfo('SignRdpFile: signed ' + RdpPath + ' | RdpSignTool exit=' + IntToStr(ResultCode) +
+      ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
   else
-    LogWarn('SignRdpFile: failed to sign ' + RdpPath + ' (exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogWarn('SignRdpFile: RDP file is still UNSIGNED after signing ' + RdpPath +
+      ' (RdpSignTool exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogInfo('SignRdpFile total [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('SignRdpFile');
 end;
@@ -2071,93 +2527,235 @@ begin
 end;
 
 
+// Cryptographic Services (CryptSvc) and CNG Key Isolation (KeyIso) must be
+// running before any certificate or key work is attempted. When either service is
+// stopped, stuck in "start pending" or marked for deletion, the CAPI/CNG calls do
+// not fail - they BLOCK inside the service control manager. That is one of the
+// documented reasons why New-SelfSignedCertificate (and certificate store access
+// in general) can appear to hang forever instead of returning an error, which
+// matches the field log where the installer stopped dead inside the certificate
+// step. The state of both services is now recorded, and they are started when they
+// are not running. All calls are bounded by the process watchdog.
+procedure EnsureCryptServicesReady;
+var
+  OutText: string;
+  RC: Integer;
+begin
+  LogEntry('EnsureCryptServicesReady');
+  if CryptServicesChecked then
+  begin
+    LogDebug('EnsureCryptServicesReady: pre-flight already performed in this session');
+    LogExit('EnsureCryptServicesReady');
+    exit;
+  end;
+  CryptServicesChecked := True;
+
+  // Cryptographic Services: hosts the certificate stores, CAT/CTL handling and
+  // signature verification work.
+  OutText := RunCmdCaptureText('sc.exe query cryptsvc', 'svcquery_cryptsvc', PS_TIMEOUT_QUERY, RC);
+  if Pos('RUNNING', UpperCase(OutText)) > 0 then
+    LogDebug('EnsureCryptServicesReady: CryptSvc (Cryptographic Services) is running')
+  else
+  begin
+    LogWarn('EnsureCryptServicesReady: CryptSvc is NOT running - certificate work can block indefinitely in this state');
+    OutText := RunCmdCaptureText('net start cryptsvc', 'start_cryptsvc', PS_TIMEOUT_QUERY, RC);
+    LogWarn('EnsureCryptServicesReady: net start cryptsvc exit=' + IntToStr(RC) + ' | ' + OutText);
+  end;
+
+  // CNG Key Isolation: private key creation (RSA/CNG) is brokered through it.
+  OutText := RunCmdCaptureText('sc.exe query keyiso', 'svcquery_keyiso', PS_TIMEOUT_QUERY, RC);
+  if Pos('RUNNING', UpperCase(OutText)) > 0 then
+    LogDebug('EnsureCryptServicesReady: KeyIso (CNG Key Isolation) is running')
+  else
+  begin
+    LogWarn('EnsureCryptServicesReady: KeyIso is NOT running - key creation can block indefinitely in this state');
+    OutText := RunCmdCaptureText('net start keyiso', 'start_keyiso', PS_TIMEOUT_QUERY, RC);
+    LogWarn('EnsureCryptServicesReady: net start keyiso exit=' + IntToStr(RC) + ' | ' + OutText);
+  end;
+
+  LogExit('EnsureCryptServicesReady');
+end;
+
+// The certificate script is generated as a real .ps1 file instead of a single
+// -Command one-liner. Two reasons:
+//   1. No quoting hazards and no module autoload surprises from a huge one-liner.
+//   2. Every step appends a "STAGE:" marker to the output file as it happens, so
+//      if PowerShell ever wedges again the log shows the LAST step reached - the
+//      one thing the original field log could not tell us.
+// The certificate itself is created through the .NET CertificateRequest API, which
+// avoids loading the PKI module (the slowest and most hang-prone part of
+// New-SelfSignedCertificate). New-SelfSignedCertificate is kept as a fallback.
+function BuildEnsureSigningCertScript: string;
+begin
+  Result :=
+    'param([string]$OutPath, [string]$DonePath, [string]$SubjectName)' + #13#10 +
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    '$rc = 1' + #13#10 +
+    '$my = $null' + #13#10 +
+    '$root = $null' + #13#10 +
+    '$certObj = $null' + #13#10 +
+    'function Trace([string]$m) { try { Add-Content -LiteralPath $OutPath -Value (''STAGE: '' + $m) -Encoding UTF8 } catch { } }' + #13#10 +
+    'function Emit([string]$m) { try { Add-Content -LiteralPath $OutPath -Value $m -Encoding UTF8 } catch { } }' + #13#10 +
+    'try {' + #13#10 +
+    '  $flag = [System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite' + #13#10 +
+    '  Trace ''opening LocalMachine\My''' + #13#10 +
+    '  $my = [System.Security.Cryptography.X509Certificates.X509Store]::new(''My'', ''LocalMachine'')' + #13#10 +
+    '  $my.Open($flag)' + #13#10 +
+    '  Trace ''searching for an existing certificate''' + #13#10 +
+    '  foreach ($c in $my.Certificates) { if ($c.Subject -eq $SubjectName) { $certObj = $c; break } }' + #13#10 +
+    '  if ($certObj) { Trace (''reusing existing certificate '' + $certObj.Thumbprint) } else {' + #13#10 +
+    '    Trace ''creating certificate through the .NET CertificateRequest API''' + #13#10 +
+    '    try {' + #13#10 +
+    '      $rsa = [System.Security.Cryptography.RSA]::Create(2048)' + #13#10 +
+    '      $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($SubjectName, $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)' + #13#10 +
+    '      $null = $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $false))' + #13#10 +
+    '      $null = $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $false))' + #13#10 +
+    '      $eku = [System.Security.Cryptography.OidCollection]::new()' + #13#10 +
+    '      $null = $eku.Add([System.Security.Cryptography.Oid]::new(''1.3.6.1.5.5.7.3.3'', ''Code Signing''))' + #13#10 +
+    '      $null = $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $false))' + #13#10 +
+    '      $null = $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension]::new($req.PublicKey, $false))' + #13#10 +
+    '      $self = $req.CreateSelfSigned([System.DateTimeOffset]::Now.AddDays(-2), [System.DateTimeOffset]::Now.AddYears(10))' + #13#10 +
+    '      $pfx = $self.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, '''')' + #13#10 +
+    '      $kf = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::MachineKeySet -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable' + #13#10 +
+    '      $certObj = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$pfx, '''', $kf)' + #13#10 +
+    '      $my.Add($certObj)' + #13#10 +
+    '      Trace (''created certificate '' + $certObj.Thumbprint)' + #13#10 +
+    '    } catch {' + #13#10 +
+    '      Trace (''.NET certificate creation failed: '' + $_.Exception.Message)' + #13#10 +
+    '      Trace ''falling back to New-SelfSignedCertificate''' + #13#10 +
+    '      $certObj = New-SelfSignedCertificate -Subject $SubjectName -CertStoreLocation ''Cert:\LocalMachine\My'' -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10)' + #13#10 +
+    '      Trace (''fallback created certificate '' + $certObj.Thumbprint)' + #13#10 +
+    '    }' + #13#10 +
+    '  }' + #13#10 +
+    '  $thumb = $certObj.Thumbprint' + #13#10 +
+    '  if (-not $thumb) { throw ''Failed to obtain certificate thumbprint'' }' + #13#10 +
+    '  Trace (''thumbprint='' + $thumb)' + #13#10 +
+    '  Trace ''opening LocalMachine\Root''' + #13#10 +
+    '  $root = [System.Security.Cryptography.X509Certificates.X509Store]::new(''Root'', ''LocalMachine'')' + #13#10 +
+    '  $root.Open($flag)' + #13#10 +
+    '  $inRoot = $false' + #13#10 +
+    '  foreach ($c in $root.Certificates) { if ($c.Thumbprint -eq $thumb) { $inRoot = $true; break } }' + #13#10 +
+    '  if (-not $inRoot) {' + #13#10 +
+    '    Trace ''importing certificate into Trusted Root''' + #13#10 +
+    '    $pub = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certObj.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))' + #13#10 +
+    '    $root.Add($pub)' + #13#10 +
+    '    Trace ''certificate added to Trusted Root''' + #13#10 +
+    '  } else { Trace ''certificate already in Trusted Root'' }' + #13#10 +
+    '  Trace ''registering TrustedCertThumbprints policy''' + #13#10 +
+    '  $keyPath = ''Software\Policies\Microsoft\Windows NT\Terminal Services''' + #13#10 +
+    '  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true)' + #13#10 +
+    '  if (-not $key) {' + #13#10 +
+    '    $null = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath)' + #13#10 +
+    '    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true)' + #13#10 +
+    '  }' + #13#10 +
+    '  $raw = $key.GetValue(''TrustedCertThumbprints'', $null)' + #13#10 +
+    '  if ($raw -is [string]) { $list = $raw } else { $list = '''' }' + #13#10 +
+    '  if ($list -notmatch [regex]::Escape($thumb)) {' + #13#10 +
+    '    if ($list -ne '''') { $newVal = $list + '','' + $thumb } else { $newVal = $thumb }' + #13#10 +
+    '    $key.SetValue(''TrustedCertThumbprints'', $newVal, [Microsoft.Win32.RegistryValueKind]::String)' + #13#10 +
+    '  }' + #13#10 +
+    '  $key.Close()' + #13#10 +
+    '  Trace ''policy registered''' + #13#10 +
+    '  Emit (''THUMBPRINT='' + $thumb)' + #13#10 +
+    '  $rc = 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  Emit (''ERROR: '' + $_.Exception.Message)' + #13#10 +
+    '  $rc = 1' + #13#10 +
+    '} finally {' + #13#10 +
+    '  try { if ($my) { $my.Close() } } catch { }' + #13#10 +
+    '  try { if ($root) { $root.Close() } } catch { }' + #13#10 +
+    '  try { Set-Content -LiteralPath $DonePath -Value $rc -Encoding ASCII -Force } catch { }' + #13#10 +
+    '}';
+end;
+
 // Ensures the RDPWrapKit code-signing cert exists, is trusted, and is registered
 // as a trusted RDP publisher in the Terminal Services policy.
 //
-// PERFORMANCE: All four logical steps are executed in a single PowerShell
-// invocation (~500ms total for PS startup + execution) instead of four separate
-// invocations (~2s total).  The single script returns the certificate thumbprint
-// on success, or exits with a non-zero code on failure.
+// The work runs in ONE generated PowerShell script that reports progress through
+// STAGE markers, is executed with a hard timeout, and is cached for the rest of
+// the installation so per-user shortcut creation does not repeat it.
 procedure EnsureRDPSigningCert;
 var
-  PSCommand: string;
+  ScriptPath, OutPath, DonePath, PSParams, Subject, Line: string;
   ResultCode: Integer;
-  PSOut: string;
-  Thumb: string;
   OpTick: Cardinal;
+  SL: TStringList;
+  i: Integer;
+  Found: Boolean;
 begin
   LogEntry('EnsureRDPSigningCert');
+
+  if SigningCertThumbprint <> '' then
+  begin
+    LogInfo('EnsureRDPSigningCert: already ensured in this session (thumb=' +
+      Copy(SigningCertThumbprint, 1, 8) + '...)');
+    LogExit('EnsureRDPSigningCert');
+    exit;
+  end;
+
   OpTick := GetTickCount;
-  Thumb := '';
+  Found := False;
 
-  // Single consolidated PowerShell script that performs all four steps:
-  //   1. Find or create the cert in LocalMachine\My
-  //   2. Import into Trusted Root (if not already there)
-  //   3. [implicit] verify — step 2 already checks existence
-  //   4. Register thumbprint in TrustedCertThumbprints policy
-  // Outputs thumbprint on success; any error triggers catch/throw.
-  LogDebug('EnsureRDPSigningCert: Running consolidated PS cert setup');
-  // NOTE: PSCommand is a one-liner separated by ; — NO inline # comments
-  // because the PS script has no #13#10 line breaks and # would comment out
-  // the rest of the line (all statements after it).
-  PSCommand :=
-    '$ErrorActionPreference = ''Stop''; ' +
-    'try { ' +
-    '$subjectName = ''CN=RDPWrapKit: Only trust if connecting to 127.0.0.2''; ' +
-    '$existing = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Subject -eq $subjectName } | Select-Object -First 1; ' +
-    'if ($existing) { $thumb = $existing.Thumbprint } else { ' +
-    '$c = New-SelfSignedCertificate -Subject $subjectName -CertStoreLocation "Cert:\\LocalMachine\\My" -KeyUsage DigitalSignature -Type CodeSigningCert -NotAfter (Get-Date).AddYears(10); ' +
-    '$thumb = $c.Thumbprint }; ' +
-    'if (-not $thumb) { throw "Failed to obtain certificate thumbprint" }; ' +
-    '$rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    'if (-not $rootCert) { ' +
-    '$tmp = Join-Path $env:TEMP "rdpwrapkit.cer"; ' +
-    '$myCert = Get-ChildItem "Cert:\\LocalMachine\\My" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    'if (-not $myCert) { throw ''Certificate vanished from LocalMachine\My'' }; ' +
-    'Export-Certificate -Cert $myCert -FilePath $tmp | Out-Null; ' +
-    'Import-Certificate -FilePath $tmp -CertStoreLocation "Cert:\\LocalMachine\\Root" | Out-Null; ' +
-    'Remove-Item $tmp -Force; ' +
-    '$rootCert = Get-ChildItem "Cert:\\LocalMachine\\Root" | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1; ' +
-    'if (-not $rootCert) { throw "Failed to import cert to Trusted Root" } }; ' +
-    '$keyPath = ''Software\Policies\Microsoft\Windows NT\Terminal Services''; ' +
-    '$key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true); ' +
-    'if (-not $key) { ' +
-    '$null = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($keyPath); ' +
-    '$key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true) }; ' +
-    '$raw = $key.GetValue(''TrustedCertThumbprints'', $null); ' +
-    '$existingList = if ($raw -is [string]) { $raw } else { '''' }; ' +
-    'if ($existingList -notmatch [regex]::Escape($thumb)) { ' +
-    '$newVal = if ($existingList -ne '''') { $existingList + '','' + $thumb } else { $thumb }; ' +
-    '$key.SetValue(''TrustedCertThumbprints'', $newVal, [Microsoft.Win32.RegistryValueKind]::String) }; ' +
-    '$key.Close(); ' +
-    'Write-Output $thumb ' +
-    '} catch { Write-Output (''ERROR: '' + $_.Exception.Message); throw }';
+  // Record (and if necessary start) the services the certificate work depends on.
+  EnsureCryptServicesReady;
 
-  PSOut := ExecPSCaptureAll(PSCommand, ResultCode);
-  LogDebug('EnsureRDPSigningCert [ConsolidatedPS] exit=' + IntToStr(ResultCode) + ' output=' + PSOut);
+  Subject := 'CN=RDPWrapKit: Only trust if connecting to 127.0.0.2';
+  OutPath := TempFile('signing_cert.log');
+  DonePath := TempFile('signing_cert.done');
+  ScriptPath := TempFile('ensure_signing_cert.ps1');
+  DeleteFile(OutPath);
+  DeleteFile(DonePath);
+  SaveStringToFile(ScriptPath, BuildEnsureSigningCertScript, False);
 
-  if ResultCode <> 0 then
+  PSParams :=
+    BuildPSNamedParam('OutPath', OutPath) + ' ' +
+    BuildPSNamedParam('DonePath', DonePath) + ' ' +
+    BuildPSNamedParam('SubjectName', Subject);
+
+  LogDebug('EnsureRDPSigningCert: running ' + ScriptPath +
+    ' | timeout=' + IntToStr(PS_TIMEOUT_CAPTURE) + 'ms');
+  RunPSFileTimed(ScriptPath, PSParams, 'EnsureRDPSigningCert', PS_TIMEOUT_CAPTURE, ResultCode);
+  DeleteFile(ScriptPath);
+
+  if FileExists(OutPath) then
   begin
-    LogError('EnsureRDPSigningCert: failed (exit=' + IntToStr(ResultCode) + ')');
-    LogExit('EnsureRDPSigningCert');
-    exit;
-  end;
+    SL := TStringList.Create;
+    try
+      try
+        SL.LoadFromFile(OutPath);
+        LogDebug('EnsureRDPSigningCert: certificate script output (' + IntToStr(SL.Count) + ' lines):');
+        for i := 0 to SL.Count - 1 do
+        begin
+          Line := SL[i];
+          LogDebug('  ' + Line);
+          if Pos('THUMBPRINT=', Line) = 1 then
+          begin
+            SigningCertThumbprint := Trim(Copy(Line, Length('THUMBPRINT=') + 1, Length(Line)));
+            Found := SigningCertThumbprint <> '';
+          end;
+        end;
+      except
+        LogWarn('EnsureRDPSigningCert: could not read ' + OutPath);
+      end;
+    finally
+      SL.Free;
+      DeleteFile(OutPath);
+    end;
+  end
+  else
+    LogError('EnsureRDPSigningCert: the certificate script produced NO output file at all - ' +
+      'it either never started or was killed before its first stage marker');
 
-  Thumb := Trim(PSOut);
-  if Thumb = '' then
-  begin
-    LogError('EnsureRDPSigningCert: empty thumbprint output');
-    LogExit('EnsureRDPSigningCert');
-    exit;
-  end;
-  if Copy(Thumb, 1, 6) = 'ERROR:' then
-  begin
-    LogError('EnsureRDPSigningCert: PS error: ' + PSOut);
-    LogExit('EnsureRDPSigningCert');
-    exit;
-  end;
+  DeleteFile(DonePath);
 
-  LogInfo('EnsureRDPSigningCert: cert ensured and registered (thumb=' + Copy(Thumb, 1, 8) + '...) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  if Found then
+    LogInfo('EnsureRDPSigningCert: cert ensured and registered (thumb=' +
+      Copy(SigningCertThumbprint, 1, 8) + '...) | script exit=' + IntToStr(ResultCode) +
+      ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
+  else
+    LogError('EnsureRDPSigningCert: FAILED to ensure the RDP signing certificate ' +
+      '(script exit=' + IntToStr(ResultCode) + '); RDP shortcuts will be written unsigned');
+
   LogExit('EnsureRDPSigningCert');
 end;
 
@@ -3041,77 +3639,44 @@ end;
 // through the centralized LoggerRedact pipeline).
 // -----------------------------------------------------------------------------
 
-// Run a command via cmd.exe with stdout/stderr captured to a log file.
-// OutTag is a short alphanumeric identifier used for the temp filename.
-// Returns the exit code. Output is logged at DEBUG level.
+// Run a command via cmd.exe with stdout/stderr captured and dumped into the
+// installer log. OutTag is a short alphanumeric identifier used for the temp
+// filename. Returns the exit code (-1 when the watchdog cannot recover it).
+//
+// The command runs under the process watchdog (see RunCmdCaptureText), so a
+// wedged child can no longer hang the installer for ever - signing an RDP file
+// with a blocked crypt32/CAPI call used to freeze the whole user creation step.
 function RunCmdCapture(const CmdLine, OutTag: string): Integer;
 var
-  OutPath: string;
+  OutText: string;
   SL: TStringList;
   j: Integer;
   RC: Integer;
-  ExecOk: Boolean;
-  FullCmd: string;
 begin
   LogEntry('RunCmdCapture');
-  OutPath := TempFile('capture_' + SanitizeFileName(OutTag) + '.log');
-  RC := 0;
-
-  // Build the full command: cmd /c "CmdLine > "OutPath" 2>&1"
-  // CRITICAL: cmd.exe /c quoting rules — when the first character after /c
-  // is a double-quote ("), cmd.exe strips the outermost quotes and also
-  // removes the LAST double-quote from the entire command string.
-  // If the redirection is placed OUTSIDE these outer quotes, the last " is
-  // the closing quote of the output path, munging the redirect target into
-  // an invalid filename (e.g. capture.log 2>&1 becomes part of the filename).
-  //
-  // The fix: place the redirection INSIDE the outer quotes so that after
-  // cmd.exe strips them, everything (command + redirection) is intact.
-  //
-  // BEFORE (broken):  /c ""C:\exe" "C:\file"" > "out.log" 2>&1
-  //   After strip:    "C:\exe" "C:\file"" > "out.log 2>&1    ← BAD: 2>&1 in filename
-  //
-  // AFTER (fixed):   /c ""C:\exe" "C:\file" > "out.log" 2>&1"
-  //   After strip:    "C:\exe" "C:\file" > "out.log" 2>&1    ← CORRECT
-  FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1"';
-  LogDebug('RunCmdCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
-
-  ExecOk := Exec(EXE_CMD, FullCmd, '', SW_HIDE, ewWaitUntilTerminated, RC);
-  LogDebug('RunCmdCapture: ExecOk=' + BoolToStr(ExecOk) + ' exit=' + IntToStr(RC) + ' tag=' + OutTag);
-
-  if not ExecOk then
-    LogWarn('RunCmdCapture: Exec() failed to launch! OS error=' + IntToStr(RC) + ' (' + SysErrorMessage(RC) + ')');
-
-  // Always dump output file if it exists (regardless of exit code)
-  if FileExists(OutPath) then
+  RC := -1;
+  OutText := RunCmdCaptureText(CmdLine, OutTag, PS_TIMEOUT_SIGN, RC);
+  if OutText <> '' then
   begin
     SL := TStringList.Create;
     try
       try
-        SL.LoadFromFile(OutPath);
-        if SL.Count > 0 then
-        begin
-          LogDebug('Command output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
-          for j := 0 to SL.Count - 1 do
-            LogDebug('  ' + SL[j]);
-        end
-        else
-          LogDebug('RunCmdCapture: output file empty for tag=' + OutTag);
+        SL.Text := OutText;
+        LogDebug('Command output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+        for j := 0 to SL.Count - 1 do
+          LogDebug('  ' + SL[j]);
       except
-        LogWarn('RunCmdCapture: failed to read output file: ' + OutPath);
+        LogWarn('RunCmdCapture: failed to split captured output for tag=' + OutTag);
       end;
     finally
       SL.Free;
     end;
-    DeleteFile(OutPath);
   end
   else
-  begin
-    LogDebug('RunCmdCapture: no output file for tag=' + OutTag);
-    LogDebug('RunCmdCapture: full command for diagnosis: ' + FullCmd);
-  end;
-
+    LogDebug('RunCmdCapture: no output for tag=' + OutTag +
+      ' (command: ' + MaskPasswordsInString(CmdLine) + ')');
   Result := RC;
+  LogDebug('RunCmdCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
   LogExit('RunCmdCapture');
 end;
 
@@ -3289,7 +3854,7 @@ begin
   SaveStringToFile(ScriptPath, PSScript, False);
   PSParams := BuildPSNamedParam('OutPath', OutPath);
   WriteInstallerLog('CapabilityProbe: PowerShell host=' + PSHost);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'CapabilityProbe', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
   LogDebug('CapabilityProbe: exit=' + IntToStr(ResultCode));
 
@@ -3661,7 +4226,7 @@ begin
     BuildPSNamedParam('GroupName', GroupName) + ' ' +
     BuildPSNamedParam('UserName', UserName) + ' ' +
     BuildPSNamedParam('OutPath', OutPath);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'ValidateGroupMembershipADSI', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   if FileExists(OutPath) then
@@ -3712,7 +4277,7 @@ begin
   ScriptPath := TempFile('user_exists_check.ps1');
   SaveStringToFile(ScriptPath, BuildUserExistsPowerShellScript, False);
   PSParams := BuildPSNamedParam('UserName', UserName) + ' ' + BuildPSNamedParam('OutPath', OutPath);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'UserExistsLocal', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   Text := '';
@@ -3764,7 +4329,7 @@ begin
     BuildPSNamedParam('Password', Password) + ' ' +
     BuildPSNamedParam('OutPath', OutPath);
   WriteInstallerLog('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(PSParams));
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'CreateLocalUserViaADSI', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   Tag := ReadOutputTag(OutPath, 'ADSI_CREATE_OK');
@@ -3797,7 +4362,7 @@ begin
     BuildPSNamedParam('UserName', UserName) + ' ' +
     BuildPSNamedParam('Enable', BoolToIntStr(Enable)) + ' ' +
     BuildPSNamedParam('OutPath', OutPath);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'SetLocalUserEnabledViaADSI', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   Tag := ReadOutputTag(OutPath, 'SET_USER_STATE_OK');
@@ -3823,7 +4388,7 @@ begin
   ScriptPath := TempFile('delete_local_user.ps1');
   SaveStringToFile(ScriptPath, BuildDeleteLocalUserPowerShellScript, False);
   PSParams := BuildPSNamedParam('UserName', UserName) + ' ' + BuildPSNamedParam('OutPath', OutPath);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'DeleteLocalUserViaADSI', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   Tag := ReadOutputTag(OutPath, 'ADSI_DELETE_OK');
@@ -3885,7 +4450,7 @@ begin
     BuildPSNamedParam('UserName', UserName) + ' ' +
     BuildPSNamedParam('OutPath', OutPath) + ' ' +
     BuildPSNamedParam('SuccessTag', 'ADD_GROUP_OK');
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, PSParams, 'AddUserToGroupViaADSI', PS_TIMEOUT_SCRIPT, ResultCode);
   DeleteFile(ScriptPath);
 
   Tag := ReadOutputTag(OutPath, 'ADD_GROUP_OK');
@@ -4423,8 +4988,8 @@ begin
     ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
     ' exit 0' +
     '} catch { exit 1 }';
-  Exec(PSHost, BuildPowerShellArgs(PSCommand, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  RunPSCommandTimed(PSCommand, 'GetLocalUsers', PS_TIMEOUT_SCRIPT, ResultCode);
+  LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' (-1 = script exited before reporting) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
   if not FileExists(PSPath) then
   begin
@@ -6138,7 +6703,7 @@ begin
     '[System.IO.File]::WriteAllText(''' + PSSingleQuote(EncPath) + ''', $encPw)';
 
   ResultCode := -1;
-  Exec(PSHost, BuildPowerShellArgs(Cmd, True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSCommandTimed(Cmd, 'EncryptPasswordToFile', PS_TIMEOUT_SCRIPT, ResultCode);
 
   if (ResultCode = 0) and FileExists(EncPath) then
   begin
@@ -6545,12 +7110,12 @@ begin
     '}';
   SaveStringToFile(RunnerPath, RunnerScript, False);
   LogDebug('CreateRDPShortcut: Executing PowerShell script with timeout wrapper');
-  Exec(PSHost,
-    BuildPowerShellFileArgs(
-      RunnerPath,
-      BuildPSNamedParam('TargetScript', ScriptPath) + ' ' + BuildPSNamedParam('EncPath', EncPath) + ' -TimeoutSec 30',
-      True),
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // The runner enforces its own 30s job timeout; the installer-side watchdog is
+  // the outer safety net in case PowerShell never even gets that far.
+  if not RunPSFileTimed(RunnerPath,
+    BuildPSNamedParam('TargetScript', ScriptPath) + ' ' + BuildPSNamedParam('EncPath', EncPath) + ' -TimeoutSec 30',
+    'CreateRDPShortcut', PS_TIMEOUT_SCRIPT, ResultCode) then
+    LogWarn('CreateRDPShortcut: the RDP-file PowerShell runner was terminated by the watchdog');
   LogDebug('CreateRDPShortcut: Wrapped PowerShell script exit code=' + IntToStr(ResultCode));
   DeleteFile(RunnerPath);
   
@@ -6635,7 +7200,9 @@ begin
   for i := 0 to UsersList.Count - 1 do
   begin
     UserStartTick := GetTickCount;
-    LogDebug('CreateRDPUsers: Processing user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count));
+    LogDebug('CreateRDPUsers: Processing user ' + IntToStr(i+1) + '/' + IntToStr(UsersList.Count) +
+      ' | overall elapsed=' + IntToStr(GetTickCount - StartTick) + 'ms of ' +
+      IntToStr(USERS_OVERALL_TIMEOUT) + 'ms budget');
     // Check overall timeout
     if (GetTickCount - StartTick) > USERS_OVERALL_TIMEOUT then
     begin
@@ -6782,7 +7349,14 @@ begin
       // --- RDP shortcut: created only for an account that is verified usable ----
       if FailureReason = '' then
       begin
+        // Stage markers make it obvious from the log which phase of a user's setup
+        // the installer was in - the original field log simply stopped with no
+        // indication that the certificate/signing step was the one hanging.
+        WriteInstallerLog('STEP CreateRDPUsers: shortcut phase starting for ' + UserName +
+          ' | elapsed=' + IntToStr(GetTickCount - UserStartTick) + 'ms');
         CreateRDPShortcut(UserName, Password, UserCreatePath);
+        WriteInstallerLog('STEP CreateRDPUsers: shortcut phase finished for ' + UserName +
+          ' | elapsed=' + IntToStr(GetTickCount - UserStartTick) + 'ms');
         LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
       end
       else
@@ -7053,7 +7627,7 @@ begin
 
   ScriptPath := TempFile('read_rdp_settings.ps1');
   SaveStringToFile(ScriptPath, PSScript, False);
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, '', 'ReadShortcutSettingsFromRdpFile', PS_TIMEOUT_SCRIPT, ResultCode);
   WriteInstallerLog('ReadShortcutSettingsFromRdpFile: PS exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
 
   if not FileExists(OutPath) then exit;
@@ -7196,7 +7770,7 @@ begin
   SaveStringToFile(ScriptPath, PSScript, False);
   LogDebug('WriteShortcutSettingsToRdpFile: Starting PS update for ' + RdpPath);
   OpTick := GetTickCount;
-  Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, '', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  RunPSFileTimed(ScriptPath, '', 'WriteShortcutSettingsToRdpFile', PS_TIMEOUT_SCRIPT, ResultCode);
   LogDebug('WriteShortcutSettingsToRdpFile: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   if ResultCode = 0 then
   begin
@@ -10982,9 +11556,17 @@ begin
       else
         PortNumber := RDP_LISTEN_PORT;
       
-      ResultCode := 0;
-      Exec(PSHost, BuildPowerShellArgs('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) + ' -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { exit 0 } else { exit 1 }', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      
+      // A wedged Get-NetTCPConnection must not freeze the wizard: the call runs
+      // under the watchdog. The command deliberately does NOT use `exit`, so a
+      // clean completion writes the completion marker (ResultCode = 0) and any
+      // failure - including a timeout - leaves the code unknown (-1 => not listening).
+      ResultCode := 1;
+      RunPSCommandTimed('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) +
+        ' -State Listen -ErrorAction SilentlyContinue).Count -eq 0) { throw ''RDP is not listening'' }',
+        'RdpListeningCheck', PS_TIMEOUT_QUERY, ResultCode);
+      if ResultCode <> 0 then
+        ResultCode := 1;
+
       if ResultCode = 0 then
       begin
         SetStepDone(StepCheckRDP, TXT_CheckRDP);
