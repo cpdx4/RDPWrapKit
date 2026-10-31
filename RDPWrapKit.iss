@@ -158,6 +158,10 @@ procedure LogSim(const ScenarioText: string); forward;
 // Debug-enriched command execution forward declarations
 function RunCmdCapture(const CmdLine, OutTag: string): Integer; forward;
 function RunNetHiddenCapture(const Params, OutTag: string): Integer; forward;
+// Watchdog-based cmd wrapper. Forward declared because a few early helpers (such
+// as ValidateGroupMembership) run "net localgroup" before the watchdog block is
+// defined, and those calls must be bounded too.
+function RunCmdCaptureText(const CmdLine, OutTag: string; TimeoutMs: Integer; var ExitCodeOut: Integer): string; forward;
 
 var
   Page_InstallOptions: TWizardPage;
@@ -553,7 +557,7 @@ const
   // TIMEOUTS
   // -------------------------------------------------------------------------
   // HARD wall-clock limits. Child processes are launched with ewNoWait and are
-  // force-killed when these limits are exceeded (see RunProcessTimed), so a
+  // force-killed when these limits are exceeded (see WaitForChildCompletion), so a
   // wedged PowerShell/cmd child can never freeze the wizard forever - which is
   // exactly what happened in RDPWrapKit_install_20261031-180239.log, where the
   // installer stopped inside ExecPSCaptureAll during EnsureRDPSigningCert and
@@ -562,6 +566,8 @@ const
   PS_TIMEOUT_SCRIPT = 90000;     // generated .ps1 helpers (account/group work)
   PS_TIMEOUT_CAPTURE = 120000;   // ExecPSCaptureAll / certificate setup scripts
   PS_TIMEOUT_SIGN = 45000;       // cmd.exe + RdpSignTool.exe single-file signing
+  PS_TIMEOUT_NET = 30000;        // net.exe / sc.exe / reg.exe one-shot helpers
+  PS_START_TIMEOUT = 30000;      // give up when a PowerShell child never reports its PID
   PS_POLL_INTERVAL = 100;        // watchdog poll while waiting for completion
   PS_ALIVE_INTERVAL = 1000;      // fallback "is the child still alive?" interval
   PS_HEARTBEAT_INTERVAL = 10000; // log a heartbeat while a child is still running
@@ -1505,7 +1511,7 @@ end;
 
 function ValidateGroupMembership(const GroupName, UserName: string): Boolean;
 var
-  OutPath: string;
+  OutText: string;
   ResultCode: Integer;
   Lines: TStringList;
   i: Integer;
@@ -1526,21 +1532,23 @@ begin
     exit;
   end;
 
-  OutPath := TempFile('grp_members_' + SanitizeFileName(GroupName) + '.txt');
+  // Fallback listing through the watchdog: "net localgroup" is the very command
+  // that froze the installer in RDPWrapKit_install_20261031-183924.log, so it is
+  // bounded here as well.
+  OutText := RunCmdCaptureText('net.exe localgroup ' + QuoteExeArg(GroupName),
+    'grpmembers_' + SanitizeFileName(GroupName), PS_TIMEOUT_NET, ResultCode);
 
-  Exec('cmd.exe', '/c net localgroup ' + QuoteExeArg(GroupName) + ' > ' + QuoteExeArg(OutPath) + ' 2>&1',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  if not FileExists(OutPath) then
+  if OutText = '' then
   begin
-    LogDebug('ValidateGroupMembership: output file not found for ' + GroupName);
+    LogDebug('ValidateGroupMembership: net.exe produced no output for ' + GroupName +
+      ' (exit=' + IntToStr(ResultCode) + ')');
     LogExit('ValidateGroupMembership');
     exit;
   end;
 
   Lines := TStringList.Create;
   try
-    Lines.LoadFromFile(OutPath);
+    Lines.Text := OutText;
     InList := False;
     for i := 0 to Lines.Count - 1 do
     begin
@@ -1566,7 +1574,6 @@ begin
     end;
   finally
     Lines.Free;
-    DeleteFile(OutPath);
   end;
   LogDebug('ValidateGroupMembership: group=' + GroupName + ' user=' + UserName + ' result=' + BoolToStr(Result));
   LogExit('ValidateGroupMembership');
@@ -1848,16 +1855,26 @@ end;
 // When a child wedges - a hung PowerShell cmdlet, a crypt32/CNG call waiting on a
 // stopped cryptographic service, a certificate-store provider that never answers -
 // the wizard simply never progresses and the user sees a frozen "Create user"
-// step. That is exactly what the field log
-// RDPWrapKit_install_20261031-180239.log shows: the last line is
-// "ENTER ExecPSCaptureAll" inside EnsureRDPSigningCert, and nothing follows.
+// step. That is what RDPWrapKit_install_20261031-180239.log shows (stops inside
+// ExecPSCaptureAll) and what RDPWrapKit_install_20261031-183924.log shows again
+// (stops inside RunNetHiddenCapture on "net localgroup").
 //
-// The helpers below launch the child with ewNoWait (which hands back the process
-// ID) and then wait for completion with a hard wall-clock timeout:
-//   * MarkerPath <> '' : the child writes MarkerPath as its very last action
-//   * MarkerPath = ''  : completion is detected by polling the process itself
-// When the limit is exceeded the whole process tree is killed, so no wedged child
-// can keep the installer (or the wizard) hostage.
+// HARD-WON LESSON, do not regress this:
+//   Exec(..., ewNoWait, ResultCode) does NOT give a usable process ID on this
+//   Inno Setup. Every call in RDPWrapKit_install_20261031-183924.log reports the
+//   same "PID=259" - 259 is STILL_ACTIVE, i.e. the value of the exit-code slot,
+//   not a pid. Any watchdog that polls the process it *thinks* it started either
+//   declares the child dead within ~1 s (losing its output - exactly how the
+//   capability probe silently produced nothing in that log) or waits forever.
+//
+// Completion is therefore detected ONLY through files the child writes itself:
+//   * MarkerPath : written by the child as its very last action (completion + rc)
+//   * PidPath    : written by the child as its very FIRST action (the real $PID,
+//                  used only to kill a child that exceeds its timeout)
+// cmd.exe children (net.exe, sc.exe, RdpSignTool.exe) instead use the trailing
+// "call echo %^ERRORLEVEL%> marker" idiom, and are killed by image name.
+// When a limit is exceeded the child is force-terminated, so nothing can keep the
+// installer (or the wizard) hostage.
 
 function ResolveSystemExe(const FileName: string): string;
 begin
@@ -1943,67 +1960,87 @@ begin
     Result := True;
 end;
 
-// Run a process hidden and wait for it to finish, but never longer than TimeoutMs.
-// Returns True when the child finished before the timeout (TimedOut = False) and
-// False when it had to be killed (TimedOut = True) or could not be started.
-// ExitCodeOut receives the value the child wrote to MarkerPath, or -1 when the
-// exit code could not be determined (markerless mode or a missing marker).
-function RunProcessTimed(const FileName, Params, MarkerPath, Tag: string; TimeoutMs: Integer;
-  var ExitCodeOut: Integer; var TimedOut: Boolean): Boolean;
+// Force-terminate every process with the given image name. Only used when the
+// child never reported a PID (cmd.exe children such as net.exe, sc.exe and
+// RdpSignTool.exe), so that a wedged command can still be stopped.
+procedure KillProcessImage(const ImageName: string);
 var
-  Pid, LaunchRc: Integer;
-  StartTick, LastAliveCheck, LastHeartbeat: Cardinal;
-  AliveInterval: Cardinal;
-  ElapsedMs, SinceAliveCheck, SinceHeartbeat: Int64;
-  MarkerText: string;
-  RanWithoutMarker: Boolean;
+  RC: Integer;
 begin
-  LogEntry('RunProcessTimed');
-  Result := False;
-  TimedOut := False;
-  ExitCodeOut := -1;
-  RanWithoutMarker := False;
-
-  if MarkerPath <> '' then
-    DeleteFile(MarkerPath);
-
-  LaunchRc := 0;
-  if not Exec(FileName, Params, '', SW_HIDE, ewNoWait, LaunchRc) then
+  if ImageName = '' then
+    exit;
+  // Never kill all cmd.exe processes: that could take down unrelated shells the
+  // user has open. The cmd.exe wrapper is left to finish on its own.
+  if CompareText(ImageName, 'cmd.exe') = 0 then
   begin
-    LogError('RunProcessTimed[' + Tag + ']: could not start ''' + FileName + '''');
-    LogExit('RunProcessTimed');
+    LogWarn('KillProcessImage: refusing to kill every cmd.exe on the system');
     exit;
   end;
-  Pid := LaunchRc;
-  LogDebug('RunProcessTimed[' + Tag + ']: started PID=' + IntToStr(Pid) +
-    ' | timeout=' + IntToStr(TimeoutMs) + 'ms' +
-    ' | waitingForMarker=' + MarkerPath);
+  LogWarn('KillProcessImage: taskkill /F /IM ' + ImageName);
+  Exec(ResolveSystemExe('taskkill.exe'), '/F /IM ' + ImageName, '', SW_HIDE,
+    ewWaitUntilTerminated, RC);
+end;
 
-  // With a completion marker a slow process is expected, so the (comparatively
-  // expensive) aliveness poll only acts as a safety net. Without a marker the
-  // aliveness poll IS the completion signal.
-  if MarkerPath = '' then
-    AliveInterval := PS_POLL_INTERVAL * 3
-  else
-    AliveInterval := PS_ALIVE_INTERVAL;
-
-  // Without a usable process ID the aliveness poll cannot be trusted, so it is
-  // disabled entirely: the wait then relies on the completion marker or the
-  // timeout, which is slower on failure but never terminates a live child early.
-  if Pid <= 0 then
+// Derive the executable image name from a command line (used for the kill-by-image
+// fallback). "C:\x\Tool.exe" "file" -> Tool.exe ; net.exe localgroup ... -> net.exe
+function ImageNameFromCmdLine(const CmdLine: string): string;
+var
+  P1, P2: Integer;
+begin
+  Result := '';
+  P1 := Pos('"', CmdLine);
+  if P1 > 0 then
   begin
-    LogWarn('RunProcessTimed[' + Tag + ']: no usable process ID was returned; ' +
-      'falling back to marker/timeout only');
-    AliveInterval := 3600000;
-  end;
+    P2 := Pos('"', Copy(CmdLine, P1 + 1, Length(CmdLine)));
+    if P2 > 0 then
+      Result := ExtractFileName(Copy(CmdLine, P1 + 1, P2 - 1))
+    else
+      Result := ExtractFileName(Copy(CmdLine, P1 + 1, Length(CmdLine)));
+  end
+  else
+    Result := ExtractFileName(Copy(CmdLine, 1, Pos(' ', CmdLine + ' ') - 1));
+  if (Result <> '') and (Pos('.', Result) = 0) then
+    Result := Result + '.exe';
+end;
 
+// Wait for a child to confirm completion, with a hard wall-clock timeout.
+// Completion is detected ONLY through files the child writes itself (see the
+// comment block above): MarkerPath as the last action, PidPath as the first.
+// Returns True when the child finished (marker present, or the process is gone),
+// False when the timeout expired and the child was force-terminated.
+function WaitForChildCompletion(const MarkerPath, PidPath, KillImage, Tag: string;
+  TimeoutMs: Integer; var ChildPidOut: Integer; var TimedOut: Boolean): Boolean;
+var
+  StartTick, LastAliveCheck, LastHeartbeat: Cardinal;
+  ElapsedMs, SinceAliveCheck, SinceHeartbeat: Int64;
+  PidText: string;
+  PidWarned, ChildGone, StartFailed: Boolean;
+begin
+  Result := False;
+  TimedOut := False;
+  ChildPidOut := -1;
+  PidWarned := False;
+  ChildGone := False;
+  StartFailed := False;
   StartTick := GetTickCount;
   LastAliveCheck := StartTick;
   LastHeartbeat := StartTick;
 
   repeat
     if (MarkerPath <> '') and FileExists(MarkerPath) then
+    begin
+      Result := True;
       break;
+    end;
+
+    // Learn the child's own PID as soon as it reports it.
+    if (PidPath <> '') and (ChildPidOut <= 0) and FileExists(PidPath) then
+    begin
+      PidText := Trim(ReadTextFileSafe(PidPath));
+      ChildPidOut := StrToIntDef(PidText, -1);
+      if ChildPidOut > 0 then
+        LogDebug('WaitForChildCompletion[' + Tag + ']: child self-reported PID=' + IntToStr(ChildPidOut));
+    end;
 
     ElapsedMs := GetTickCount - StartTick;
     if ElapsedMs >= TimeoutMs then
@@ -2012,29 +2049,51 @@ begin
       break;
     end;
 
+    // The aliveness check is only meaningful once a real pid is known.
     SinceAliveCheck := GetTickCount - LastAliveCheck;
-    if SinceAliveCheck >= AliveInterval then
+    if (ChildPidOut > 0) and (SinceAliveCheck >= PS_ALIVE_INTERVAL) then
     begin
       LastAliveCheck := GetTickCount;
-      if not IsProcessAlive(Pid) then
+      if not IsProcessAlive(ChildPidOut) then
       begin
-        // Confirm the miss before trusting it: a freshly started process can be
-        // invisible to the first tasklist call on a busy machine.
-        Sleep(250);
-        if IsProcessAlive(Pid) then
-          continue;
-        RanWithoutMarker := (MarkerPath <> '') and (not FileExists(MarkerPath));
-        break;
+        // Confirm the miss before trusting it.
+        Sleep(300);
+        if (MarkerPath <> '') and FileExists(MarkerPath) then
+        begin
+          Result := True;
+          break;
+        end;
+        if not IsProcessAlive(ChildPidOut) then
+        begin
+          ChildGone := True;
+          Result := True;
+          break;
+        end;
       end;
+    end;
+
+    if (PidPath <> '') and (ChildPidOut <= 0) and (not PidWarned) and (ElapsedMs >= 20000) then
+    begin
+      PidWarned := True;
+      LogWarn('WaitForChildCompletion[' + Tag + ']: child has not reported a PID after ' +
+        IntToStr(ElapsedMs) + 'ms');
+    end;
+
+    // A PowerShell child normally reports its PID within a second or two. If it
+    // never does, the host itself failed to start - do not burn the whole timeout.
+    if (PidPath <> '') and (ChildPidOut <= 0) and (ElapsedMs >= PS_START_TIMEOUT) then
+    begin
+      StartFailed := True;
+      break;
     end;
 
     SinceHeartbeat := GetTickCount - LastHeartbeat;
     if SinceHeartbeat >= PS_HEARTBEAT_INTERVAL then
     begin
       LastHeartbeat := GetTickCount;
-      LogDebug('RunProcessTimed[' + Tag + ']: still waiting | elapsed=' + IntToStr(ElapsedMs) +
-        'ms | PID=' + IntToStr(Pid) + ' | markerPresent=' +
-        BoolToStr((MarkerPath <> '') and FileExists(MarkerPath)));
+      LogDebug('WaitForChildCompletion[' + Tag + ']: still waiting | elapsed=' + IntToStr(ElapsedMs) +
+        'ms | childPid=' + IntToStr(ChildPidOut) +
+        ' | markerPresent=' + BoolToStr((MarkerPath <> '') and FileExists(MarkerPath)));
     end;
 
     Sleep(PS_POLL_INTERVAL);
@@ -2042,65 +2101,159 @@ begin
 
   if TimedOut then
   begin
-    LogError('RunProcessTimed[' + Tag + ']: TIMEOUT after ' + IntToStr(GetTickCount - StartTick) +
-      'ms (limit ' + IntToStr(TimeoutMs) + 'ms) - terminating process tree PID=' + IntToStr(Pid));
-    KillProcessTree(Pid);
-    ExitCodeOut := -1;
-    LogExit('RunProcessTimed');
+    LogError('WaitForChildCompletion[' + Tag + ']: TIMEOUT after ' + IntToStr(GetTickCount - StartTick) +
+      'ms (limit ' + IntToStr(TimeoutMs) + 'ms) - terminating the child');
+    if ChildPidOut > 0 then
+      KillProcessTree(ChildPidOut)
+    else if KillImage <> '' then
+      KillProcessImage(KillImage)
+    else
+      LogError('WaitForChildCompletion[' + Tag + ']: no PID and no image name - the child could not be killed');
+  end
+  else if StartFailed then
+  begin
+    LogError('WaitForChildCompletion[' + Tag + ']: the PowerShell child never reported a PID within ' +
+      IntToStr(GetTickCount - StartTick) + 'ms - assuming it failed to start');
+    Result := True;
+  end
+  else if ChildGone then
+    LogWarn('WaitForChildCompletion[' + Tag + ']: child exited without writing its completion marker ' +
+      '(it probably used "exit"); exit code unavailable');
+
+  LogDebug('WaitForChildCompletion[' + Tag + ']: finished=' + BoolToStr(Result) +
+    ' timedOut=' + BoolToStr(TimedOut) + ' childGone=' + BoolToStr(ChildGone) +
+    ' [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
+end;
+
+// Build a PowerShell script that reports its own PID first, runs Body, and always
+// writes the completion marker last. Body is raw PowerShell code.
+function BuildTrackedPSScript(const Body, MarkerPath, PidPath, ErrorOutPath: string): string;
+begin
+  Result :=
+    'Set-Content -LiteralPath ''' + PidPath + ''' -Value $PID -Encoding ASCII -Force' + #13#10 +
+    '$rdpRc = 0' + #13#10 +
+    'try {' + #13#10 +
+    Body + #13#10 +
+    '} catch {' + #13#10 +
+    '  $rdpRc = 1';
+  if ErrorOutPath <> '' then
+    Result := Result + #13#10 +
+      '  try { (''ERROR: '' + $_.Exception.Message) | Out-File -Encoding UTF8 -Append ''' +
+      ErrorOutPath + ''' -Force } catch { }';
+  Result := Result + #13#10 +
+    '}' + #13#10 +
+    'Set-Content -LiteralPath ''' + MarkerPath + ''' -Value $rdpRc -Encoding ASCII -Force' + #13#10;
+end;
+
+// Launch PowerShell on a generated .ps1 and wait for it under the watchdog.
+// The script reports its own PID and writes MarkerPath when it is done.
+function ExecPSScriptTracked(const ScriptPath, PSParams, MarkerPath, PidPath, Tag: string;
+  TimeoutMs: Integer; var ExitCodeOut: Integer; var TimedOut: Boolean): Boolean;
+var
+  StartTick: Cardinal;
+  LaunchRc: Integer;
+  ChildPid: Integer;
+  MarkerText: string;
+begin
+  LogEntry('ExecPSScriptTracked');
+  StartTick := GetTickCount;
+  ExitCodeOut := -1;
+  TimedOut := False;
+  DeleteFile(MarkerPath);
+  DeleteFile(PidPath);
+
+  LogDebug('ExecPSScriptTracked[' + Tag + ']: script=' + ScriptPath +
+    ' | timeout=' + IntToStr(TimeoutMs) + 'ms' +
+    ' | args=' + MaskPasswordsInString(PSParams));
+  // NOTE: the value Exec puts in LaunchRc is deliberately ignored - it is not a
+  // usable pid (see the watchdog comment block).
+  LaunchRc := 0;
+  if not Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True), '', SW_HIDE, ewNoWait, LaunchRc) then
+  begin
+    LogError('ExecPSScriptTracked[' + Tag + ']: could not start PowerShell at ' + PSHost);
+    DeleteFile(MarkerPath);
+    DeleteFile(PidPath);
+    LogExit('ExecPSScriptTracked');
     exit;
   end;
 
-  if (MarkerPath <> '') and FileExists(MarkerPath) then
+  ChildPid := -1;
+  Result := WaitForChildCompletion(MarkerPath, PidPath, '', Tag, TimeoutMs, ChildPid, TimedOut);
+
+  if FileExists(MarkerPath) then
   begin
     MarkerText := Trim(ReadTextFileSafe(MarkerPath));
     ExitCodeOut := StrToIntDef(MarkerText, -1);
-    DeleteFile(MarkerPath);
   end;
+  DeleteFile(MarkerPath);
+  DeleteFile(PidPath);
 
-  if RanWithoutMarker then
-    LogWarn('RunProcessTimed[' + Tag + ']: child exited without writing its completion marker; exit code unavailable');
-
-  LogDebug('RunProcessTimed[' + Tag + ']: finished | exit=' + IntToStr(ExitCodeOut) +
-    ' | elapsed=' + IntToStr(GetTickCount - StartTick) + 'ms');
-  Result := True;
-  LogExit('RunProcessTimed');
+  if TimedOut then
+    ExitCodeOut := -1;
+  LogDebug('ExecPSScriptTracked[' + Tag + ']: exit=' + IntToStr(ExitCodeOut) +
+    ' finished=' + BoolToStr(Result) + ' timedOut=' + BoolToStr(TimedOut) +
+    ' [DURATION:' + IntToStr(GetTickCount - StartTick) + 'ms]');
+  LogExit('ExecPSScriptTracked');
 end;
 
-// Run a generated PowerShell script (invoked with -File) with a hard timeout.
-// The account/group scripts report their outcome through their own output file,
-// so the exit code is only logged (and stays -1 when it cannot be determined).
+// Run a generated PowerShell script (invoked with -File) under the watchdog.
+// The account/group scripts cannot be changed to report a PID, so a tiny runner
+// script is generated for them: it reports $PID, invokes the target with exactly
+// the named parameters the installer already builds, and writes the completion
+// marker. Those scripts report their real outcome through their own output file,
+// so the exit code is informational only (and -1 when the script calls "exit").
 function RunPSFileTimed(const ScriptPath, PSParams, Tag: string; TimeoutMs: Integer;
   var ResultCode: Integer): Boolean;
 var
   OpTick: Cardinal;
   TimedOut: Boolean;
+  RunnerPath, MarkerPath, PidPath, Body, CleanParams: string;
 begin
   LogEntry('RunPSFileTimed');
   OpTick := GetTickCount;
   ResultCode := -1;
   TimedOut := False;
-  LogDebug('RunPSFileTimed[' + Tag + ']: script=' + ScriptPath +
+
+  CleanParams := Trim(PSParams);
+  if CleanParams <> '' then
+    Body := '  & ''' + PSSingleQuote(ScriptPath) + ''' ' + CleanParams
+  else
+    Body := '  & ''' + PSSingleQuote(ScriptPath) + '''';
+  // A target script that ends with "exit N" only returns to this runner, so its
+  // exit code is available here - propagate it instead of reporting a blind 0.
+  Body := Body + #13#10 +
+    '  if (($null -ne $LASTEXITCODE) -and ($LASTEXITCODE -ne 0)) { $rdpRc = $LASTEXITCODE }';
+
+  RunnerPath := TempFile('runner_' + SanitizeFileName(Tag) + '.ps1');
+  MarkerPath := TempFile('runner_' + SanitizeFileName(Tag) + '.done');
+  PidPath := TempFile('runner_' + SanitizeFileName(Tag) + '.pid');
+  SaveStringToFile(RunnerPath, BuildTrackedPSScript(Body, MarkerPath, PidPath, ''), False);
+
+  LogDebug('RunPSFileTimed[' + Tag + ']: target=' + ScriptPath +
     ' | timeout=' + IntToStr(TimeoutMs) + 'ms' +
     ' | args=' + MaskPasswordsInString(PSParams));
-  Result := RunProcessTimed(PSHost, BuildPowerShellFileArgs(ScriptPath, PSParams, True),
-    '', Tag, TimeoutMs, ResultCode, TimedOut);
+  Result := ExecPSScriptTracked(RunnerPath, '', MarkerPath, PidPath, Tag, TimeoutMs,
+    ResultCode, TimedOut);
+  DeleteFile(RunnerPath);
+
   if TimedOut then
     LogError('RunPSFileTimed[' + Tag + ']: script did not finish within ' + IntToStr(TimeoutMs) +
       'ms and was terminated');
   LogDebug('RunPSFileTimed[' + Tag + ']: finished=' + BoolToStr(Result) +
+    ' | exit=' + IntToStr(ResultCode) +
     ' | timedOut=' + BoolToStr(TimedOut) +
     ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('RunPSFileTimed');
 end;
 
-// Run a PowerShell -Command string under the watchdog. The command receives a
-// trailing statement that records a successful completion; when the command exits
-// through `exit N` (or never completes) the exit code is reported as -1, which
-// callers must treat as "unknown", never as a specific failure code.
+// Run a PowerShell command string under the watchdog. The command is written to a
+// real .ps1 file (so no -Command quoting rules can break it) which reports its own
+// PID and writes the completion marker. When the command exits through `exit N`
+// the exit code is reported as -1, which callers must treat as "unknown".
 function RunPSCommandTimed(const PSCommand, Tag: string; TimeoutMs: Integer;
   var ResultCode: Integer): Boolean;
 var
-  DonePath, FinalCommand: string;
+  ScriptPath, MarkerPath, PidPath, Body: string;
   TimedOut: Boolean;
   OpTick: Cardinal;
 begin
@@ -2108,15 +2261,16 @@ begin
   OpTick := GetTickCount;
   ResultCode := -1;
   TimedOut := False;
-  DonePath := TempFile('pscmd_' + SanitizeFileName(Tag) + '.done');
-  DeleteFile(DonePath);
-  FinalCommand := PSCommand + '; Set-Content -LiteralPath ''' + DonePath +
-    ''' -Value 0 -Encoding ASCII -Force';
+  ScriptPath := TempFile('pscmd_' + SanitizeFileName(Tag) + '.ps1');
+  MarkerPath := TempFile('pscmd_' + SanitizeFileName(Tag) + '.done');
+  PidPath := TempFile('pscmd_' + SanitizeFileName(Tag) + '.pid');
+  Body := '  & { ' + PSCommand + ' } *>&1 | Out-Null';
+  SaveStringToFile(ScriptPath, BuildTrackedPSScript(Body, MarkerPath, PidPath, ''), False);
   LogDebug('RunPSCommandTimed[' + Tag + ']: timeout=' + IntToStr(TimeoutMs) +
     'ms | command=' + MaskPasswordsInString(PSCommand));
-  Result := RunProcessTimed(PSHost, BuildPowerShellArgs(FinalCommand, True), DonePath, Tag,
-    TimeoutMs, ResultCode, TimedOut);
-  DeleteFile(DonePath);
+  Result := ExecPSScriptTracked(ScriptPath, '', MarkerPath, PidPath, Tag, TimeoutMs,
+    ResultCode, TimedOut);
+  DeleteFile(ScriptPath);
   if TimedOut then
     LogError('RunPSCommandTimed[' + Tag + ']: PowerShell command TIMED OUT after ' +
       IntToStr(TimeoutMs) + 'ms and was terminated');
@@ -2128,14 +2282,16 @@ end;
 
 // Run a command through cmd.exe with stdout/stderr captured and returned as text.
 // Completion is guarded by a hard timeout, so a wedged command can never hang the
-// installer. The exit code is recovered through a completion marker written by
-// cmd.exe itself; when the marker cannot be read the exit code is -1.
+// installer. cmd.exe reports its exit code through a trailing marker, so no process
+// id is needed; if the command exceeds its timeout it is killed by image name
+// (net.exe / sc.exe / RdpSignTool.exe - all transient CLI tools).
 function RunCmdCaptureText(const CmdLine, OutTag: string; TimeoutMs: Integer;
   var ExitCodeOut: Integer): string;
 var
-  OutPath, DonePath, FullCmd: string;
+  OutPath, DonePath, FullCmd, KillImage: string;
   TimedOut: Boolean;
   OpTick: Cardinal;
+  LaunchRc, ChildPid: Integer;
 begin
   LogEntry('RunCmdCaptureText');
   OpTick := GetTickCount;
@@ -2156,18 +2312,29 @@ begin
   FullCmd := '/c "' + CmdLine + ' > "' + OutPath + '" 2>&1 & call echo %^ERRORLEVEL%> "' + DonePath + '"';
   LogDebug('RunCmdCaptureText[' + OutTag + ']: ' + EXE_CMD + ' ' + MaskPasswordsInString(FullCmd));
 
-  if not RunProcessTimed(EXE_CMD, FullCmd, DonePath, OutTag, TimeoutMs, ExitCodeOut, TimedOut) then
+  // NOTE: the value Exec reports for ewNoWait is not a usable pid here.
+  LaunchRc := 0;
+  if not Exec(EXE_CMD, FullCmd, '', SW_HIDE, ewNoWait, LaunchRc) then
     LogError('RunCmdCaptureText[' + OutTag + ']: could not start cmd.exe');
+
+  KillImage := ImageNameFromCmdLine(CmdLine);
+  ChildPid := -1;
+  WaitForChildCompletion(DonePath, '', KillImage, OutTag, TimeoutMs, ChildPid, TimedOut);
   if TimedOut then
     LogError('RunCmdCaptureText[' + OutTag + ']: command TIMED OUT after ' + IntToStr(TimeoutMs) +
       'ms and was terminated');
+
+  if FileExists(DonePath) then
+    ExitCodeOut := StrToIntDef(Trim(ReadTextFileSafe(DonePath)), -1);
 
   Result := Trim(ReadTextFileSafe(OutPath));
   DeleteFile(OutPath);
   DeleteFile(DonePath);
 
   LogDebug('RunCmdCaptureText[' + OutTag + ']: exit=' + IntToStr(ExitCodeOut) +
+    ' | timedOut=' + BoolToStr(TimedOut) +
     ' | outputLen=' + IntToStr(Length(Result)) +
+    ' | killImage=' + KillImage +
     ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('RunCmdCaptureText');
 end;
@@ -2179,7 +2346,7 @@ end;
 // is deleted, so no external log files remain.
 function GetPSOutput(const Command: string): string;
 var
-  PSPath, DonePath, PSArgs: string;
+  PSPath, DonePath, PidPath, ScriptPath, Body: string;
   RC: Integer;
   SL: TStringList;
   j: Integer;
@@ -2193,23 +2360,26 @@ begin
   TimedOut := False;
   PSPath := TempFile('psout.txt');
   DonePath := TempFile('psout.done');
+  PidPath := TempFile('psout.pid');
+  ScriptPath := TempFile('psquery.ps1');
   DeleteFile(PSPath);
   DeleteFile(DonePath);
+  DeleteFile(PidPath);
 
-  // The completion marker is written after the Out-File so the watchdog knows the
-  // child finished on purpose instead of disappearing.
-  // The command runs inside a script block because a bare trailing "| Out-File"
-  // is a PARSE ERROR for multi-statement commands ("if ... | Out-File" yields
-  // "An empty pipe element is not allowed"), which silently produced empty
-  // results for callers such as IsRdpWrapperAutoupdateTaskPresent. The error
-  // stream is discarded so a failed command still yields '' instead of an
-  // error record that callers would mistake for a value.
-  PSArgs := BuildPowerShellArgs(
-    '& { ' + Command + ' } 2>$null | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; ' +
-    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 0 -Encoding ASCII -Force', True);
+  // The query is written to a real .ps1 file (not passed with -Command) so no
+  // command-line quoting rule can break it, and so the child can report its own
+  // PID and completion. It runs inside a script block because a bare trailing
+  // "| Out-File" is a PARSE ERROR for multi-statement commands ("if ... |
+  // Out-File" yields "An empty pipe element is not allowed"), which silently
+  // produced empty results for callers such as
+  // IsRdpWrapperAutoupdateTaskPresent. The error stream is discarded so a failed
+  // command still yields '' instead of an error record.
+  Body := '  & { ' + Command + ' } 2>$null | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
+  SaveStringToFile(ScriptPath, BuildTrackedPSScript(Body, DonePath, PidPath, PSPath), False);
   LogDebug('GetPSOutput: host=' + PSHost + ' | timeout=' + IntToStr(PS_TIMEOUT_QUERY) +
     'ms | command=' + MaskPasswordsInString(Command));
-  RunProcessTimed(PSHost, PSArgs, DonePath, 'GetPSOutput', PS_TIMEOUT_QUERY, RC, TimedOut);
+  ExecPSScriptTracked(ScriptPath, '', DonePath, PidPath, 'GetPSOutput', PS_TIMEOUT_QUERY, RC, TimedOut);
+  DeleteFile(ScriptPath);
   if TimedOut then
   begin
     LogError('GetPSOutput: PowerShell query TIMED OUT after ' + IntToStr(PS_TIMEOUT_QUERY) +
@@ -2248,7 +2418,7 @@ end;
 // is deleted, so no external log files remain.
 function ExecPSCaptureAll(const Command: string; var ResultCode: Integer): string;
 var
-  PSPath, DonePath, WrappedCommand, PSArgs: string;
+  PSPath, DonePath, PidPath, ScriptPath, WrappedCommand: string;
   SL: TStringList;
   j: Integer;
   TimedOut: Boolean;
@@ -2266,24 +2436,25 @@ begin
   DeleteFile(PSPath);
   DeleteFile(DonePath);
 
-  // The wrapper keeps the original capture semantics (all streams merged) and
-  // adds a completion marker carrying the outcome, so the watchdog can tell a
-  // finished child from a wedged one. The full command is logged (masked) before
-  // it runs - its absence is what made the original field log impossible to
-  // diagnose: the installer stopped inside this function with no record of the
-  // PowerShell it was waiting for.
-  WrappedCommand :=
-    'try { & { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force; ' +
-    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 0 -Encoding ASCII -Force } ' +
-    'catch { try { (''ERROR: '' + $_.Exception.Message) | Out-File -Encoding UTF8 -Append ''' +
-    PSPath + ''' -Force } catch { }; ' +
-    'Set-Content -LiteralPath ''' + DonePath + ''' -Value 1 -Encoding ASCII -Force }';
-  PSArgs := BuildPowerShellArgs(WrappedCommand, True);
+  // The command is written to a real .ps1 file (not passed with -Command) so no
+  // command-line quoting rule can break it, and so the child can report its own
+  // PID and completion. The script keeps the original capture semantics (all
+  // streams merged into one output file) and records the outcome in the marker.
+  // The full command is logged (masked) before it runs - its absence is what made
+  // the original field log impossible to diagnose: the installer stopped inside
+  // this function with no record of the PowerShell it was waiting for.
+  WrappedCommand := '  & { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
+  PidPath := TempFile('psall.pid');
+  ScriptPath := TempFile('pscapture.ps1');
+  DeleteFile(PidPath);
+  SaveStringToFile(ScriptPath,
+    BuildTrackedPSScript(WrappedCommand, DonePath, PidPath, PSPath), False);
   LogDebug('ExecPSCaptureAll: host=' + PSHost + ' | timeout=' + IntToStr(PS_TIMEOUT_CAPTURE) + 'ms');
   LogDebug('ExecPSCaptureAll: command=' + MaskPasswordsInString(Command));
 
-  Finished := RunProcessTimed(PSHost, PSArgs, DonePath, 'ExecPSCaptureAll', PS_TIMEOUT_CAPTURE,
-    ResultCode, TimedOut);
+  Finished := ExecPSScriptTracked(ScriptPath, '', DonePath, PidPath, 'ExecPSCaptureAll',
+    PS_TIMEOUT_CAPTURE, ResultCode, TimedOut);
+  DeleteFile(ScriptPath);
 
   if FileExists(PSPath) then
   begin
@@ -2588,7 +2759,8 @@ end;
 function BuildEnsureSigningCertScript: string;
 begin
   Result :=
-    'param([string]$OutPath, [string]$DonePath, [string]$SubjectName)' + #13#10 +
+    'param([string]$OutPath, [string]$DonePath, [string]$SubjectName, [string]$PidPath)' + #13#10 +
+    'Set-Content -LiteralPath $PidPath -Value $PID -Encoding ASCII -Force' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     '$rc = 1' + #13#10 +
     '$my = $null' + #13#10 +
@@ -2676,12 +2848,13 @@ end;
 // the installation so per-user shortcut creation does not repeat it.
 procedure EnsureRDPSigningCert;
 var
-  ScriptPath, OutPath, DonePath, PSParams, Subject, Line: string;
+  ScriptPath, OutPath, DonePath, PidPath, PSParams, Subject, Line: string;
   ResultCode: Integer;
   OpTick: Cardinal;
   SL: TStringList;
   i: Integer;
   Found: Boolean;
+  TimedOut: Boolean;
 begin
   LogEntry('EnsureRDPSigningCert');
 
@@ -2702,20 +2875,28 @@ begin
   Subject := 'CN=RDPWrapKit: Only trust if connecting to 127.0.0.2';
   OutPath := TempFile('signing_cert.log');
   DonePath := TempFile('signing_cert.done');
+  PidPath := TempFile('signing_cert.pid');
   ScriptPath := TempFile('ensure_signing_cert.ps1');
   DeleteFile(OutPath);
   DeleteFile(DonePath);
+  DeleteFile(PidPath);
   SaveStringToFile(ScriptPath, BuildEnsureSigningCertScript, False);
 
   PSParams :=
     BuildPSNamedParam('OutPath', OutPath) + ' ' +
     BuildPSNamedParam('DonePath', DonePath) + ' ' +
-    BuildPSNamedParam('SubjectName', Subject);
+    BuildPSNamedParam('SubjectName', Subject) + ' ' +
+    BuildPSNamedParam('PidPath', PidPath);
 
   LogDebug('EnsureRDPSigningCert: running ' + ScriptPath +
     ' | timeout=' + IntToStr(PS_TIMEOUT_CAPTURE) + 'ms');
-  RunPSFileTimed(ScriptPath, PSParams, 'EnsureRDPSigningCert', PS_TIMEOUT_CAPTURE, ResultCode);
+  TimedOut := False;
+  ExecPSScriptTracked(ScriptPath, PSParams, DonePath, PidPath, 'EnsureRDPSigningCert',
+    PS_TIMEOUT_CAPTURE, ResultCode, TimedOut);
   DeleteFile(ScriptPath);
+  if TimedOut then
+    LogError('EnsureRDPSigningCert: the certificate script TIMED OUT after ' +
+      IntToStr(PS_TIMEOUT_CAPTURE) + 'ms and was terminated');
 
   if FileExists(OutPath) then
   begin
@@ -3559,17 +3740,22 @@ begin
   LoggerWrite(Trim(NormalizeLogLevel(Msg)), Msg);
 end;
 
-// Run any process hidden and return its exit code
+// Run any process hidden and return its exit code.
+// Bounded by the process watchdog so a wedged helper can never freeze the wizard.
 function RunHidden(const FileName, Params: string): Integer;
 var
   RC: Integer;
   OpTick: Cardinal;
+  CmdLine: string;
 begin
   LogEntry('RunHidden');
   OpTick := GetTickCount;
-  RC := 0;
-  LogDebug('Exec: ' + FileName + ' ' + MaskCommandForLog(FileName, Params));
-  Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
+  RC := -1;
+  CmdLine := FileName;
+  if Trim(Params) <> '' then
+    CmdLine := CmdLine + ' ' + Params;
+  LogDebug('Exec: ' + MaskCommandForLog(FileName, Params));
+  RunCmdCaptureText(CmdLine, 'runhidden', PS_TIMEOUT_NET, RC);
   LogDebug('ExitCode: ' + IntToStr(RC) + ' for ' + FileName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   Result := RC;
   LogExit('RunHidden');
@@ -3683,13 +3869,17 @@ end;
 // Run net.exe with stdout/stderr captured and logged.
 // Like RunNetHidden but dumps the command output on failure.
 // Uses the simulation bypass from RunNetHidden.
+// Runs under the process watchdog: a hung net.exe (seen in
+// RDPWrapKit_install_20261031-183924.log, where "net localgroup" blocked the whole
+// installer) is now killed at the timeout and reported instead of freezing the
+// wizard. RunCmdCaptureText owns the cmd.exe quoting rules, the captured output
+// and the exit code.
 function RunNetHiddenCapture(const Params, OutTag: string): Integer;
 var
-  OutPath: string;
+  OutText: string;
   SL: TStringList;
   j: Integer;
   RC: Integer;
-  FullCmd: string;
 begin
   LogEntry('RunNetHiddenCapture');
   if SimulateNetFailPowerShell then
@@ -3705,61 +3895,36 @@ begin
     exit;
   end;
 
-  OutPath := TempFile('net_' + SanitizeFileName(OutTag) + '.log');
-  RC := 0;
+  RC := -1;
   LogDebug('RunNetHiddenCapture: ' + MaskCommandForLog('net.exe', Params));
-
-  // CRITICAL - cmd.exe /c quoting rules:
-  //   When the command after /c starts with a double-quote, cmd.exe strips that
-  //   leading quote AND the LAST quote on the entire line. If the redirection is
-  //   placed OUTSIDE the outer quotes, the last quote is the one closing the
-  //   output path, so the redirect target is mangled into an invalid filename and
-  //   net.exe frequently never runs at all - with no captured output, which made
-  //   this failure completely silent. The redirection must therefore live INSIDE
-  //   the outer quotes (identical fix to RunCmdCapture).
-  // BEFORE (broken): /c "net.exe <params>" > "out.log" 2>&1
-  // AFTER  (fixed):  /c "net.exe <params> > "out.log" 2>&1"
-  FullCmd := '/c "net.exe ' + Params + ' > "' + OutPath + '" 2>&1"';
-  LogDebug('RunNetHiddenCapture: executing: ' + EXE_CMD + ' ' + FullCmd);
-  if not Exec(EXE_CMD, FullCmd, '', SW_HIDE, ewWaitUntilTerminated, RC) then
-    LogWarn('RunNetHiddenCapture: Exec() could not launch cmd.exe for tag=' + OutTag);
+  OutText := RunCmdCaptureText('net.exe ' + Params, OutTag, PS_TIMEOUT_NET, RC);
   LogDebug('RunNetHiddenCapture: exit=' + IntToStr(RC) + ' tag=' + OutTag);
 
   // Always dump whatever the command produced. Diagnostics must never depend on
-  // a non-zero exit code: a missing output file is itself the strongest signal
-  // that the command line never executed.
-  if FileExists(OutPath) then
+  // a non-zero exit code: no output at all is itself a signal.
+  if OutText <> '' then
   begin
     SL := TStringList.Create;
     try
       try
-        SL.LoadFromFile(OutPath);
-        if SL.Count > 0 then
-        begin
-          LogDebug('net.exe output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
-          for j := 0 to SL.Count - 1 do
-            LogDebug('  ' + SL[j]);
-        end
-        else
-          LogDebug('RunNetHiddenCapture: output file is empty for tag=' + OutTag);
+        SL.Text := OutText;
+        LogDebug('net.exe output (' + OutTag + ', ' + IntToStr(SL.Count) + ' lines):');
+        for j := 0 to SL.Count - 1 do
+          LogDebug('  ' + SL[j]);
       except
-        LogWarn('RunNetHiddenCapture: failed to read output: ' + OutPath);
+        LogWarn('RunNetHiddenCapture: failed to split captured output for tag=' + OutTag);
       end;
     finally
       SL.Free;
     end;
   end
   else
-  begin
-    LogDebug('RunNetHiddenCapture: NO output file for tag=' + OutTag + ' (exit=' + IntToStr(RC) + ')');
-    LogDebug('RunNetHiddenCapture: full command for diagnosis: ' + FullCmd);
-  end;
+    LogDebug('RunNetHiddenCapture: no output for tag=' + OutTag +
+      ' (exit=' + IntToStr(RC) + ') - the command produced nothing');
 
   if RC = 0 then
     LogDebug('RunNetHiddenCapture: command succeeded (exit=0) for tag=' + OutTag);
 
-  if FileExists(OutPath) then
-    DeleteFile(OutPath);
   Result := RC;
   LogExit('RunNetHiddenCapture');
 end;
@@ -4435,7 +4600,7 @@ end;
 // membership independently before reporting success.
 function AddUserToGroupViaADSI(const GroupSid, GroupName, UserName: string; var ErrorText: string): Boolean;
 var
-  ScriptPath, OutPath, PSParams, Tag: string;
+  ScriptPath, OutPath, PSParams, Tag, RawOut: string;
   ResultCode: Integer;
 begin
   LogEntry('AddUserToGroupViaADSI');
@@ -4455,20 +4620,38 @@ begin
 
   Tag := ReadOutputTag(OutPath, 'ADD_GROUP_OK');
   Result := (Tag <> '');
+  // Keep the raw output: ExtractOutputDetail only returns the text behind a
+  // "Message="/"Error=" tag, and the identity-translation failure is reported on
+  // the line AFTER an empty "Message=" line.
+  RawOut := ReadTextFileSafe(OutPath);
   if not Result then
     ErrorText := ExtractOutputDetail(OutPath);
   DumpOutputFileToLog('AddUserToGroupViaADSI[' + GroupName + ']', OutPath);
 
   if not Result then
   begin
-    LogWarn('AddUserToGroupViaADSI: ADSI add failed for group=' + GroupName + ' user=' + UserName + '; trying net.exe');
-    if RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addgroup_' + UserName) = 0 then
+    // "Some or all identity references could not be translated" means the group
+    // simply does not exist on this edition (Windows Home has no "Remote Desktop
+    // Users"). Running net.exe for it is pointless and used to block the installer
+    // for minutes, so that case is reported and skipped outright.
+    if (Pos('could not be translated', RawOut) > 0) or
+       (Pos('IdentityNotMapped', RawOut) > 0) then
     begin
-      Result := True;
-      ErrorText := '';
+      LogInfo('AddUserToGroupViaADSI: group ' + GroupName + ' does not exist on this system; ' +
+        'skipping the group add (net.exe fallback not attempted)');
+      ErrorText := 'the group ' + GroupName + ' does not exist on this system';
     end
     else
-      LogWarn('AddUserToGroupViaADSI: net.exe add also failed for group=' + GroupName + ' user=' + UserName);
+    begin
+      LogWarn('AddUserToGroupViaADSI: ADSI add failed for group=' + GroupName + ' user=' + UserName + '; trying net.exe');
+      if RunNetHiddenCapture('localgroup ' + QuoteExeArg(GroupName) + ' ' + QuoteExeArg(UserName) + ' /add', 'addgroup_' + UserName) = 0 then
+      begin
+        Result := True;
+        ErrorText := '';
+      end
+      else
+        LogWarn('AddUserToGroupViaADSI: net.exe add also failed for group=' + GroupName + ' user=' + UserName);
+    end;
   end;
 
   // Never trust the add itself - confirm the membership independently
