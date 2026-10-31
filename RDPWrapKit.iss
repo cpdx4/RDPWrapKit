@@ -29,8 +29,8 @@
 ;   - Lazy loading of user lists to avoid blocking wizard initialization
 ; =========================================================================
 
-#define APP_VERSION_STRING "0.6.4"
-#define APP_VERSION_FILEINFO "0.6.4.0"
+#define APP_VERSION_STRING "0.6.5"
+#define APP_VERSION_FILEINFO "0.6.5.0"
 
 ; Preprocessor captures source TermWrap.dll metadata at compile time for runtime comparison.
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
@@ -648,7 +648,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = '2026-10-16-13-40-44';
+  BUILD_FINGERPRINT = '2026-10-31-14-35-44';
 
 // External Windows API declarations
 
