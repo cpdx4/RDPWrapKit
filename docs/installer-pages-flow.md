@@ -71,7 +71,7 @@ flowchart TD
 - **Shortcut Settings Page**: Configure RDP session options (resolution, full screen, audio, clipboard, etc.) for shortcuts being created or edited.
 - **Edit System-wide Settings Page**: Change RDP port, enable/disable RDP, show users on login screen, prevent duplicate sessions, etc. (shown only in system settings mode).
 - **Installing**: Shows progress indicators and step-by-step status of each operation.
-- **Finish Page**: Summary of completed actions, links, and option to view the install log.
+- **Finish Page**: Summary of completed actions and links. A persistent **Show Install Log** link is available in the wizard footer on every page.
 
 ---
 
@@ -117,7 +117,7 @@ The installer has **seven top-level modes**, selected via radio buttons on the O
        - Auto-detection: if a Desktop `.lnk` targets `rdp.exe`, "Use existing users" is pre-selected on first display and its sub-note appears under the radio row.
 2. **Mode-Specific Pages**: Based on selections, relevant pages are shown or skipped.
 3. **Installing Page**: All flows converge here to execute the selected operations.
-4. **Finish Page**: Final summary and log access.
+4. **Finish Page**: Final summary. The **Show Install Log** link remains available from every wizard page.
 
 ### Options Page Navigation Logic (Internal Decision Tree)
 
