@@ -375,8 +375,8 @@ var
   GroupRDPUsersName: string;
   // Rich text control on finished page to show long completion messages
   FinishedText: TLabel;
-  // Button to open install log on finish page
-  ViewLogButton: TButton;
+  // Link to open the install log from any wizard page
+  ViewLogLink: TLabel;
   // Administrator advisory page (shown when the LAUNCHING user is not an admin)
   Page_AdminWarning: TWizardPage;
   AdminWarningCloseButton: TButton;
@@ -850,14 +850,70 @@ function WTSQuerySessionInformation(hServer: Cardinal; SessionId: DWORD; WTSInfo
 procedure WTSFreeMemory(pMemory: PAnsiChar);
   external 'WTSFreeMemory@wtsapi32.dll stdcall';
 
+// Extracts the leading numeric portion of a version token such as "12-beta".
+// This keeps comparison stable when GitHub releases include prerelease suffixes.
+function NormalizeVersionToken(const Token: string): Integer;
+var
+  i: Integer;
+  Num: string;
+begin
+  Result := 0;
+  Num := '';
+  for i := 1 to Length(Token) do
+  begin
+    if (Token[i] >= '0') and (Token[i] <= '9') then
+      Num := Num + Token[i]
+    else if Num <> '' then
+      Break;
+  end;
+  if Num <> '' then
+    Result := StrToIntDef(Num, 0);
+end;
+
+function VersionTokenHasSuffix(const Token: string): Boolean;
+var
+  i: Integer;
+  SeenDigit: Boolean;
+begin
+  Result := False;
+  SeenDigit := False;
+  for i := 1 to Length(Token) do
+  begin
+    if (Token[i] >= '0') and (Token[i] <= '9') then
+    begin
+      SeenDigit := True;
+      Continue;
+    end;
+    if SeenDigit then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
 // Compares two dotted version strings (e.g. "0.4.9" vs "0.4.10").
 // Returns 1 if A > B, -1 if A < B, 0 if equal.
+// GitHub release tags often carry a leading "v" and may include prerelease
+// suffixes like "-beta"; normalize both before comparing so update checks do
+// not silently mis-order valid release strings.
 function CompareVersions(A, B: String): Integer;
 var
   AParts, BParts: TStringList;
   i, AVal, BVal, MaxLen: Integer;
+  AToken, BToken: string;
+  j: Integer;
+  AHasDigits, BHasDigits: Boolean;
+  ASuffix, BSuffix: Boolean;
 begin
   Result := 0;
+  A := Trim(A);
+  B := Trim(B);
+  if (Length(A) > 0) and (A[1] = 'v') then
+    Delete(A, 1, 1);
+  if (Length(B) > 0) and (B[1] = 'v') then
+    Delete(B, 1, 1);
+
   AParts := TStringList.Create;
   BParts := TStringList.Create;
   try
@@ -869,12 +925,49 @@ begin
     BParts.DelimitedText := B;
     if AParts.Count > BParts.Count then MaxLen := AParts.Count
     else MaxLen := BParts.Count;
+
     for i := 0 to MaxLen - 1 do
     begin
-      if i < AParts.Count then AVal := StrToIntDef(AParts[i], 0) else AVal := 0;
-      if i < BParts.Count then BVal := StrToIntDef(BParts[i], 0) else BVal := 0;
-      if AVal > BVal then begin Result := 1; Break; end;
-      if AVal < BVal then begin Result := -1; Break; end;
+      AToken := '';
+      BToken := '';
+      if i < AParts.Count then AToken := AParts[i];
+      if i < BParts.Count then BToken := BParts[i];
+
+      AHasDigits := False;
+      BHasDigits := False;
+      for j := 1 to Length(AToken) do
+        if (AToken[j] >= '0') and (AToken[j] <= '9') then
+        begin
+          AHasDigits := True;
+          Break;
+        end;
+      for j := 1 to Length(BToken) do
+        if (BToken[j] >= '0') and (BToken[j] <= '9') then
+        begin
+          BHasDigits := True;
+          Break;
+        end;
+
+      ASuffix := VersionTokenHasSuffix(AToken);
+      BSuffix := VersionTokenHasSuffix(BToken);
+      AVal := NormalizeVersionToken(AToken);
+      BVal := NormalizeVersionToken(BToken);
+
+      if AHasDigits and BHasDigits then
+      begin
+        if AVal > BVal then begin Result := 1; Break; end;
+        if AVal < BVal then begin Result := -1; Break; end;
+        if AVal = BVal then
+        begin
+          if ASuffix and not BSuffix then begin Result := -1; Break; end;
+          if BSuffix and not ASuffix then begin Result := 1; Break; end;
+        end;
+      end
+      else if AHasDigits <> BHasDigits then
+      begin
+        if AHasDigits then begin Result := 1; Break; end;
+        if BHasDigits then begin Result := -1; Break; end;
+      end;
     end;
   finally
     AParts.Free;
@@ -5914,22 +6007,22 @@ end;
 // Opens Windows Explorer with the install log file selected (reveal-in-Explorer).
 // The log itself stays in its stable location (%ProgramData%\RDPWrapKit\Logs);
 // nothing is copied to the Desktop any more.
-procedure OnViewLogButtonClick(Sender: TObject);
+procedure OnViewLogLinkClick(Sender: TObject);
 var
   ResultCode: Integer;
   LogPath: string;
 begin
-  LogEntry('OnViewLogButtonClick');
+  LogEntry('OnViewLogLinkClick');
   LogPath := InstallLogPath;
   if LogPath = '' then
     LogPath := ExpandConstant(INSTALL_LOG_PATH);
-  WriteInstallerLog('User clicked Show Install Log button (reveal: ' + LogPath + ')');
+  WriteInstallerLog('User clicked Show Install Log link (reveal: ' + LogPath + ')');
 
   if not FileExists(LogPath) then
   begin
     MsgBox('The install log could not be found at:' + #13#10#13#10 + LogPath,
       mbError, MB_OK);
-    LogExit('OnViewLogButtonClick');
+    LogExit('OnViewLogLinkClick');
     exit;
   end;
 
@@ -5937,14 +6030,14 @@ begin
   if not ShellExec('open', 'explorer.exe', '/select,"' + LogPath + '"', '',
     SW_SHOWNORMAL, ewNoWait, ResultCode) then
   begin
-    LogWarn('OnViewLogButtonClick: ShellExec explorer /select failed');
+    LogWarn('OnViewLogLinkClick: ShellExec explorer /select failed');
     // Fallback: at least show the folder that holds the log.
     if not ShellExec('open', 'explorer.exe', '"' + ExtractFileDir(LogPath) + '"', '',
       SW_SHOWNORMAL, ewNoWait, ResultCode) then
       MsgBox('Failed to open Windows Explorer at:' + #13#10#13#10 + LogPath,
         mbError, MB_OK);
   end;
-  LogExit('OnViewLogButtonClick');
+  LogExit('OnViewLogLinkClick');
 end;
 
 procedure OnPasswordResetLinkClick(Sender: TObject);
@@ -10170,17 +10263,19 @@ begin
   FinishedText.Visible := True;
   WizardForm.FinishedLabel.Visible := False;
 
-  // Create a button to reveal the install log in Explorer, placed in the bottom
-  // button bar next to Finish
-  ViewLogButton := TButton.Create(WizardForm);
-  ViewLogButton.Parent := WizardForm;
-  ViewLogButton.Width := ScaleX(120);
-  ViewLogButton.Height := WizardForm.NextButton.Height;
-  ViewLogButton.Left := WizardForm.NextButton.Left - ViewLogButton.Width - ScaleX(10);
-  ViewLogButton.Top := WizardForm.NextButton.Top;
-  ViewLogButton.Caption := 'Show Install Log';
-  ViewLogButton.OnClick := @OnViewLogButtonClick;
-  ViewLogButton.Visible := False;  // only shown on the Finished page
+  // Keep log access in the wizard footer on every page.
+  ViewLogLink := TLabel.Create(WizardForm);
+  ViewLogLink.Parent := WizardForm;
+  ViewLogLink.AutoSize := True;
+  ViewLogLink.Caption := 'Show Install Log';
+  ViewLogLink.Font.Color := LinkColor;
+  ViewLogLink.Font.Style := [fsUnderline];
+  ViewLogLink.Cursor := crHand;
+  ViewLogLink.OnClick := @OnViewLogLinkClick;
+  ViewLogLink.Left := WizardForm.NextButton.Left - ViewLogLink.Width - ScaleX(10);
+  ViewLogLink.Top := WizardForm.NextButton.Top +
+    (WizardForm.NextButton.Height - ViewLogLink.Height) div 2;
+  ViewLogLink.Transparent := True;
 
   // Optional example image shown only on the real final page when using
   // Edit Shortcut Settings mode.
@@ -11915,10 +12010,6 @@ begin
     LastLoggedPageTick := NowTick;
   end;
 
-  // Show the Show Install Log button only on the Finished page
-  if Assigned(ViewLogButton) then
-    ViewLogButton.Visible := (CurPageID = wpFinished);
-
   if CurPageID = EditShortcutPage.ID then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
 
@@ -12630,13 +12721,13 @@ begin
       WriteInstallerLog('CurPageChanged: ERROR - FinishedText control is NOT assigned!');
     end;
     
-    if Assigned(ViewLogButton) then
+    if Assigned(ViewLogLink) then
     begin
-      WriteInstallerLog('CurPageChanged: ViewLogButton is assigned and visible');
+      WriteInstallerLog('CurPageChanged: ViewLogLink is assigned');
     end
     else
     begin
-      WriteInstallerLog('CurPageChanged: ERROR - ViewLogButton is NOT assigned!');
+      WriteInstallerLog('CurPageChanged: ERROR - ViewLogLink is NOT assigned!');
     end;
   end;
 end;
