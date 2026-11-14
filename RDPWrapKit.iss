@@ -1982,20 +1982,23 @@ begin
 end;
 
 // Derive the executable image name from a command line (used for the kill-by-image
-// fallback). "C:\x\Tool.exe" "file" -> Tool.exe ; net.exe localgroup ... -> net.exe
+// fallback). "C:\x\Tool.exe" "file" -> Tool.exe ; net.exe localgroup "G" -> net.exe
+// NOTE: only a quote in the FIRST position means the executable path is quoted -
+// later quotes belong to arguments (a quoted group name used to be mistaken for
+// the executable, which made the timeout kill a no-op).
 function ImageNameFromCmdLine(const CmdLine: string): string;
 var
   P1, P2: Integer;
 begin
   Result := '';
-  P1 := Pos('"', CmdLine);
-  if P1 > 0 then
+  if Pos('"', CmdLine) = 1 then
   begin
-    P2 := Pos('"', Copy(CmdLine, P1 + 1, Length(CmdLine)));
+    P1 := 1;
+    P2 := Pos('"', Copy(CmdLine, 2, Length(CmdLine)));
     if P2 > 0 then
-      Result := ExtractFileName(Copy(CmdLine, P1 + 1, P2 - 1))
+      Result := ExtractFileName(Copy(CmdLine, 2, P2 - 1))
     else
-      Result := ExtractFileName(Copy(CmdLine, P1 + 1, Length(CmdLine)));
+      Result := ExtractFileName(Copy(CmdLine, 2, Length(CmdLine)));
   end
   else
     Result := ExtractFileName(Copy(CmdLine, 1, Pos(' ', CmdLine + ' ') - 1));
