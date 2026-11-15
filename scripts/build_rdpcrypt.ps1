@@ -1,17 +1,18 @@
 <#
 .SYNOPSIS
-    Builds RdpSignTool.exe ahead-of-time for the installer.
+    Builds RdpWrapKitHelper.exe ahead-of-time for the installer.
 
 .DESCRIPTION
-    Compiles RdpSignTool.exe — a standalone C# console EXE that signs .rdp
-    files without ANY PowerShell overhead.  Called directly from Inno Setup
-    via Exec(), eliminating ~5 seconds of PS startup + -EncodedCommand +
-    Add-Type overhead.
+    Compiles RdpWrapKitHelper.exe — the installer's standalone C# sidecar. It
+    signs .rdp files, verifies Authenticode publishers, enumerates local
+    accounts and DPAPI-protects passwords without ANY PowerShell overhead.
+    Called directly from Inno Setup via Exec(), eliminating ~5 seconds of PS
+    startup + -EncodedCommand + Add-Type overhead.
 
     Uses the .NET Framework csc.exe (C# compiler) that ships with the .NET
     Framework runtime or Windows SDK.
 
-    Output:  ..\output\RdpSignTool.exe
+    Output:  ..\output\RdpWrapKitHelper.exe
 
 .EXAMPLE
     .\build_rdpcrypt.ps1
@@ -67,13 +68,13 @@ $references = @(
 )
 
 # ---------------------------------------------------------------
-# Build: RdpSignTool.exe  (standalone signer, no PS needed)
+# Build: RdpWrapKitHelper.exe  (installer sidecar, no PS needed)
 # ---------------------------------------------------------------
-$exeSource = Join-Path $ScriptDir 'RdpSignTool.cs'
-$exeOutput = Join-Path $OutputDir 'RdpSignTool.exe'
+$exeSource = Join-Path $ScriptDir 'RdpWrapKitHelper.cs'
+$exeOutput = Join-Path $OutputDir 'RdpWrapKitHelper.exe'
 
 Write-Host ""
-Write-Host "=== Building RdpSignTool.exe ==="
+Write-Host "=== Building RdpWrapKitHelper.exe ==="
 Write-Host "Source: $exeSource"
 Write-Host "Output: $exeOutput"
 Write-Host "Version: 1.0.0.0"

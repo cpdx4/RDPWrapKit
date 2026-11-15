@@ -36,10 +36,18 @@
 #define SourceTermWrapVersion GetVersionNumbersString("third_party\termwrap_release\TermWrap.dll")
 #define SourceTermWrapSize FileSize("third_party\termwrap_release\TermWrap.dll")
 
-; RdpSignTool.exe is compiled ahead-of-time from scripts\RdpSignTool.cs.
+; RdpWrapKitHelper.exe is compiled ahead-of-time from scripts\RdpWrapKitHelper.cs.
 ; Run build.bat before compiling this installer (it invokes csc.exe directly;
 ; scripts\build_rdpcrypt.ps1 still works but is no longer used by the build).
 ; This keeps the 19KB binary out of git while enabling a clean build.
+;
+; The helper does four jobs (sign / verify / list-users / protect), so it is
+; named for its role rather than for one verb. The executable name is defined
+; exactly once here and consumed by [Files], by the HELPER_EXE [Code] constant
+; and by every runtime path - renaming it again is a one-line change.
+#ifndef HELPER_EXE
+  #define HELPER_EXE "RdpWrapKitHelper.exe"
+#endif
 
 [Setup]
 AppName=RDPWrapKit
@@ -68,7 +76,7 @@ WizardBackColor=#0b1018
 ; Icon file always extracted to temp for welcome page display.
 ; TermWrap files only copied when DoInstallTermWrap = True (checked via ShouldInstallFiles).
 Source: "third_party\termwrap_release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: ShouldInstallFiles
-Source: "output\RdpSignTool.exe"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
+Source: "output\{#HELPER_EXE}"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 Source: "assets\RDPWrapInstallerBG.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
@@ -182,6 +190,9 @@ var
   Page_CreateShortcutsForExistingUsers: TWizardPage;  // Create RDP desktop shortcuts
   LocalUsersList: TStringList;        // login usernames
   LocalUserDisplayList: TStringList;  // display labels (email if online account, else same as username)
+  // Transient centred "please wait" text shown on a wizard page while a blocking
+  // account scan (GetLocalUsers) runs; freed as soon as the scan returns.
+  PageWaitLabel: TLabel;
   CreateShortcutsControlsBuilt: Boolean;
   UserCheckBoxes: array of TCheckBox;
   UserPasswordEdits: array of TEdit;
@@ -593,7 +604,7 @@ const
   PS_TIMEOUT_QUERY = 60000;      // GetPSOutput - short read-only PowerShell queries
   PS_TIMEOUT_SCRIPT = 90000;     // generated .ps1 helpers (account/group work)
   PS_TIMEOUT_CAPTURE = 120000;   // ExecPSCaptureAll / certificate setup scripts
-  PS_TIMEOUT_SIGN = 45000;       // cmd.exe + RdpSignTool.exe single-file signing
+  PS_TIMEOUT_SIGN = 45000;       // cmd.exe + RdpWrapKitHelper.exe single-file signing
   PS_TIMEOUT_NET = 30000;        // net.exe / sc.exe / reg.exe one-shot helpers
   PS_START_TIMEOUT = 30000;      // give up when a PowerShell child never reports its PID
   PS_POLL_INTERVAL = 100;        // watchdog poll while waiting for completion
@@ -626,6 +637,11 @@ const
   // Centralized constants for system executables to ensure consistency
   // and enable easy updates if paths change
   EXE_CMD = 'cmd.exe';
+  // The installer's own sidecar (scripts\RdpWrapKitHelper.cs): RDP file
+  // signing, publisher verification, local account enumeration and DPAPI
+  // secret protection. Extracted to {tmp} by InitializeWizard. Every call
+  // site builds its path from this constant - never hardcode the name again.
+  HELPER_EXE = '{#HELPER_EXE}';
   // NOTE: the PowerShell host path is resolved at runtime by PSHost() so that a
   // shadowing powershell.exe earlier in the search order can never be used.
   PS_ARGS_BASE = '-NoProfile -ExecutionPolicy Bypass';
@@ -2493,8 +2509,8 @@ end;
 // This used to run "powershell -Command Get-AuthenticodeSignature", which
 // spawned PowerShell with an execution-policy bypass on every download check
 // (T1059.001 + T1562.001). The check itself is MANDATORY before executing a
-// downloaded installer, so it did not disappear - it moved into RdpSignTool.exe
-// (already extracted to {tmp} by InitializeWizard) which calls WinVerifyTrust.
+// downloaded installer, so it did not disappear - it moved into RdpWrapKitHelper.exe
+// (already extracted to {tmp} by InitializeWizard), whose --verify verb calls WinVerifyTrust.
 // The reported keys are unchanged so existing troubleshooting notes still apply.
 function IsSignedByMicrosoftCorporation(const FilePath: string): Boolean;
 var
@@ -2508,11 +2524,11 @@ begin
   LogSectionHeader('SIGNATURE VALIDATION');
   LogKeyValue('File', FilePath);
 
-  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
   if not FileExists(ExePath) then
   begin
     // Fail closed: without the verifier nothing may be executed.
-    LogWarn('Signature verdict: RdpSignTool.exe missing at ' + ExePath +
+    LogWarn('Signature verdict: ' + HELPER_EXE + ' missing at ' + ExePath +
       ', publisher validation cannot run');
     LogAudit('signer-op', 'verify', FilePath, 'signer-missing', 'required-publisher-check');
     Result := False;
@@ -2689,7 +2705,7 @@ end;
 //   * MarkerPath : written by the child as its very last action (completion + rc)
 //   * PidPath    : written by the child as its very FIRST action (the real $PID,
 //                  used only to kill a child that exceeds its timeout)
-// cmd.exe children (net.exe, sc.exe, RdpSignTool.exe) instead use the trailing
+// cmd.exe children (net.exe, sc.exe, RdpWrapKitHelper.exe) instead use the trailing
 // "call echo %^ERRORLEVEL%> marker" idiom, and are killed by image name.
 // When a limit is exceeded the child is force-terminated, so nothing can keep the
 // installer (or the wizard) hostage.
@@ -2862,7 +2878,7 @@ end;
 
 // Force-terminate every process with the given image name. Only used when the
 // child never reported a PID (cmd.exe children such as net.exe, sc.exe and
-// RdpSignTool.exe), so that a wedged command can still be stopped.
+// RdpWrapKitHelper.exe), so that a wedged command can still be stopped.
 procedure KillProcessImage(const ImageName: string);
 var
   RC: Integer;
@@ -3195,7 +3211,7 @@ end;
 // Completion is guarded by a hard timeout, so a wedged command can never hang the
 // installer. cmd.exe reports its exit code through a trailing marker, so no process
 // id is needed; if the command exceeds its timeout it is killed by image name
-// (net.exe / sc.exe / RdpSignTool.exe - all transient CLI tools).
+// (net.exe / sc.exe / RdpWrapKitHelper.exe - all transient CLI tools).
 function RunCmdCaptureText(const CmdLine, OutTag: string; TimeoutMs: Integer;
   var ExitCodeOut: Integer): string;
 var
@@ -3514,13 +3530,13 @@ begin
     exit;
   end;
 
-  // ---- Pre-flight diagnostics: validate RdpSignTool.exe exists ----
-  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  // ---- Pre-flight diagnostics: validate the helper executable exists ----
+  ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
   ExeFound := FileExists(ExePath);
   LogDebug('SignRdpFile: FileExists(''' + ExePath + ''')=' + BoolToStr(ExeFound));
   if not ExeFound then
   begin
-    LogWarn('SignRdpFile: RdpSignTool.exe NOT FOUND at ' + ExePath);
+    LogWarn('SignRdpFile: ' + HELPER_EXE + ' NOT FOUND at ' + ExePath);
     LogExit('SignRdpFile');
     exit;
   end;
@@ -3528,7 +3544,7 @@ begin
   // Ensure the signing certificate exists and is trusted before signing
   EnsureRDPSigningCert;
 
-  // RdpSignTool.exe is a standalone C# console application compiled ahead-of-time
+  // RdpWrapKitHelper.exe is a standalone C# console application compiled ahead-of-time
   // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
   // via P/Invoke to crypt32.dll — no PowerShell involved, no C# JIT compilation,
   // no -EncodedCommand overhead.  The EXE is ~20KB and completes in ~100-300ms.
@@ -3541,24 +3557,26 @@ begin
   //   4  = CryptSignMessage failure
   //   5  = Internal error/exception
   //   99 = Invalid arguments
-  CmdLine := '"' + RdpPath + '"';
+  // Explicit verb: the bare-path form still works, but callers should say
+  // what they mean so the helper's contract stays readable.
+  CmdLine := '--sign "' + RdpPath + '"';
   LogDebug('SignRdpFile: Executing: ' + ExePath + ' ' + CmdLine);
 
-  // Capture RdpSignTool.exe output for diagnostic purposes. RunCmdCapture now runs
+  // Capture helper output for diagnostic purposes. RunCmdCapture now runs
   // the tool under the process watchdog, so a wedged crypt32 call can no longer
   // block the wizard forever. The exit code is logged for diagnosis, but the
   // signature present in the RDP file is what decides success.
   ResultCode := RunCmdCapture('"' + ExePath + '" ' + CmdLine, 'rdpsign_' + ExtractFileName(RdpPath));
-  LogDebug('SignRdpFile: RdpSignTool.exe exit=' + IntToStr(ResultCode) +
+  LogDebug('SignRdpFile: ' + HELPER_EXE + ' exit=' + IntToStr(ResultCode) +
     ' (-1 means the watchdog could not report a code) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
   Signed := RdpFileHasSignature(RdpPath);
   if Signed then
-    LogInfo('SignRdpFile: signed ' + RdpPath + ' | RdpSignTool exit=' + IntToStr(ResultCode) +
+    LogInfo('SignRdpFile: signed ' + RdpPath + ' | ' + HELPER_EXE + ' exit=' + IntToStr(ResultCode) +
       ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
   else
     LogWarn('SignRdpFile: RDP file is still UNSIGNED after signing ' + RdpPath +
-      ' (RdpSignTool exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+      ' (' + HELPER_EXE + ' exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogInfo('SignRdpFile total [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('SignRdpFile');
 end;
@@ -6251,50 +6269,80 @@ var
   DisplayName: string;
   PSCommand: string;
   OpTick: Cardinal;
+  ExePath: string;
+  ToolOutput: string;
 begin
   LogEntry('GetLocalUsers');
   OpTick := GetTickCount;
   PSPath := ExpandConstant(TEMP_LOCAL_USERS);
+  DeleteFile(PSPath);
 
-  // Use CIM (Win32_UserAccount) instead of Get-LocalUser for maximum reliability.
-  // Get-LocalUser (from Microsoft.PowerShell.LocalAccounts) is unavailable on
-  // some Windows 11 24H2 / Server 2025 builds where the LocalAccounts WMI provider
-  // is not installed.  Win32_UserAccount via CIM is always present on modern Windows.
-  PSCommand :=
-    'try {' +
-    ' $out=@();' +
-    ' $sq=[char]39;' +
-    ' $machineName = (Get-CimInstance Win32_ComputerSystem).Name;' +
-    ' foreach($u in (Get-CimInstance -ClassName Win32_UserAccount -Filter ''LocalAccount=True AND Disabled=False'')) {' +
-    '  if($u.Domain -ne $machineName) { continue }' + // ensure truly local, not built-in domain account
-    '  $n=$u.Name;' +
-    '  if($n[0] -eq $sq) { continue }' + // skip if name starts with single-quote
-    '  $detail=$null;' +
-    '  if($u.FullName -match ''@'') { $detail=$u.FullName }' +
-    '  elseif($u.FullName -and $u.FullName.Trim() -ne '''') { $detail=$u.FullName.Trim() }' +
-    '  if(-not $detail) { try {' +
-    '   $s=$u.SID;' +
-    '   $r=''HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\''+$s+''\IdentityCache\''+$s;' +
-    '   $e=(Get-ItemProperty -Path $r -Name UserName -ErrorAction Stop).UserName;' +
-    '   if($e -and $e.Trim() -ne '''') {$detail=$e.Trim()}' +
-    '  } catch {} }' +
-    '  if($detail -and $detail -ne $n) { $d=$n+'' (''+$detail+'')'' } else { $d=$n }' +
-    '  $out+=($n+''|''+$d)' +
-    ' }' +
-    ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
-    ' exit 0' +
-    '} catch { exit 1 }';
-  // Required: enumerating local accounts needs the ADSI provider (see the
-  // section header above). Read-only, bounded by the watchdog, and emitted only
-  // when the user opens the account page - never on a plain install path.
-  RunPSCommandTimed(PSCommand, 'GetLocalUsers', PS_TIMEOUT_SCRIPT, ResultCode);
-  LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' (-1 = script exited before reporting) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  // PRIMARY PATH - native enumeration via the helper's --list-users verb.
+  // That verb calls NetUserEnum (netapi32) once over the local SAM - the same
+  // API the Windows "User Accounts" control panel uses - and returns in tens of
+  // milliseconds. It replaced the PowerShell/CIM query below, which paid
+  // ~1-3s of PowerShell host startup plus WMI provider load before producing the
+  // first row; that delay is what left the shortcut and remove-user pages blank
+  // for seconds while this function was running.
+  ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
+  if FileExists(ExePath) then
+  begin
+    ToolOutput := RunCmdCaptureText('"' + ExePath + '" --list-users "' + PSPath + '"',
+      'listusers', PS_TIMEOUT_NET, ResultCode);
+    LogDebug('GetLocalUsers: ' + HELPER_EXE + ' --list-users exit=' + IntToStr(ResultCode) +
+      ' | ' + Trim(ToolOutput) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    if not FileExists(PSPath) then
+      LogWarn('GetLocalUsers: --list-users produced no file (exit=' + IntToStr(ResultCode) +
+        ') - falling back to the PowerShell query');
+  end
+  else
+    LogWarn('GetLocalUsers: ' + HELPER_EXE + ' missing at ' + ExePath +
+      ' - falling back to the PowerShell query');
 
+  // FALLBACK PATH - PowerShell + CIM (Win32_UserAccount). Only runs when the
+  // native helper is missing or failed, so a broken helper can never leave the
+  // account pages empty.
   if not FileExists(PSPath) then
   begin
-    LogDebug('GetLocalUsers: no output file, no users found');
-    LogExit('GetLocalUsers');
-    exit;
+    // Use CIM (Win32_UserAccount) instead of Get-LocalUser for maximum reliability.
+    // Get-LocalUser (from Microsoft.PowerShell.LocalAccounts) is unavailable on
+    // some Windows 11 24H2 / Server 2025 builds where the LocalAccounts WMI provider
+    // is not installed.  Win32_UserAccount via CIM is always present on modern Windows.
+    PSCommand :=
+      'try {' +
+      ' $out=@();' +
+      ' $sq=[char]39;' +
+      ' $machineName = (Get-CimInstance Win32_ComputerSystem).Name;' +
+      ' foreach($u in (Get-CimInstance -ClassName Win32_UserAccount -Filter ''LocalAccount=True AND Disabled=False'')) {' +
+      '  if($u.Domain -ne $machineName) { continue }' + // ensure truly local, not built-in domain account
+      '  $n=$u.Name;' +
+      '  if($n[0] -eq $sq) { continue }' + // skip if name starts with single-quote
+      '  $detail=$null;' +
+      '  if($u.FullName -match ''@'') { $detail=$u.FullName }' +
+      '  elseif($u.FullName -and $u.FullName.Trim() -ne '''') { $detail=$u.FullName.Trim() }' +
+      '  if(-not $detail) { try {' +
+      '   $s=$u.SID;' +
+      '   $r=''HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\''+$s+''\IdentityCache\''+$s;' +
+      '   $e=(Get-ItemProperty -Path $r -Name UserName -ErrorAction Stop).UserName;' +
+      '   if($e -and $e.Trim() -ne '''') {$detail=$e.Trim()}' +
+      '  } catch {} }' +
+      '  if($detail -and $detail -ne $n) { $d=$n+'' (''+$detail+'')'' } else { $d=$n }' +
+      '  $out+=($n+''|''+$d)' +
+      ' }' +
+      ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
+      ' exit 0' +
+      '} catch { exit 1 }';
+    // Read-only, bounded by the watchdog, and emitted only when the user opens
+    // the account page - never on a plain install path.
+    RunPSCommandTimed(PSCommand, 'GetLocalUsers', PS_TIMEOUT_SCRIPT, ResultCode);
+    LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' (-1 = script exited before reporting) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+
+    if not FileExists(PSPath) then
+    begin
+      LogDebug('GetLocalUsers: no output file, no users found');
+      LogExit('GetLocalUsers');
+      exit;
+    end;
   end;
 
   Parts := TStringList.Create;
@@ -6658,6 +6706,55 @@ begin
   LogExit('OnNextShortcutPageClick');
 end;
 
+// -------------------------------------------------------------------------
+// Existing-users password status helpers
+// -------------------------------------------------------------------------
+// A validation message belongs to exactly one user row. Every writer must go
+// through SetUserPasswordStatus so the label is (a) anchored to that row's own
+// password edit box and (b) only drawn while that row's pagination page is the
+// one on screen. Previously callers flipped Visible on directly, so the label
+// kept whatever Top it had from the page it was last laid out on: an error for
+// a user on page 2 was then painted over page 1 (or over a neighbouring user).
+function IsUserRowOnCurrentPage(Index: Integer): Boolean;
+var
+  StartIdx, EndIdx: Integer;
+begin
+  if UsersPerPage <= 0 then
+  begin
+    Result := True;
+    exit;
+  end;
+  StartIdx := CurrentUserPage * UsersPerPage;
+  EndIdx := StartIdx + UsersPerPage - 1;
+  Result := (Index >= StartIdx) and (Index <= EndIdx);
+end;
+
+procedure SetUserPasswordStatus(Index: Integer; const Caption: string);
+begin
+  if (Index < 0) or (Index > High(UserPasswordStatus)) then
+    exit;
+  if not Assigned(UserPasswordStatus[Index]) then
+    exit;
+
+  UserPasswordStatus[Index].Caption := Caption;
+
+  if Caption = '' then
+  begin
+    UserPasswordStatus[Index].Visible := False;
+    exit;
+  end;
+
+  // Only draw the message while its own row is on screen, and always anchor it
+  // to that row's edit box so it can never appear against a neighbouring user.
+  if IsUserRowOnCurrentPage(Index) and Assigned(UserPasswordEdits[Index]) then
+  begin
+    UserPasswordStatus[Index].Top := UserPasswordEdits[Index].Top;
+    UserPasswordStatus[Index].Visible := True;
+  end
+  else
+    UserPasswordStatus[Index].Visible := False;
+end;
+
 procedure SetUserControlsEnabled(Enabled: Boolean);
 var
   i: Integer;
@@ -6672,11 +6769,7 @@ begin
       if not UserPasswordEdits[i].Enabled then
         UserPasswordEdits[i].Text := '';
     end;
-    if Assigned(UserPasswordStatus[i]) then
-    begin
-      UserPasswordStatus[i].Caption := '';
-      UserPasswordStatus[i].Visible := False;
-    end;
+    SetUserPasswordStatus(i, '');
   end;
 end;
 
@@ -6718,7 +6811,9 @@ begin
   LogEntry('OnPasswordEditChange');
   idx := FindUserIndexFromEdit(TEdit(Sender));
   if idx >= 0 then
-    UserPasswordStatus[idx].Visible := False;
+    // Clear the message (not just hide it) so paging away and back cannot
+    // resurrect a stale 'Incorrect PW' for text the user has already fixed.
+    SetUserPasswordStatus(idx, '');
   LogExit('OnPasswordEditChange');
 end;
 
@@ -6734,7 +6829,7 @@ begin
     if not UserCheckBoxes[idx].Checked then
     begin
       UserPasswordEdits[idx].Text := '';
-      UserPasswordStatus[idx].Visible := False;
+      SetUserPasswordStatus(idx, '');
     end;
   end;
   LogExit('OnUserCheckBoxClick');
@@ -7094,6 +7189,63 @@ begin
   Exec('control.exe', 'userpasswords2', '', SW_SHOW, ewNoWait, ResultCode);
   LogDebug('OnPasswordResetLinkClick: launched, exit=' + IntToStr(ResultCode));
   LogExit('OnPasswordResetLinkClick');
+end;
+
+// -------------------------------------------------------------------------
+// Transient "please wait" text for pages that block while accounts load
+// -------------------------------------------------------------------------
+// GetLocalUsers spawns a helper process and waits for it, so the wizard thread
+// is stuck inside CurPageChanged and the page body stays empty until the list
+// arrives (the controls that fill it are only created afterwards). Creating
+// this label and forcing a repaint BEFORE the blocking call is the only way to
+// tell the user something is happening: Inno does not paint a page the script
+// is blocking on.
+procedure HidePageWaitLabel;
+begin
+  if Assigned(PageWaitLabel) then
+  begin
+    PageWaitLabel.Hide;
+    PageWaitLabel.Free;
+    PageWaitLabel := nil;
+  end;
+  if Assigned(WizardForm) then
+    WizardForm.Update;
+end;
+
+procedure ShowPageWaitLabel(Page: TWizardPage; const Caption: string);
+var
+  Lbl: TLabel;
+begin
+  HidePageWaitLabel;
+  if not Assigned(Page) then
+    exit;
+
+  Lbl := TLabel.Create(Page);
+  Lbl.Parent := Page.Surface;
+  Lbl.AutoSize := False;
+  Lbl.Left := ScaleX(10);
+  Lbl.Top := (Page.SurfaceHeight div 2) - ScaleY(24);
+  Lbl.Width := Page.SurfaceWidth - ScaleX(20);
+  Lbl.Height := ScaleY(56);
+  Lbl.Alignment := taCenter;
+  Lbl.Caption := Caption;
+  Lbl.Transparent := True;
+  // Force white text. The dark background behind this label comes from
+  // WizardBackColor/WizardBackImageFile in the [Setup] section, NOT from
+  // Page.Surface.Color - that stays the theme's light default, so IsDarkColor()
+  // on it answers the wrong question and produced black-on-dark text. seFont
+  // must be removed for the colour to survive a repaint (see CONTEXT.md).
+  Lbl.ParentFont := False;
+  Lbl.StyleElements := Lbl.StyleElements - [seFont];
+  Lbl.Font := WizardForm.Font;
+  Lbl.Font.Style := [fsBold];
+  Lbl.Font.Color := clWhite;
+  Lbl.Show;
+  PageWaitLabel := Lbl;
+
+  // Force the paint now - the caller blocks this thread immediately after.
+  if Assigned(WizardForm) then
+    WizardForm.Update;
 end;
 
 procedure BuildCreateShortcutsControls;
@@ -7643,16 +7795,11 @@ begin
       if UserPasswordEdits[i].Visible then
         UserPasswordEdits[i].Top := BaseTop + VisIndex * RowHeight - ScaleY(2);
     end;
+    // Re-apply the message through the helper: it pins the label to this row's
+    // edit box (already positioned above) and keeps it hidden while the row is
+    // on another pagination page.
     if Assigned(UserPasswordStatus[i]) then
-    begin
-      UserPasswordStatus[i].Visible := False;
-      if (i >= StartIdx) and (i <= EndIdx) then
-      begin
-        if UserPasswordStatus[i].Caption <> '' then
-          UserPasswordStatus[i].Visible := True;
-        UserPasswordStatus[i].Top := BaseTop + VisIndex * RowHeight - ScaleY(2);
-      end;
-    end;
+      SetUserPasswordStatus(i, UserPasswordStatus[i].Caption);
 
     if (i >= StartIdx) and (i <= EndIdx) then
       Inc(VisIndex);
@@ -7709,52 +7856,30 @@ begin
 
       if Password = '' then
       begin
-        if Assigned(UserPasswordStatus[i]) then
-        begin
-          UserPasswordStatus[i].Caption := 'Can''t be blank';
-          UserPasswordStatus[i].Visible := True;
-        end;
+        SetUserPasswordStatus(i, 'Can''t be blank');
         HasErrors := True;
         continue;
       end;
 
       if IsValidPassword(Password) <> '' then
       begin
-        if Assigned(UserPasswordStatus[i]) then
-        begin
-          UserPasswordStatus[i].Caption := 'Invalid password';
-          UserPasswordStatus[i].Visible := True;
-        end;
+        SetUserPasswordStatus(i, 'Invalid password');
         HasErrors := True;
         continue;
       end;
 
       if not ValidateLocalCredential(LocalUsersList[i], Password) then
       begin
-        if Assigned(UserPasswordStatus[i]) then
-        begin
-          UserPasswordStatus[i].Caption := 'Incorrect PW';
-          UserPasswordStatus[i].Visible := True;
-        end;
+        SetUserPasswordStatus(i, 'Incorrect PW');
         HasErrors := True;
         continue;
       end;
 
-      if Assigned(UserPasswordStatus[i]) then
-      begin
-        UserPasswordStatus[i].Caption := '';
-        UserPasswordStatus[i].Visible := False;
-      end;
+      SetUserPasswordStatus(i, '');
     end
     else
-    begin
       // User was unchecked — clear any stale validation message
-      if Assigned(UserPasswordStatus[i]) then
-      begin
-        UserPasswordStatus[i].Caption := '';
-        UserPasswordStatus[i].Visible := False;
-      end;
-    end;
+      SetUserPasswordStatus(i, '');
   end;
 
   if HasErrors then
@@ -8021,7 +8146,7 @@ end;
 // This used to be a PowerShell one-liner with the PLAINTEXT PASSWORD embedded
 // in the command string, so the secret also landed in process-command-line
 // telemetry (Sysmon event 1 / EDR command capture). The work now happens in
-// RdpSignTool.exe using ProtectedData with DataProtectionScope.CurrentUser -
+// RdpWrapKitHelper.exe (--protect) using ProtectedData with DataProtectionScope.CurrentUser -
 // the same DPAPI scope and hex format that ConvertFrom-SecureString produced,
 // so existing behaviour and saved credentials are unchanged - and the plaintext
 // never appears on any command line. It is handed over through a temp file that
@@ -8040,18 +8165,18 @@ begin
   PlainPath := TempFile('pw_' + UserName + '.tmp');
   LogDebug('EncryptPasswordToFile: user=' + UserName + ' encPath=''' + EncPath + '''');
 
-  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
   ResultCode := -1;
 
   if not FileExists(ExePath) then
-    LogWarn('EncryptPasswordToFile: RdpSignTool.exe missing at ' + ExePath)
+    LogWarn('EncryptPasswordToFile: ' + HELPER_EXE + ' missing at ' + ExePath)
   else if not SaveStringToFile(PlainPath, Password, False) then
     LogWarn('EncryptPasswordToFile: could not stage the password for the helper')
   else
   begin
     try
-      ResultCode := RunCmdCapture('"' + ExePath + '" --encrypt-password "' +
-        PlainPath + '" "' + EncPath + '"', 'encrypt_' + UserName);
+      ResultCode := RunCmdCapture('"' + ExePath + '" --protect "' +
+        PlainPath + '" "' + EncPath + '"', 'protect_' + UserName);
     finally
       // The plaintext staging file must never outlive this call.
       DeleteFile(PlainPath);
@@ -10110,9 +10235,10 @@ begin
   // It is invoked lazily from CreateRDPUsers, where a short pause on the Installing
   // page is expected, and its results are cached in CapabilityProbeDone.
 
-  // Extract RdpSignTool.exe upfront so it's available for all signing operations
-  ExtractTemporaryFile('RdpSignTool.exe');
-  WriteInstallerLog('InitializeWizard: Extracted RdpSignTool.exe to ' + ExpandConstant('{tmp}\RdpSignTool.exe'));
+  // Extract the helper upfront so it is available for signing, publisher
+  // verification, account enumeration and password protection.
+  ExtractTemporaryFile(HELPER_EXE);
+  WriteInstallerLog('InitializeWizard: Extracted ' + HELPER_EXE + ' to ' + ExpandConstant('{tmp}\' + HELPER_EXE));
 
   SimLogNoMstscShown := False;
   SimLogNoVCRedistShown := False;
@@ -11632,6 +11758,7 @@ var
   SelectedCount: Integer;
   SelectedTotal: Integer;
   HasErrors: Boolean;
+  FirstErrorIndex: Integer;
   RdpPortValue: Integer;
   PortError: string;
   NewShortcutBase: string;
@@ -12026,7 +12153,7 @@ begin
   else if CurPageID = Page_EditShortcutAdvanced.ID then
   begin
     // User finished editing in mstsc - re-sign the shortcut(s).
-    // Signing spawns RdpSignTool.exe, so show what is happening instead of leaving
+    // Signing spawns RdpWrapKitHelper.exe, so show what is happening instead of leaving
     // the page looking frozen after the click.
     if SelectedShortcutPath <> '' then
     begin
@@ -12098,6 +12225,7 @@ begin
 
       SelectedCount := 0;
       HasErrors := False;
+      FirstErrorIndex := -1;
 
       // Collect selections and validate all at once
       for i := 0 to High(UserCheckBoxes) do
@@ -12112,41 +12240,41 @@ begin
             exit;
           end;
 
-          Password := UserPasswordEdits[i].Text;
+          if Assigned(UserPasswordEdits[i]) then
+            Password := UserPasswordEdits[i].Text
+          else
+            Password := '';
+
           if Password = '' then
           begin
-            UserPasswordStatus[i].Caption := 'Can''t be blank';
-            UserPasswordStatus[i].Visible := True;
+            SetUserPasswordStatus(i, 'Can''t be blank');
+            if FirstErrorIndex < 0 then FirstErrorIndex := i;
             HasErrors := True;
             continue;
           end;
 
           if IsValidPassword(Password) <> '' then
           begin
-            UserPasswordStatus[i].Caption := 'Invalid password';
-            UserPasswordStatus[i].Visible := True;
+            SetUserPasswordStatus(i, 'Invalid password');
+            if FirstErrorIndex < 0 then FirstErrorIndex := i;
             HasErrors := True;
             continue;
           end;
 
           if not ValidateLocalCredential(LocalUsersList[i], Password) then
           begin
-            UserPasswordStatus[i].Caption := 'Incorrect PW';
-            UserPasswordStatus[i].Visible := True;
+            SetUserPasswordStatus(i, 'Incorrect PW');
+            if FirstErrorIndex < 0 then FirstErrorIndex := i;
             HasErrors := True;
             continue;
           end;
 
-          UserPasswordStatus[i].Caption := '';
-          UserPasswordStatus[i].Visible := False;
+          SetUserPasswordStatus(i, '');
 
           ShortcutsList.Add(LocalUsersList[i] + '|' + Password);
         end
-        else if Assigned(UserPasswordStatus[i]) then
-        begin
-          UserPasswordStatus[i].Caption := '';
-          UserPasswordStatus[i].Visible := False;
-        end;
+        else
+          SetUserPasswordStatus(i, '');
       end;
 
       // Log which existing users were selected
@@ -12172,6 +12300,28 @@ begin
 
       if HasErrors then
       begin
+        // The failing row may live on a different pagination page than the one
+        // currently on screen. Jump to that page and re-run the layout so the
+        // message is drawn against its own edit box instead of being painted at
+        // a stale position on the page the user happened to be looking at.
+        if (FirstErrorIndex >= 0) and (UsersPerPage > 0) then
+          CurrentUserPage := FirstErrorIndex div UsersPerPage;
+        UpdateUsersPageDisplay;
+
+        if (FirstErrorIndex >= 0) and Assigned(UserPasswordEdits[FirstErrorIndex]) then
+        begin
+          if Assigned(WizardForm) then
+            WizardForm.ActiveControl := UserPasswordEdits[FirstErrorIndex];
+          UserPasswordEdits[FirstErrorIndex].SelStart := 0;
+          UserPasswordEdits[FirstErrorIndex].SelLength := Length(UserPasswordEdits[FirstErrorIndex].Text);
+        end;
+
+        if (FirstErrorIndex >= 0) and (FirstErrorIndex < LocalUsersList.Count) then
+          LogInfo('NextButtonClick: existing-users password validation failed for ' + LocalUsersList[FirstErrorIndex] +
+            ' (row ' + IntToStr(FirstErrorIndex) + ', page ' + IntToStr(CurrentUserPage + 1) + ')')
+        else
+          LogInfo('NextButtonClick: existing-users password validation failed');
+
         Result := False;
         exit;
       end;
@@ -13580,16 +13730,23 @@ begin
   if (CurPageID = Page_CreateShortcutsForExistingUsers.ID) and (LocalUsersList.Count = 0) then
   begin
     StatusOverlay.Caption := 'Looking for local user accounts...';
-    if Assigned(WizardForm) then
-      WizardForm.Update;
-    LocalUsersList.Clear;
-    LocalUserDisplayList.Clear;
-    GetLocalUsers(LocalUsersList, LocalUserDisplayList);
-    SetLength(UserCheckBoxes, LocalUsersList.Count);
-    SetLength(UserPasswordEdits, LocalUsersList.Count);
-    SetLength(UserPasswordStatus, LocalUsersList.Count);
-    // Build per-user controls on Create Shortcuts page
-    BuildCreateShortcutsControls;
+    // The scan blocks this thread, so the wait text has to be on screen before
+    // the call starts - otherwise the page looks empty and frozen for its whole
+    // duration (the user list controls do not exist yet).
+    ShowPageWaitLabel(Page_CreateShortcutsForExistingUsers,
+      'Looking for local user accounts,' + #13#10 + 'please wait...');
+    try
+      LocalUsersList.Clear;
+      LocalUserDisplayList.Clear;
+      GetLocalUsers(LocalUsersList, LocalUserDisplayList);
+      SetLength(UserCheckBoxes, LocalUsersList.Count);
+      SetLength(UserPasswordEdits, LocalUsersList.Count);
+      SetLength(UserPasswordStatus, LocalUsersList.Count);
+      // Build per-user controls on Create Shortcuts page
+      BuildCreateShortcutsControls;
+    finally
+      HidePageWaitLabel;
+    end;
     StatusOverlay.Caption := 'Select the users you want RDP shortcuts for.';
   end;
 
@@ -13804,8 +13961,18 @@ begin
   begin
     if not RemoveUsersControlsBuilt then
     begin
-      BuildRemoveUsersControls;
-      RemoveUsersControlsBuilt := True;
+      // Same reasoning as the Create Shortcuts page: the page body is empty until
+      // the account scan returns, so say that a scan is running.
+      StatusOverlay.Caption := 'Looking for local user accounts...';
+      ShowPageWaitLabel(Page_RemoveUsers,
+        'Loading user accounts,' + #13#10 + 'please wait...');
+      try
+        BuildRemoveUsersControls;
+        RemoveUsersControlsBuilt := True;
+      finally
+        HidePageWaitLabel;
+      end;
+      StatusOverlay.Caption := 'Select the accounts you want to remove.';
     end;
   end;
   if CurPageID = RemoveUsersConfirmPage.ID then

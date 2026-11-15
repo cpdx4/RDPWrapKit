@@ -4,7 +4,7 @@ REM ===========================================================================
 REM RDPWrapKit Build Wrapper
 REM ===========================================================================
 REM
-REM 1. Compiles RdpSignTool.exe from scripts\RdpSignTool.cs (C# source)
+REM 1. Compiles RdpWrapKitHelper.exe from scripts\RdpWrapKitHelper.cs (C# source)
 REM 2. Compiles RDPWrapKit-Setup.exe from RDPWrapKit.iss (Inno Setup)
 REM
 REM Step 1 invokes csc.exe directly. It used to shell out to
@@ -16,17 +16,19 @@ REM depends on PowerShell at all.
 REM
 REM Usage:
 REM   build.bat              full build (1-step)
-REM   build.bat signonly     only build RdpSignTool.exe
+REM   build.bat helperonly   only build RdpWrapKitHelper.exe
+REM   build.bat signonly     alias of helperonly (kept for existing scripts)
 REM ===========================================================================
 
 set ROOT=%~dp0
 set SIGNONLY=0
+if /i "%~1"=="helperonly" set SIGNONLY=1
 if /i "%~1"=="signonly" set SIGNONLY=1
 
 echo.
-echo === Step 1: Build RdpSignTool.exe ===
-if not exist "%ROOT%scripts\RdpSignTool.cs" (
-    echo ERROR: scripts\RdpSignTool.cs not found in %ROOT%scripts
+echo === Step 1: Build RdpWrapKitHelper.exe ===
+if not exist "%ROOT%scripts\RdpWrapKitHelper.cs" (
+    echo ERROR: scripts\RdpWrapKitHelper.cs not found in %ROOT%scripts
     exit /b 1
 )
 if not exist "%ROOT%output" mkdir "%ROOT%output"
@@ -49,15 +51,23 @@ if not defined CSC_EXE (
 echo Using: %CSC_EXE%
 "%CSC_EXE%" /nologo /target:exe /optimize+ ^
     /reference:System.dll /reference:System.Security.dll /reference:System.Core.dll ^
-    /out:"%ROOT%output\RdpSignTool.exe" "%ROOT%scripts\RdpSignTool.cs"
+    /out:"%ROOT%output\RdpWrapKitHelper.exe" "%ROOT%scripts\RdpWrapKitHelper.cs"
 if errorlevel 1 (
-    echo ERROR: RdpSignTool.exe build failed
+    echo ERROR: RdpWrapKitHelper.exe build failed
+    exit /b 1
+)
+
+REM Smoke test: the usage screen proves the new binary starts and its verb table
+REM is wired up. It needs no privileges and writes nothing.
+"%ROOT%output\RdpWrapKitHelper.exe" --help >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: RdpWrapKitHelper.exe --help failed
     exit /b 1
 )
 
 if %SIGNONLY% equ 1 (
     echo.
-    echo RdpSignTool.exe built successfully.
+    echo RdpWrapKitHelper.exe built successfully.
     exit /b 0
 )
 
