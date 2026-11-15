@@ -10226,7 +10226,9 @@ begin
   FinishedText.Visible := True;
   WizardForm.FinishedLabel.Visible := False;
 
-  // Keep log access in the wizard footer on every page.
+  // Keep log access in the wizard footer on every page. Pinned to the lower-left
+  // corner of the wizard footer so it can never collide with (or hide under) the
+  // Back / Next / Cancel buttons, which are all right-aligned.
   ViewLogLink := TLabel.Create(WizardForm);
   ViewLogLink.Parent := WizardForm;
   ViewLogLink.AutoSize := True;
@@ -10235,10 +10237,12 @@ begin
   ViewLogLink.Font.Style := [fsUnderline];
   ViewLogLink.Cursor := crHand;
   ViewLogLink.OnClick := @OnViewLogLinkClick;
-  ViewLogLink.Left := WizardForm.NextButton.Left - ViewLogLink.Width - ScaleX(10);
+  ViewLogLink.Transparent := True;
+  ViewLogLink.Left := ScaleX(16);
+  // Vertically center on the footer button row. The row origin (NextButton.Top)
+  // is identical on every page even when individual buttons are hidden.
   ViewLogLink.Top := WizardForm.NextButton.Top +
     (WizardForm.NextButton.Height - ViewLogLink.Height) div 2;
-  ViewLogLink.Transparent := True;
 
   // Optional example image shown only on the real final page when using
   // Edit Shortcut Settings mode.
