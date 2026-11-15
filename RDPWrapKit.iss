@@ -37,8 +37,7 @@
 #define SourceTermWrapSize FileSize("third_party\termwrap_release\TermWrap.dll")
 
 ; RdpWrapKitHelper.exe is compiled ahead-of-time from scripts\RdpWrapKitHelper.cs.
-; Run build.bat before compiling this installer (it invokes csc.exe directly;
-; scripts\build_rdpcrypt.ps1 still works but is no longer used by the build).
+; Run build.bat before compiling this installer (it invokes csc.exe directly).
 ; This keeps the 19KB binary out of git while enabling a clean build.
 ;
 ; The helper does four jobs (sign / verify / list-users / protect), so it is
@@ -500,11 +499,11 @@ var
   UserCreateFailures: TStringList;   // 'username|reason' entries
   UserCreateFailureShown: Boolean;   // ensures the failure popup shows only once
   BusyDepth: Integer;                // Reentrancy guard: non-zero when a background/install action is active
-  // Reentrancy guard for CurPageChanged. The PowerShell/cmd watchdogs pump the
+  // Reentrancy guard for CurPageChanged. The child-process watchdogs pump the
   // window message queue (WaitWithUI -> PumpMessages), so a queued Back/Next click
   // is dispatched while a page is still being populated. Without this flag that
   // click re-enters CurPageChanged and starts a second populate pass - which is
-  // how two PowerShell queries ended up sharing one temp output file and aborted
+  // how two child queries ended up sharing one temp output file and aborted
   // Setup with "Cannot open file ...psout.txt ... used by another process".
   PagePopulateActive: Boolean;
   // Deferred focus request. CurPageChanged freezes the Back/Next buttons while a
@@ -802,12 +801,12 @@ function GetExitCodeProcess(hProcess: Cardinal; var lpExitCode: DWORD): Boolean;
   external 'GetExitCodeProcess@kernel32.dll stdcall';
 
 // ---------------------------------------------------------------------------
-// IN-PROCESS SERVICE STATE (no child process, no PowerShell)
+// IN-PROCESS SERVICE STATE (no child process)
 // ---------------------------------------------------------------------------
 // Anything that runs inside a [Next]/[Back] handler must not spawn a process:
-// "Get-Service -Name TermService" cost ~1.0s and "Get-ScheduledTask" 3.4s in the
-// field log of 04:00:01-04:00:05, during which the wizard button looked frozen.
-// QueryServiceStatus answers the same question in microseconds.
+// a spawned query cost up to 3.4s in the field log of 04:00:01-04:00:05, during
+// which the wizard button looked frozen. QueryServiceStatus answers the same
+// question in microseconds.
 const
   SC_MANAGER_CONNECT  = $0001;
   SERVICE_QUERY_STATUS = $0004;
@@ -864,7 +863,7 @@ function QueryServiceStatus(hService: Cardinal; var lpServiceStatus: TServiceSta
 function CloseServiceHandle(hSCObject: Cardinal): Boolean;
   external 'CloseServiceHandle@advapi32.dll stdcall';
 
-// Start / stop / reconfigure a service without spawning sc.exe or PowerShell.
+// Start / stop / reconfigure a service without spawning a child process.
 // Every parameter that we never populate is declared Cardinal so that 0 is
 // passed as a real NULL pointer - the same constraint documented for
 // OpenSCManagerW above (Pascal Script passes a pointer to an empty string for
@@ -916,14 +915,13 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// SCM-NATIVE SERVICE CONTROL (replaces powershell Start/Stop-Service)
+// SCM-NATIVE SERVICE CONTROL
 // ---------------------------------------------------------------------------
 // Why this exists: stop/start of TermService is functionally required - a new
-// ServiceDll only loads when the service host is recreated - but it used to be
-// done with "powershell.exe -ExecutionPolicy Bypass -Command Stop-Service ...".
-// That is the most-detected construct in this installer (T1059.001 plus
-// T1562.001 policy-bypass signal). ControlService/StartServiceW/ChangeService
-// ConfigW produce the identical state change without spawning any process.
+// ServiceDll only loads when the service host is recreated. ControlService /
+// StartServiceW / ChangeServiceConfigW produce that state change without
+// spawning any process, so a required service restart never creates an
+// interpreter or shell command line (T1059.001 / T1562.001 signal).
 //
 // These helpers never cascade: SCM refuses to stop a service that has running
 // dependents (ERROR_DEPENDENT_SERVICES_RUNNING, 1051). Callers are responsible
@@ -1122,9 +1120,9 @@ end;
 // ---------------------------------------------------------------------------
 // SPAWN-FREE IDENTITY HELPERS
 // ---------------------------------------------------------------------------
-// These replace child-process calls on the startup path: well-known SID to
-// localized-name resolution and the administrator check now cost microseconds
-// instead of a PowerShell process (measured at ~1s per spawn in field logs).
+// Well-known SID to localized-name resolution and the administrator check run
+// in-process, so they cost microseconds instead of a child-process spawn
+// (measured at ~1s per spawn in field logs).
 function ConvertStringSidToSidW(StringSid: String; var Sid: Cardinal): Boolean;
   external 'ConvertStringSidToSidW@advapi32.dll stdcall';
 
@@ -1327,11 +1325,10 @@ end;
 // ---------------------------------------------------------------------------
 // PROCESS ENUMERATION AND PID-SCOPED TERMINATION (Toolhelp32)
 // ---------------------------------------------------------------------------
-// Two jobs, both previously done by spawning tools that defenders watch for:
-//   - "is a process running" was "powershell -Command Get-Process | Where-Object"
-//     (T1059.001); it is now a Toolhelp32 snapshot walk.
-//   - killing a wedged child was "taskkill.exe /F /T /PID" (T1489 signal); it is
-//     now OpenProcess/TerminateProcess against the exact PIDs we started.
+// Two jobs, both done without spawning a tool that defenders watch for:
+//   - "is a process running" is a Toolhelp32 snapshot walk.
+//   - killing a wedged child is OpenProcess/TerminateProcess against the exact
+//     PIDs we started.
 // taskkill remains only as a last-resort fallback when the API path is denied.
 type
   TProcessEntry32 = record
@@ -1375,7 +1372,7 @@ function TerminateProcess(hProcess: Cardinal; uExitCode: Cardinal): Boolean;
   external 'TerminateProcess@kernel32.dll stdcall';
 
 // True when any running image name contains NameFragment (case-insensitive).
-// Used to replace PowerShell process probes; never spawns a child process.
+// Never spawns a child process.
 function IsProcessRunningByName(const NameFragment: string): Boolean;
 var
   Snap: Cardinal;
@@ -1688,22 +1685,20 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
-// IN-PROCESS HTTP DOWNLOAD (replaces powershell Invoke-WebRequest/WebClient)
+// IN-PROCESS HTTP DOWNLOAD
 // ---------------------------------------------------------------------------
 // Downloads are functionally required (VC++ redistributable, mstsc installer),
-// but doing them through "powershell.exe -ExecutionPolicy Bypass -Command
-// Invoke-WebRequest ..." is a textbook ingress-tool-transfer chain
-// (T1105 + T1059.001 + T1562.001). URLDownloadToFileW is a native in-process
-// WinINet API: no child process, no execution-policy bypass, no COM plumbing.
-// (ADODB.Stream was the obvious COM alternative for the byte write, but its
-// binary mode is set through a property literally named "Type", which is a
-// reserved word in Pascal Script and cannot be parsed.)
+// but a download performed by a script host is a textbook ingress-tool-transfer
+// chain (T1105 + T1059.001 + T1562.001). URLDownloadToFileW is a native
+// in-process WinINet API: no child process, no execution-policy bypass, no COM
+// plumbing. (ADODB.Stream was the obvious COM alternative for the byte write,
+// but its binary mode is set through a property literally named "Type", which
+// is a reserved word in Pascal Script and cannot be parsed.)
 //
 // Trade-off, stated plainly: URLDownloadToFileW uses the WinINet defaults, so
-// WinHttpRequest's per-phase SetTimeouts control is not available here. The
-// previous WebClient call was equally unbounded, so this is not a regression,
-// and nothing is executed or trusted until the caller has validated the file
-// size and the Authenticode publisher.
+// per-phase SetTimeouts control is not available here. Nothing is executed or
+// trusted until the caller has validated the file size and the Authenticode
+// publisher.
 //
 // Returns True only when the destination exists and is non-empty.
 function URLDownloadToFileW(pCaller: Cardinal; szURL: String; szFileName: String;
@@ -2247,41 +2242,6 @@ begin
   Result := '"' + Escaped + '"';
 end;
 
-// Execute PowerShell script content through a temporary script file
-function ExecPowerShellScriptContent(const ScriptBaseName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
-var
-  ScriptPath: string;
-  OpTick: Cardinal;
-begin
-  LogEntry('ExecPowerShellScriptContent');
-  OpTick := GetTickCount;
-  ScriptPath := TempFile(ScriptBaseName);
-  SaveStringToFile(ScriptPath, ScriptContent, False);
-  LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
-  Result := Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
-  DeleteFile(ScriptPath);
-  LogExit('ExecPowerShellScriptContent');
-end;
-
-function ExecSavedPowerShellDebugScriptParams(const ScriptTag, UserName, ScriptContent, ExtraParams: string; Hidden: Boolean; var ResultCode: Integer): Boolean;
-var
-  ScriptPath: string;
-  OpTick: Cardinal;
-begin
-  LogEntry('ExecSavedPowerShellDebugScriptParams');
-  OpTick := GetTickCount;
-  ScriptPath := TempFile(ScriptTag + '_' + SanitizeFileName(UserName) + '.ps1');
-  SaveStringToFile(ScriptPath, ScriptContent, False);
-  LogDebug('PowerShell File: ' + ScriptPath + ' ' + MaskPasswordsInString(ExtraParams));
-  Result := Exec(PSHost, BuildPowerShellFileArgs(ScriptPath, ExtraParams, Hidden), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if not Result then
-    LogError('Failed to launch PowerShell script: code=' + IntToStr(ResultCode) + ' message=' + SysErrorMessage(ResultCode));
-  LogDebug('PowerShell exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
-  DeleteFile(ScriptPath);
-  LogExit('ExecSavedPowerShellDebugScriptParams');
-end;
-
 function BuildAddGroupMemberPowerShellScript(const GroupSid, UserName, OutPath, SuccessTag: string): string;
 begin
   Result :=
@@ -2506,12 +2466,11 @@ end;
 
 // Verify file is authenticode-signed by Microsoft Corporation.
 //
-// This used to run "powershell -Command Get-AuthenticodeSignature", which
-// spawned PowerShell with an execution-policy bypass on every download check
-// (T1059.001 + T1562.001). The check itself is MANDATORY before executing a
-// downloaded installer, so it did not disappear - it moved into RdpWrapKitHelper.exe
-// (already extracted to {tmp} by InitializeWizard), whose --verify verb calls WinVerifyTrust.
-// The reported keys are unchanged so existing troubleshooting notes still apply.
+// The check is MANDATORY before executing a downloaded installer. It runs in
+// RdpWrapKitHelper.exe (already extracted to {tmp} by InitializeWizard), whose
+// --verify verb calls WinVerifyTrust in-process, so no script host is spawned on
+// every download check. The reported keys are unchanged so existing
+// troubleshooting notes still apply.
 function IsSignedByMicrosoftCorporation(const FilePath: string): Boolean;
 var
   OutText: string;
@@ -3545,9 +3504,8 @@ begin
   EnsureRDPSigningCert;
 
   // RdpWrapKitHelper.exe is a standalone C# console application compiled ahead-of-time
-  // (see scripts/build_rdpcrypt.ps1).  It performs all RDP signing logic directly
-  // via P/Invoke to crypt32.dll — no PowerShell involved, no C# JIT compilation,
-  // no -EncodedCommand overhead.  The EXE is ~20KB and completes in ~100-300ms.
+  // (see build.bat).  It performs all RDP signing logic directly via P/Invoke to
+  // crypt32.dll with no child process.  The EXE is ~20KB and completes in ~100-300ms.
   //
   // Exit codes:
   //   0  = Success
@@ -3717,8 +3675,8 @@ end;
 // -Command one-liner. Two reasons:
 //   1. No quoting hazards and no module autoload surprises from a huge one-liner.
 //   2. Every step appends a "STAGE:" marker to the output file as it happens, so
-//      if PowerShell ever wedges again the log shows the LAST step reached - the
-//      one thing the original field log could not tell us.
+//      if the script host wedges the log shows the LAST step reached - the one
+//      thing the field log could not tell us.
 // The certificate itself is created through the .NET CertificateRequest API, which
 // avoids loading the PKI module (the slowest and most hang-prone part of
 // New-SelfSignedCertificate). New-SelfSignedCertificate is kept as a fallback.
@@ -4921,8 +4879,7 @@ var
   i: Integer;
 begin
   Result := '';
-  // Generated in-process. This used to call PowerShell for [guid]::NewGuid(),
-  // which is a full powershell.exe spawn (T1059.001) for twelve random
+  // Generated in-process, so no child process is spawned for twelve random
   // characters. Random() is seeded per process by Setup, and the tick count and
   // PID are mixed in because Random alone is predictable across runs.
   Raw := '';
@@ -5689,11 +5646,11 @@ var
   ByFile, ByRegistry: Boolean;
 begin
   LogEntry('IsRdpWrapperAutoupdateTaskPresent');
-  // In-process checks only. The previous "Get-ScheduledTask" PowerShell query cost
-  // 3.4s of frozen UI in the field log of 04:00:02-04:00:05 because it runs inside
-  // the Setup Options [Next] handler. A task in the root task folder always has a
-  // definition file under System32\Tasks and a TaskCache\Tree registry key, so
-  // either signal proves the task exists - no process spawn needed.
+  // In-process checks only: spawning a query here cost 3.4s of frozen UI in the
+  // field log of 04:00:02-04:00:05 because it runs inside the Setup Options
+  // [Next] handler. A task in the root task folder always has a definition file
+  // under System32\Tasks and a TaskCache\Tree registry key, so either signal
+  // proves the task exists - no process spawn needed.
   TaskFile := ExpandConstant('{sys}\Tasks\RDP Wrapper Autoupdate');
   TaskKey := 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\RDP Wrapper Autoupdate';
   ByFile := FileExists(TaskFile);
@@ -5707,11 +5664,11 @@ end;
 
 // Enable the "password never expires" flag on every local account.
 //
-// Replaces "Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true" and
-// "-AccountNeverExpires": both cmdlets live in Microsoft.PowerShell.LocalAccounts,
-// which LogCapabilityProbe reports as missing on a growing number of builds, so
-// the old quick fix silently did nothing there. ADSI is always present. Both
-// original cmdlets reduce to the same UF_DONT_EXPIRE_PASSWD (0x10000) bit.
+// The Microsoft.PowerShell.LocalAccounts cmdlets (Set-LocalUser
+// -PasswordNeverExpires / -AccountNeverExpires) are missing on a growing number
+// of builds, which LogCapabilityProbe reports, so that quick fix did nothing
+// there. ADSI is always present. Both flags reduce to the same
+// UF_DONT_EXPIRE_PASSWD (0x10000) bit.
 // Why PowerShell is still required here: the WinNT ADSI provider is a .NET API
 // with no Pascal Script equivalent, and NetUserSetInfo would need a win32
 // record marshaller that this script cannot express safely.
@@ -5775,9 +5732,8 @@ end;
 //
 // This is a conflict resolution, not a required action: it only runs when
 // IsRdpWrapperAutoupdateTaskPresent already found the task AND the user was
-// told about it at the options page. It used to run "Disable-ScheduledTask"
-// through PowerShell (T1053.005 traffic plus a PS spawn); the COM Task
-// Scheduler API does the same thing in-process.
+// told about it at the options page. The COM Task Scheduler API performs the
+// disable in-process, so no task-scheduler command line is ever created.
 procedure DisableRdpWrapperAutoupdateTask;
 var
   Service: Variant;
@@ -5817,22 +5773,6 @@ begin
   WaitWithUI(Milliseconds);
   if Assigned(WizardForm) then
     WizardForm.Update;
-end;
-
-// Run in PowerShell via our existing wrapper and return exit code
-function RunPSHiddenCode(const Command: string): Integer;
-var
-  RC: Integer;
-  OpTick: Cardinal;
-begin
-  LogEntry('RunPSHiddenCode');
-  OpTick := GetTickCount;
-  RC := -1;
-  LogDebug('RunPSHiddenCode: ' + MaskPasswordsInString(Command));
-  ExecPowerShellHidden(Command, RC);
-  LogDebug('RunPSHiddenCode exit=' + IntToStr(RC) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
-  Result := RC;
-  LogExit('RunPSHiddenCode');
 end;
 
 // Convert plain text to a minimal RTF string (escapes braces and backslashes and converts CRLF to \par)
@@ -5923,8 +5863,8 @@ begin
 end;
 
 // Resolve a well-known SID to its localized name, with no child process.
-// This used to spawn PowerShell (~1s measured in field logs) and is called from
-// the launcher admin check, so it sat directly on the user-visible path.
+// A spawned query cost ~1s (measured in field logs), and this is called from
+// the launcher admin check, so it sits directly on the user-visible path.
 function GetLocalizedGroupName(const Sid, Fallback: string): string;
 var
   SidPtr: Cardinal;
@@ -5964,10 +5904,8 @@ end;
 // Creates the LocalDevices registry entry that Windows sets when the user ticks
 // "Don't ask me again". Value 76 (0x4C) is the device/resource trust flag set.
 //
-// This is a plain registry write, so it no longer needs PowerShell: the previous
-// version performed New-Item + New-ItemProperty in a spawned powershell.exe.
-// RegWriteDWordValue creates the intermediate keys itself, exactly as
-// "New-Item -Path ... -Force" did.
+// This is a plain registry write. RegSetDWordIfChanged creates the intermediate
+// keys itself, so the trust entry needs no child process.
 procedure PreTrustRDPCertCurrentUser;
 var
   Changed: Boolean;
@@ -5997,8 +5935,8 @@ var
   State: Cardinal;
 begin
   LogEntry('GetTermServiceStatus');
-  // Queried through the service control manager in-process. The old
-  // "(Get-Service ...).Status" PowerShell call cost ~1s inside a [Next] handler.
+  // Queried through the service control manager in-process, which answers in
+  // microseconds inside a [Next] handler.
   Result := '';
   if WinQueryServiceState('TermService', State) then
   begin
@@ -6280,10 +6218,8 @@ begin
   // PRIMARY PATH - native enumeration via the helper's --list-users verb.
   // That verb calls NetUserEnum (netapi32) once over the local SAM - the same
   // API the Windows "User Accounts" control panel uses - and returns in tens of
-  // milliseconds. It replaced the PowerShell/CIM query below, which paid
-  // ~1-3s of PowerShell host startup plus WMI provider load before producing the
-  // first row; that delay is what left the shortcut and remove-user pages blank
-  // for seconds while this function was running.
+  // milliseconds, so the shortcut and remove-user pages fill immediately
+  // instead of sitting blank while a query provider loads.
   ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
   if FileExists(ExePath) then
   begin
@@ -7077,9 +7013,8 @@ end;
 
 
 // Returns the version string of the installed TermWrap.dll (e.g. "0.0.6.0").
-// Reads the version resource directly with the Inno API. This used to spawn
-// PowerShell (about 1s per call, and it is called twice) on the wizard startup
-// path, which was the single largest contributor to the UAC-to-first-page delay.
+// Reads the version resource directly with the Inno API, so the two calls on the
+// wizard startup path cost microseconds instead of a ~1s child-process spawn each.
 // Inno Setup 7 signature: GetVersionNumbersString(FileName, var VersionString).
 // Returns empty string if TermWrap is not installed or the file cannot be read.
 function GetInstalledTermWrapVersion(): string;
@@ -7101,8 +7036,7 @@ end;
 
 
 // Returns the file size (in bytes) of the installed TermWrap.dll as a string.
-// Uses Win32 CreateFileW/GetFileSize directly - no PowerShell process, which is
-// what made this a ~1s cost on the wizard startup path.
+// Uses Win32 CreateFileW/GetFileSize directly on the wizard startup path.
 // Returns empty string if TermWrap is not installed or the file cannot be read.
 function GetInstalledTermWrapSize(): string;
 var
@@ -7121,9 +7055,8 @@ begin
   end;
 end;
 
-// "<version> (<bytes> bytes)" for a DLL, read in-process. Replaces the
-// "(Get-Item ...).VersionInfo.FileVersionRaw" PowerShell spawns that the System
-// Status panel used on every page change (~1s each).
+// "<version> (<bytes> bytes)" for a DLL, read in-process, so the System Status
+// panel costs microseconds on every page change.
 function FileVersionWithSize(const FilePath: string): string;
 var
   Ver: string;
@@ -8143,14 +8076,11 @@ end;
 // Produce the DPAPI-protected password blob that goes into the RDP file's
 // "password 51:b:" field.
 //
-// This used to be a PowerShell one-liner with the PLAINTEXT PASSWORD embedded
-// in the command string, so the secret also landed in process-command-line
-// telemetry (Sysmon event 1 / EDR command capture). The work now happens in
-// RdpWrapKitHelper.exe (--protect) using ProtectedData with DataProtectionScope.CurrentUser -
-// the same DPAPI scope and hex format that ConvertFrom-SecureString produced,
-// so existing behaviour and saved credentials are unchanged - and the plaintext
-// never appears on any command line. It is handed over through a temp file that
-// is deleted immediately afterwards.
+// The work happens in RdpWrapKitHelper.exe (--protect) using ProtectedData with
+// DataProtectionScope.CurrentUser - the DPAPI scope and hex format mstsc.exe
+// expects, so existing behaviour and saved credentials are unchanged - and the
+// plaintext never appears on any command line: it is handed over through a temp
+// file that is deleted immediately afterwards.
 function EncryptPasswordToFile(const Password, UserName: string): string;
 var
   ResultCode: Integer;
@@ -8548,8 +8478,7 @@ begin
     // Verify the RDP file exists and log its size for diagnostics
     if FileExists(RDPPath) then
     begin
-      // WinGetFileSize uses CreateFileW/GetFileSize: same answer as
-      // "(Get-Item x).Length" without a powershell.exe spawn.
+      // WinGetFileSize uses CreateFileW/GetFileSize directly.
       FileSizeStr := IntToStr(WinGetFileSize(RDPPath));
       LogDebug('CreateRDPShortcut: RDP file verified: ' + RDPPath + ' size=' + FileSizeStr + ' bytes');
     end
@@ -10018,13 +9947,11 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
-// RDP LISTENER PROBE (netstat, no PowerShell child)
+// RDP LISTENER PROBE (netstat, no script host)
 // -----------------------------------------------------------------------------
-// The Show RDP Info page used to answer "is RDP listening?" with a PowerShell
-// child (Get-NetTCPConnection). That started a script host on every visit to the
-// page just to render one status line, made Back/Next navigation slow, and gave
-// the page a file-backed child process to race against. netstat returns the same
-// answer from a tiny console tool that exits immediately.
+// The Show RDP Info page answers "is RDP listening?" from netstat, a tiny
+// console tool that exits immediately. No script host is started on every visit
+// to the page just to render one status line, so Back/Next navigation stays fast.
 
 // Returns the Nth whitespace-separated field of a line (0-based), '' when absent.
 function ExtractWhitespaceField(const Line: string; Index: Integer): string;
@@ -13003,8 +12930,8 @@ begin
       begin
         SetStepInProgress(StepQuickFixes, 'Setting all Local Accounts to Never Expire');
         // Routed through ADSI (see SetAllLocalAccountsPasswordNeverExpires).
-        // The previous Get-LocalUser/Set-LocalUser pipeline fails outright when
-        // the LocalAccounts module is absent, which LogCapabilityProbe reports.
+        // A Get-LocalUser/Set-LocalUser pipeline fails outright when the
+        // LocalAccounts module is absent, which LogCapabilityProbe reports.
         SetAllLocalAccountsPasswordNeverExpires;
         LogDebug('QuickFixes: PasswordNeverExpires PowerShell exit=' + IntToStr(ResultCode));
         WriteInstallerLog('QuickFixes: Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
@@ -13066,8 +12993,8 @@ begin
         VCRedistPath := TempFile('vc_redist.x64.exe');
         LogKeyValue('Installer temp path', VCRedistPath);
         
-        // In-process download: no powershell.exe and no execution-policy
-        // bypass flag on a command line that also fetches a remote binary.
+        // In-process download: the fetched binary never appears as an argument
+        // on a script-host command line.
         if DownloadFileNative(URL_VCREDIST_X64, VCRedistPath, 'vcpp-redist-dependency') then
           ResultCode := 0
         else
@@ -13311,7 +13238,6 @@ begin
 
       // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
       LogSectionHeader('RAZER CORTEX CHECK');
-      // Toolhelp32 snapshot walk, not "powershell Get-Process | Where-Object".
       if IsProcessRunningByName('Cortex') then
         ResultCode := 0
       else
@@ -13338,8 +13264,8 @@ begin
         PortNumber := RDP_LISTEN_PORT;
       
       // Ask the SAME helper that renders the "Show RDP Info" status line
-      // (netstat-based, bounded by the watchdog) instead of spawning a second
-      // PowerShell just to ask Get-NetTCPConnection the same question.
+      // (netstat-based, bounded by the watchdog), so one implementation answers
+      // both questions.
       if IsRdpListeningOnPort(PortNumber) then
         ResultCode := 0
       else
@@ -13374,8 +13300,7 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     // Remove the RDP pre-trust entry written by PreTrustRDPCertCurrentUser.
-    // This is a single registry delete, so it no longer justifies spawning
-    // PowerShell with an execution-policy bypass (the old Remove-ItemProperty).
+    // This is a single registry delete, done in-process.
     if RegDeleteValue(HKCU, 'Software\Microsoft\Terminal Server Client\LocalDevices',
       RDP_LOOPBACK_IP) then
     begin
@@ -13821,9 +13746,8 @@ begin
 
     // termsrv.dll exists only in the native System32 directory (SysWOW64 has no
     // counterpart). In 64-bit install mode '{sys}' already resolves to the real
-    // System32; '{win}\System32' is the explicit fallback. Read in-process - the
-    // previous PowerShell version-info query froze this page for ~1s on every
-    // single visit to the page.
+    // System32; '{win}\System32' is the explicit fallback. Read in-process, so
+    // every visit to the page costs microseconds.
     TermsrvVer := '';
     if not GetVersionNumbersString(ExpandConstant('{sys}\termsrv.dll'), TermsrvVer) then
     begin
@@ -13902,8 +13826,7 @@ begin
     else
       PortNumber := RDP_LISTEN_PORT;
 
-    // Answered from netstat under the process watchdog (GetRdpListenerStatus):
-    // no PowerShell child is started just to render this status line.
+    // Answered from netstat under the process watchdog (GetRdpListenerStatus).
     ListenerStatus := GetRdpListenerStatus(PortNumber);
     lblListener.Caption := ListenerStatus;
     SetShowRDPInfoValueColor(lblListener, lblListener.Caption);

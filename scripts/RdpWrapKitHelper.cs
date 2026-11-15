@@ -3,10 +3,8 @@
 //
 // The name describes the ROLE, not one verb: this is the elevated installer's
 // own out-of-process helper for Windows API work that Inno Setup's Pascal
-// Script cannot do (or can only do by spawning powershell.exe, which is the
-// EDR-hostile telemetry this tool exists to remove). Keeping one binary with
-// explicit verbs avoids a second sidecar every time the installer needs
-// another native call.
+// Script cannot perform. Keeping one binary with explicit verbs avoids a
+// second sidecar every time the installer needs another native call.
 //
 // Verbs:
 //   [--sign] <rdp-file>          sign an .rdp file (RDPWrapKit certificate)
@@ -42,16 +40,16 @@
 //    an alternate full address field.  This is done in Step 6 (see fieldMap
 //    override just below).
 //
-//    Root cause: when the old PowerShell signer (commit 93e0dbc) was ported
-//    to C# (commit d094bd2), the fieldMap override for alternate full address
-//    was omitted.  Newly-created shortcuts (first-time signing) lack the
+//    Root cause: the fieldMap override for alternate full address was omitted
+//    when this signer was ported to C# (commit d094bd2).  Newly-created
+//    shortcuts (first-time signing) lack the
 //    alternate full address field, so the C# code fell back to the default
 //    value "" for type 's'.  The signature was computed with an empty value,
 //    but the output file was written with alternate full address = full address.
 //    mstsc.exe then computed canonical bytes from the output file — getting the
 //    non-empty value — and signature verification failed.
 //
-//    Verification method (PowerShell + C# P/Invoke):
+//    Verification method (C# P/Invoke):
 //      - System.Security.Cryptography.Pkcs.SignedCms content + cms blob
 //      - Canonical bytes computed with/without the override
 //      - rdp0002 verified OK only with NO_OVERRIDE (empty value)
@@ -285,12 +283,11 @@ namespace RdpWrapKit
         // Invoked as:  RdpWrapKitHelper.exe --protect <inPath> <outPath>
         // (--encrypt-password is still accepted as the legacy alias.)
         // "Protect" rather than "encrypt": this is DPAPI protection, which the
-        // same user on the same machine can reverse - there is no key held here.
-        // Replaces a PowerShell ConvertFrom-SecureString call that embedded the
-        // plaintext password in its command line. ProtectedData with the
-        // CurrentUser scope produces the identical DPAPI blob that
-        // ConvertFrom-SecureString produced, and the hex encoding matches, so
-        // the generated .rdp file stays compatible with mstsc.exe.
+        // same user on the same machine can reverse - there is no key held here,
+        // and the plaintext password never appears on a command line.
+        // ProtectedData with the CurrentUser scope produces the DPAPI blob
+        // mstsc.exe expects, and the hex encoding matches, so the generated
+        // .rdp file stays compatible with mstsc.exe.
         // Exit codes: 0 = written, 2 = input missing, 5 = failure.
         private static int RunProtectSecret(string inPath, string outPath)
         {
@@ -308,12 +305,12 @@ namespace RdpWrapKit
             try
             {
                 string plaintext = File.ReadAllText(inPath);
-                // MUST be UTF-16LE. This mirrors ConvertFrom-SecureString exactly:
-                // .NET protects Encoding.Unicode.GetBytes(value), and mstsc.exe
-                // later treats the unprotected bytes as a wide string. Encoding
-                // these as UTF-8 produced a 7-byte "rdp115$" instead of the
-                // 14-byte wide form, which mstsc read back as garbage - the
-                // saved password was silently wrong.
+                // MUST be UTF-16LE. ProtectedData protects
+                // Encoding.Unicode.GetBytes(value), and mstsc.exe later treats
+                // the unprotected bytes as a wide string. Encoding these as
+                // UTF-8 produced a 7-byte "rdp115$" instead of the 14-byte wide
+                // form, which mstsc read back as garbage - the saved password
+                // was silently wrong.
                 byte[] plainBytes = Encoding.Unicode.GetBytes(plaintext);
                 byte[] protectedBytes = ProtectedData.Protect(
                     plainBytes, null, DataProtectionScope.CurrentUser);
@@ -338,8 +335,7 @@ namespace RdpWrapKit
         // ---- Publisher verification (--verify) ------------------------------
         // Invoked as:  RdpWrapKitHelper.exe --verify <file> [expectedSubjectSubstring]
         // This exists so the installer can validate a downloaded binary's
-        // Authenticode publisher without spawning powershell.exe with
-        // "-ExecutionPolicy Bypass -Command Get-AuthenticodeSignature".
+        // Authenticode publisher in-process, with no child process.
         // Emits one machine-readable line on stdout as its last line:
         //   VERIFY|STATUS=<status>|IS_MICROSOFT=<True/False>|SUBJECT=...|
         //   ISSUER=...|THUMBPRINT=...|RESULT=<OK|BAD>
@@ -474,13 +470,11 @@ namespace RdpWrapKit
         // ---- Local user enumeration (--list-users) --------------------------
         // Invoked as:  RdpWrapKitHelper.exe --list-users <out-file>
         //
-        // This is the installer's account-list source. It replaces the former
-        // "powershell.exe + Get-CimInstance Win32_UserAccount" query, which cost
-        // ~1-3 s of PowerShell host startup plus WMI provider load before the
-        // first row existed - the blank page users saw on the shortcut and
-        // "remove user accounts" pages. NetUserEnum is the native API behind the
-        // "User Accounts" control panel: one netapi32 call over the local SAM,
-        // tens of milliseconds.
+        // This is the installer's account-list source. NetUserEnum is the native
+        // API behind the "User Accounts" control panel: one netapi32 call over
+        // the local SAM that returns in tens of milliseconds, so the shortcut and
+        // "remove user accounts" pages fill immediately instead of showing a
+        // blank list while a query provider loads.
         //
         // Filtering mirrors the installer's original rules exactly:
         //   * enabled accounts only         (UF_ACCOUNTDISABLE cleared)
@@ -491,7 +485,7 @@ namespace RdpWrapKit
         //
         // Output: one "name|display" line per account, where display is
         // "name (full name or Microsoft-account e-mail)" when a detail value
-        // exists. UTF-8 with BOM, matching what the PowerShell version wrote.
+        // exists. UTF-8 with BOM.
         // Exit codes: 0 = file written, 1 = enumeration failed, 99 = bad args.
 
         private const uint FILTER_NORMAL_ACCOUNT = 0x0002;
@@ -578,8 +572,8 @@ namespace RdpWrapKit
             {
                 string loginName = names[i];
 
-                // Guard kept from the PowerShell version: a name that starts with
-                // a single quote is not a usable login name.
+                // A name that starts with a single quote is not a usable login
+                // name.
                 if (loginName.Length == 0 || loginName[0] == '\'')
                     continue;
 
@@ -769,8 +763,7 @@ namespace RdpWrapKit
             return loginName + " (" + detail + ")";
         }
 
-        // Microsoft-account (online) logins store their e-mail address here; the
-        // old PowerShell query read the same per-user key.
+        // Microsoft-account (online) logins store their e-mail address here.
         private static string ReadIdentityCacheUserName(byte[] sid)
         {
             try
@@ -1097,8 +1090,8 @@ namespace RdpWrapKit
                 string b64Raw = Convert.ToBase64String(sigBlob);
 
                 // Wrap base64: insert two spaces after every 64 characters, keeping
-                // the ENTIRE signature value on ONE RDP file line (matching rdpsign.exe
-                // and the original PowerShell implementation exactly).
+                // the ENTIRE signature value on ONE RDP file line (matching
+                // rdpsign.exe).
                 // Regex equivalent: .Replace(b64Raw, '.{1,64}', '$0  ')
                 StringBuilder b64Wrapped = new StringBuilder(b64Raw.Length + (b64Raw.Length / 64 + 1) * 2);
                 for (int i = 0; i < b64Raw.Length; i += 64)

@@ -7,12 +7,8 @@ REM
 REM 1. Compiles RdpWrapKitHelper.exe from scripts\RdpWrapKitHelper.cs (C# source)
 REM 2. Compiles RDPWrapKit-Setup.exe from RDPWrapKit.iss (Inno Setup)
 REM
-REM Step 1 invokes csc.exe directly. It used to shell out to
-REM "powershell.exe -ExecutionPolicy Bypass -File scripts\build_rdpcrypt.ps1",
-REM which put an execution-policy bypass on a command line in every build (and
-REM in CI logs). The compiler lookup order now mirrors the ISCC lookup below.
-REM The .ps1 is kept for developers who prefer it, but the build no longer
-REM depends on PowerShell at all.
+REM Step 1 invokes csc.exe directly with the same compiler lookup order used by
+REM the ISCC lookup below, so the build needs no script host.
 REM
 REM Usage:
 REM   build.bat              full build (1-step)

@@ -5,9 +5,7 @@
 .DESCRIPTION
     Compiles RdpWrapKitHelper.exe — the installer's standalone C# sidecar. It
     signs .rdp files, verifies Authenticode publishers, enumerates local
-    accounts and DPAPI-protects passwords without ANY PowerShell overhead.
-    Called directly from Inno Setup via Exec(), eliminating ~5 seconds of PS
-    startup + -EncodedCommand + Add-Type overhead.
+    accounts and DPAPI-protects passwords.
 
     Uses the .NET Framework csc.exe (C# compiler) that ships with the .NET
     Framework runtime or Windows SDK.
