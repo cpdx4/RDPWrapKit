@@ -122,6 +122,8 @@ function GetInstalledTermWrapSize(): string; forward;
 function BoolToStr(Value: Boolean): string; forward;
 procedure EnsureTermServiceRunsAsNetworkService; forward;
 procedure EnsureUmRdpServiceAutomatic; forward;
+function GetTermServiceStatus: string; forward;
+function IsTermServiceInstalled: Boolean; forward;
 procedure InitInstallerLog; forward;
 procedure WriteInstallerLog(const Msg: string); forward;
 procedure LogSectionHeader(const Title: string); forward;
@@ -4987,6 +4989,41 @@ end;
 // -----------------------------------------------------------------------------
 // WINDOWS SERVICE MANAGEMENT
 // -----------------------------------------------------------------------------
+
+// Returns the Remote Desktop service status ("Running", "Stopped", ...) or ''
+// when the service is not installed at all. This is the single query used by both
+// the Show RDP Info page and the Install TermWrap guard.
+function GetTermServiceStatus: string;
+begin
+  LogEntry('GetTermServiceStatus');
+  Result := Trim(GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status'));
+  LogDebug('GetTermServiceStatus: "' + Result + '"');
+end;
+
+// True when the Remote Desktop service (TermService) is installed.
+// TermWrap works by replacing the ServiceDll of TermService, so a missing service
+// makes the whole Install TermWrap flow impossible.
+function IsTermServiceInstalled: Boolean;
+begin
+  LogEntry('IsTermServiceInstalled');
+  // Primary check: ask the service control manager (same query the Show RDP Info
+  // page uses to report "Not installed").
+  if GetTermServiceStatus <> '' then
+  begin
+    Result := True;
+    LogDebug('IsTermServiceInstalled: TermService reported by Get-Service');
+  end
+  else
+  begin
+    // The PowerShell query can fail or time out (GetPSOutput returns '' in that
+    // case), so never treat an empty result alone as "missing". The service key in
+    // the registry is the authoritative "service is installed" marker.
+    Result := RegKeyExists(HKLM, REG_TERMSERVICE);
+    LogDebug('IsTermServiceInstalled: Get-Service returned nothing, registry key ' +
+      REG_TERMSERVICE + ' exists=' + BoolToStr(Result));
+  end;
+  LogExit('IsTermServiceInstalled');
+end;
 
 // Stop TermService with retry logic (up to 5 attempts).
 // Required before replacing TermWrap DLLs; disconnects active RDP sessions.
@@ -10398,6 +10435,22 @@ begin
       // TermWrap, so it will be disabled during installation.
       if DoInstallTermWrap then
       begin
+        // TermWrap is installed by pointing the TermService ServiceDll at
+        // TermWrap.dll, so it cannot be installed when the Remote Desktop service
+        // is missing. Stop the install and tell the user how to restore the
+        // service through Quick Fixes.
+        if not IsTermServiceInstalled then
+        begin
+          LogError('NextButtonClick: Install TermWrap aborted - Remote Desktop service (TermService) is not installed');
+          MsgBox('The Remote Desktop service (TermService) is not installed on this PC.' + #13#10#13#10 +
+                 'TermWrap cannot be installed without it.' + #13#10#13#10 +
+                 'Re-run Setup and use "Quick Fixes" > "Restore deleted Remote Desktop Service" ' +
+                 'to reinstall the missing RDP service, then run the TermWrap installation again.',
+                 mbCriticalError, MB_OK);
+          Result := False;
+          exit;
+        end;
+
         RdpWrapperAutoupdatePresent := IsRdpWrapperAutoupdateTaskPresent;
         if RdpWrapperAutoupdatePresent then
         begin
@@ -12265,7 +12318,7 @@ begin
       lblWinVer.Caption := 'Unknown';
     SetShowRDPInfoValueColor(lblWinVer, lblWinVer.Caption);
 
-    ServiceStatus := GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status');
+    ServiceStatus := GetTermServiceStatus;
     ServiceMissing := (ServiceStatus = '');
     if ServiceMissing then lblRDPService.Caption := 'Not installed'
     else lblRDPService.Caption := ServiceStatus;

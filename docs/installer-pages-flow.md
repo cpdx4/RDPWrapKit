@@ -143,6 +143,11 @@ When the user clicks Next on the Options page, the installer evaluates selection
         ├─ rbCreateUsers selected     → CreateUserMode = createUserModeNew
         └─ rbUseExistingUsers selected → CreateUserMode = createUserModeExisting
       Validation: At least one of DoInstallTermWrap or DoCreateRdpShortcuts must be True.
+      Validation: When DoInstallTermWrap is True, the Remote Desktop service (TermService)
+                  must be installed (IsTermServiceInstalled). Otherwise the install is
+                  stopped with a critical message that tells the user to re-run Setup and
+                  use Quick Fixes > "Restore deleted Remote Desktop Service" to reinstall
+                  the missing RDP service.
 ```
 
 **Note:** All Install sub-flows share `installModeInstall`. Behavior is driven entirely by `DoInstallTermWrap`, `DoCreateRdpShortcuts`, and `CreateUserMode`.
