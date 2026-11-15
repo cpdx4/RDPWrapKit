@@ -5852,7 +5852,7 @@ begin
   if ShowPerformanceSettings then
     lblPerformanceHeader.Caption := '▼ Quality vs Performance (unchecked = better perf)'
   else
-    lblPerformanceHeader.Caption := '▶ Quality vs Performance';
+    lblPerformanceHeader.Caption := '▶ Quality vs Performance (click to expand)';
   // Toggle visibility of the performance panel (contains all 6 checkboxes)
   if Assigned(PerformancePanel) then
     PerformancePanel.Visible := ShowPerformanceSettings
@@ -5875,7 +5875,7 @@ begin
   if ShowBasicSettings then
     lblBasicHeader.Caption := '▼ Basic Shortcut Settings'
   else
-    lblBasicHeader.Caption := '▶ Basic Shortcut Settings';
+    lblBasicHeader.Caption := '▶ Basic Shortcut Settings (click to expand)';
   // Toggle visibility of the basic settings panel
   if Assigned(BasicPanel) then
     BasicPanel.Visible := ShowBasicSettings
@@ -8243,7 +8243,7 @@ lblBasicHeader := TLabel.Create(ParentSurface);
 lblBasicHeader.Parent := ParentSurface;
 lblBasicHeader.Left := ScaleX(10);
 lblBasicHeader.Top := lblScreenSize.Top + ScaleY(52);
-lblBasicHeader.Caption := '▶ Basic Shortcut Settings';
+lblBasicHeader.Caption := '▶ Basic Shortcut Settings (click to expand)';
 lblBasicHeader.Font.Style := [fsBold];
 lblBasicHeader.AutoSize := True;
 lblBasicHeader.Cursor := crHandPoint;
@@ -8304,7 +8304,7 @@ MakeShortcutHelpButton(ParentSurface, lblBasicHeader.Top, 6);
   lblShortcutSection.Parent := ParentSurface;
   lblShortcutSection.Left := ScaleX(10);
   lblShortcutSection.Top := lblBasicHeader.Top;
-  lblShortcutSection.Caption := '▶ Basic Shortcut Settings';
+  lblShortcutSection.Caption := '▶ Basic Shortcut Settings (click to expand)';
   lblShortcutSection.Font.Style := [fsBold];
   lblShortcutSection.AutoSize := True;
   lblShortcutSection.Visible := False;
@@ -8314,7 +8314,7 @@ MakeShortcutHelpButton(ParentSurface, lblBasicHeader.Top, 6);
   lblPerformanceHeader.Parent := ParentSurface;
   lblPerformanceHeader.Left := ScaleX(10);
   lblPerformanceHeader.Top := lblBasicHeader.Top + ScaleY(76);
-  lblPerformanceHeader.Caption := '▶ Quality vs Performance';
+  lblPerformanceHeader.Caption := '▶ Quality vs Performance (click to expand)';
   lblPerformanceHeader.Font.Style := [fsBold];
   lblPerformanceHeader.Width := ScaleX(320);
   lblPerformanceHeader.AutoSize := False;
