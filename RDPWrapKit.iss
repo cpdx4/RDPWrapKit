@@ -480,6 +480,7 @@ var
   // reason so the wizard can never claim success for a half-finished account.
   UserCreateFailures: TStringList;   // 'username|reason' entries
   UserCreateFailureShown: Boolean;   // ensures the failure popup shows only once
+  BusyDepth: Integer;                // Reentrancy guard: non-zero when a background/install action is active
 
 const
   // -------------------------------------------------------------------------
@@ -576,6 +577,13 @@ const
   PS_KILL_GRACE = 5000;          // wait for a killed process tree to disappear
   PER_USER_TIMEOUT = 120000;     // 2 minutes per user (best-effort warning)
   USERS_OVERALL_TIMEOUT = 600000; // 10 minutes overall for user operations
+
+  // Win32 constants for UI message pumping and wait synchronization
+  PM_REMOVE = $0001;
+  QS_ALLINPUT = $04FF;
+  WM_QUIT = $0012;
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
+  STILL_ACTIVE = 259;
   
   // -------------------------------------------------------------------------
   // FILES, URLS, AND NETWORK PORTS
@@ -707,6 +715,50 @@ function GetSysColor(nIndex: DWORD): DWORD;
 
 function MessageBox(hWnd: Integer; lpText, lpCaption: String; uType: Cardinal): Integer;
   external 'MessageBoxW@user32.dll stdcall';
+
+// Windows message buffer for PeekMessage / TranslateMessage / DispatchMessage.
+//
+// TWO HARD-WON RULES, do not "simplify" them:
+//  1. Setup.exe is a 32-BIT process even on x64 Windows, so MSG must use 32-bit
+//     fields at the x86 offsets (hwnd 0, message 4, wParam 8, lParam 12, time 16,
+//     pt 20, lPrivate 28 = 28 bytes). An "Int64 x 6" buffer looks tempting for
+//     64-bit MSG but mis-parses the queue on the 32-bit host: message lands in the
+//     upper half of the first field, so every message reads back as 0.
+//  2. The record parameters must be declared 'var' (by reference). Declaring them
+//     'const'/'by value' hands USER32 the first 4 bytes of the record - i.e. the
+//     window handle itself, truncated - instead of a pointer to the MSG. USER32
+//     then dereferences the handle as a MSG* and dies with
+//     "Access violation ... Read of address 0008087C" (handle value + 4) inside
+//     DispatchMessageW. That was the startup crash on the Setup Options page.
+type
+  TMsgBuf = record
+    hwnd: Cardinal;        // offset 0  - window that received the message
+    message: Cardinal;     // offset 4  - message id (compare with WM_QUIT)
+    wParam: Cardinal;      // offset 8
+    lParam: Cardinal;      // offset 12
+    time: Cardinal;        // offset 16
+    PtX: Integer;          // offset 20 - POINT.x
+    PtY: Integer;          // offset 24 - POINT.y
+    lPrivate: Cardinal;    // offset 28
+  end;
+
+function PeekMessage(var lpMsg: TMsgBuf; hWnd: Cardinal; wMsgFilterMin, wMsgFilterMax, wRemoveMsg: Cardinal): Boolean;
+  external 'PeekMessageW@user32.dll stdcall';
+
+function TranslateMessage(var lpMsg: TMsgBuf): Boolean;
+  external 'TranslateMessage@user32.dll stdcall';
+
+function DispatchMessage(var lpMsg: TMsgBuf): Cardinal;
+  external 'DispatchMessageW@user32.dll stdcall';
+
+function MsgWaitForMultipleObjects(nCount: Cardinal; var pHandles: Cardinal; bWaitAll: Boolean; dwMilliseconds, dwWakeMask: Cardinal): Cardinal;
+  external 'MsgWaitForMultipleObjects@user32.dll stdcall';
+
+function OpenProcess(dwDesiredAccess: DWORD; bInheritHandle: Boolean; dwProcessId: DWORD): Cardinal;
+  external 'OpenProcess@kernel32.dll stdcall';
+
+function GetExitCodeProcess(hProcess: Cardinal; var lpExitCode: DWORD): Boolean;
+  external 'GetExitCodeProcess@kernel32.dll stdcall';
 
 // ---------------------------------------------------------------------------
 // SPAWN-FREE IDENTITY HELPERS
@@ -2003,27 +2055,87 @@ begin
   end;
 end;
 
-// Is the given process ID still running? Implemented with tasklist so that no
-// additional Win32 binding is required. Only called by the watchdog, at most once
-// per PS_ALIVE_INTERVAL, because it spawns a helper process.
+// -----------------------------------------------------------------------------
+// RESPONSIVE UI SYNCHRONIZATION HELPERS
+// -----------------------------------------------------------------------------
+// Pump all pending Windows messages for the current thread so the installer UI
+// remains fully responsive (movable, repaintable, hoverable) during long operations.
+procedure PumpMessages;
+var
+  Msg: TMsgBuf;
+  Dispatched: Integer;
+begin
+  Dispatched := 0;
+  while PeekMessage(Msg, 0, 0, 0, PM_REMOVE) do
+  begin
+    // Never let a self-feeding message flood (paint/input storms) keep us here:
+    // the caller is waiting on a deadline, so return and let it re-enter later.
+    Inc(Dispatched);
+    if Dispatched > 256 then
+      break;
+    // WM_QUIT: stop pumping. Do NOT PostQuitMessage it back onto the queue - that
+    // would make Inno Setup's own VCL loop see WM_QUIT and tear the wizard down
+    // (which is exactly what an "empty" wizard window looks like).
+    if Msg.message = WM_QUIT then
+      break;
+    TranslateMessage(Msg);
+    DispatchMessage(Msg);
+  end;
+end;
+
+// Wait for a specified number of milliseconds without blocking the UI thread.
+// MsgWaitForMultipleObjects wakes immediately whenever new input messages arrive,
+// so window movements and repaints feel completely instantaneous.
+procedure WaitWithUI(Ms: Integer);
+var
+  StartTick, Elapsed, Remaining, WaitTime, WaitRes: Cardinal;
+  DummyHandle: Cardinal;
+begin
+  if Ms <= 0 then
+  begin
+    PumpMessages;
+    exit;
+  end;
+  StartTick := GetTickCount;
+  DummyHandle := 0;
+  repeat
+    PumpMessages;
+    Elapsed := GetTickCount - StartTick;
+    if Elapsed >= Cardinal(Ms) then
+      break;
+    Remaining := Cardinal(Ms) - Elapsed;
+    if Remaining > 50 then
+      WaitTime := 50
+    else
+      WaitTime := Remaining;
+    WaitRes := MsgWaitForMultipleObjects(0, DummyHandle, False, WaitTime, QS_ALLINPUT);
+    PumpMessages;
+  until (GetTickCount - StartTick) >= Cardinal(Ms);
+end;
+
+// Is the given process ID still running? Uses OpenProcess/GetExitCodeProcess with
+// PROCESS_QUERY_LIMITED_INFORMATION for instantaneous checks without spawning
+// helper processes (which previously caused 1s stalls per check).
 function IsProcessAlive(Pid: Integer): Boolean;
 var
-  OutPath, Text: string;
-  RC: Integer;
+  hProc: Cardinal;
+  ExitCode: DWORD;
 begin
   Result := False;
   if Pid <= 0 then
     exit;
-  OutPath := TempFile('pidcheck_' + IntToStr(Pid) + '.txt');
-  DeleteFile(OutPath);
-  // cmd.exe strips the first and the last quote of a /c command line that starts
-  // with a quote, so the redirect must stay INSIDE the outer quotes.
-  Exec(ResolveSystemExe('cmd.exe'),
-    '/c ""' + ResolveSystemExe('tasklist.exe') + '" /FI "PID eq ' + IntToStr(Pid) + '" /NH > "' + OutPath + '" 2>&1"',
-    '', SW_HIDE, ewWaitUntilTerminated, RC);
-  Text := ReadTextFileSafe(OutPath);
-  DeleteFile(OutPath);
-  Result := Pos(IntToStr(Pid), Text) > 0;
+
+  hProc := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, DWORD(Pid));
+  if hProc <> 0 then
+  begin
+    try
+      ExitCode := 0;
+      if GetExitCodeProcess(hProc, ExitCode) then
+        Result := (ExitCode = STILL_ACTIVE);
+    finally
+      CloseHandle(hProc);
+    end;
+  end;
 end;
 
 // Force-terminate a process tree and confirm that it is really gone.
@@ -2049,7 +2161,7 @@ begin
     ElapsedMs := GetTickCount - StartTick;
     if ElapsedMs >= PS_KILL_GRACE then
       break;
-    Sleep(200);
+    WaitWithUI(200);
   until False;
   if IsProcessAlive(Pid) then
     LogError('KillProcessTree: PID ' + IntToStr(Pid) + ' is STILL alive after taskkill /F /T')
@@ -2157,7 +2269,7 @@ begin
       if not IsProcessAlive(ChildPidOut) then
       begin
         // Confirm the miss before trusting it.
-        Sleep(300);
+        WaitWithUI(300);
         if (MarkerPath <> '') and FileExists(MarkerPath) then
         begin
           Result := True;
@@ -2196,7 +2308,7 @@ begin
         ' | markerPresent=' + BoolToStr((MarkerPath <> '') and FileExists(MarkerPath)));
     end;
 
-    Sleep(PS_POLL_INTERVAL);
+    WaitWithUI(PS_POLL_INTERVAL);
   until False;
 
   if TimedOut then
@@ -4810,21 +4922,12 @@ begin
   LogExit('DisableRdpWrapperAutoupdateTask');
 end;
 
-// Sleep with UI updates
+// Sleep with UI updates (uses WaitWithUI to keep the window fully responsive)
 procedure SleepWithUI(Milliseconds: Integer);
-var
-  Elapsed: Integer;
-  ChunkSize: Integer;
 begin
-  Elapsed := 0;
-  ChunkSize := 100;
-  
-  while Elapsed < Milliseconds do
-  begin
-    Sleep(ChunkSize);
-    Elapsed := Elapsed + ChunkSize;
+  WaitWithUI(Milliseconds);
+  if Assigned(WizardForm) then
     WizardForm.Update;
-  end;
 end;
 
 // Run in PowerShell via our existing wrapper and return exit code
@@ -5136,7 +5239,7 @@ begin
   else
     LogWarn(FixDesc + ': failed: sc.exe exit=' + IntToStr(RC));
 
-  Sleep(SLEEP_SHORT);
+  WaitWithUI(SLEEP_SHORT);
   Current := '';
   if RegQueryStringValue(HKLM, RegKey, ValueName, Current) then
     LogDebug(CheckDesc + ' (post-fix): ' + ValueName + '=' + Current)
@@ -5175,7 +5278,7 @@ begin
   else
     LogWarn(FixDesc + ': failed: sc.exe exit=' + IntToStr(RC));
 
-  Sleep(SLEEP_SHORT);
+  WaitWithUI(SLEEP_SHORT);
   if RegQueryDWordValue(HKLM, RegKey, ValueName, Current) then
     LogDebug(CheckDesc + ' (post-fix): ' + ValueName + '=' + IntToStr(Current))
   else
@@ -6860,6 +6963,12 @@ end;
 // that page only; every other page keeps the standard confirmation.
 procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
 begin
+  if BusyDepth > 0 then
+  begin
+    // Ignore cancel clicks while an asynchronous operation is in progress
+    Cancel := False;
+    exit;
+  end;
   if Assigned(Page_AdminWarning) and (CurPageID = Page_AdminWarning.ID) then
   begin
     Confirm := False;
@@ -10363,6 +10472,13 @@ begin
   LogDebug('NextButtonClick: CurPageID=' + IntToStr(CurPageID) + ' (' + GetPageNameById(CurPageID) + ')');
   Result := True;
 
+  if BusyDepth > 0 then
+  begin
+    // Ignore clicks while a long operation is currently executing
+    Result := False;
+    exit;
+  end;
+
   if CurPageID = wpFinished then
   begin
     CleanupPendingDebugFiles;
@@ -11143,6 +11259,13 @@ begin
   LogEntry('BackButtonClick');
   LogDebug('BackButtonClick: CurPageID=' + IntToStr(CurPageID) + ' (' + GetPageNameById(CurPageID) + ')');
   Result := True;
+
+  if BusyDepth > 0 then
+  begin
+    // Ignore clicks while a long operation is currently executing
+    Result := False;
+    exit;
+  end;
   
   // If user clicks Back on the UserPage and there are users in the list,
   // go back to the previous user (for editing)
@@ -11204,6 +11327,8 @@ begin
   else StepName := 'ssDone';
   LogEntry('CurStepChanged');
   LogDebug('CurStepChanged: CurStep=' + StepName + ' SelectedInstallMode=' + IntToStr(SelectedInstallMode));
+  BusyDepth := BusyDepth + 1;
+  try
   if CurStep = ssInstall then
   begin
     LogSectionHeader('STEP TRANSITION: ssInstall');
@@ -11319,7 +11444,7 @@ begin
       // Remove TermWrap.dll and Zydis.dll
       DeleteFile(AppBin(FILE_TERMWRAP));
       DeleteFile(AppBin(FILE_ZYDIS));
-      Sleep(SLEEP_SHORT);
+      WaitWithUI(SLEEP_SHORT);
       
       // No TermWrap uninstall step configured: restore defaults and remove payload
       SetStepInProgress(StepRemoveFolder, TXT_RemoveFolder);
@@ -11328,7 +11453,7 @@ begin
       // If an old TermWrap folder exists, remove it
       if DirExists(AppRoot) then
         DelTree(AppRoot, True, True, True);
-      Sleep(SLEEP_SHORT);
+      WaitWithUI(SLEEP_SHORT);
       SetStepDone(StepRemoveFolder, TXT_RemoveFolder);
       
       SetStepInProgress(StepStartSvc, TXT_RestartSvc);
@@ -11675,7 +11800,7 @@ begin
       SetStepInProgress(StepConfigureService, TXT_ConfigureService);
       StatusOverlay.Caption := 'Installing and configuring TermWrap...';
       // TermWrap files are bundled and copied earlier; no external installer to run.
-      Sleep(SLEEP_SHORT);
+      WaitWithUI(SLEEP_SHORT);
       
       // Set ServiceDll to TermWrap
       LogSectionHeader('REGISTRY: TermWrap service configuration');
@@ -11922,6 +12047,10 @@ begin
       end;
     end;
   end;
+  finally
+    BusyDepth := BusyDepth - 1;
+    if BusyDepth < 0 then BusyDepth := 0;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -12037,14 +12166,24 @@ begin
     WizardForm.PageDescriptionLabel.Visible := False;
     if CurPageID = Page_InstallOptions.ID then
       Page_InstallOptions.Surface.Visible := False;
-    StatusOverlay.Caption := 'Please wait...';
-    StatusOverlay.Visible := True;
-    SleepWithUI(50);
-    StatusOverlay.Visible := False;
-    if CurPageID = Page_InstallOptions.ID then
-      Page_InstallOptions.Surface.Visible := True;
-    WizardForm.PageNameLabel.Visible := True;
-    WizardForm.PageDescriptionLabel.Visible := True;
+    try
+      StatusOverlay.Caption := 'Please wait...';
+      StatusOverlay.Visible := True;
+      // Plain Sleep + Update, NOT SleepWithUI: pumping the message queue from
+      // inside CurPageChanged dispatches paint/input messages back into the VCL
+      // while the wizard is still switching pages, which re-enters the script.
+      Sleep(50);
+      WizardForm.Update;
+      StatusOverlay.Visible := False;
+    finally
+      // Restore the page unconditionally. Without this, any failure between the
+      // hide and the reveal leaves Setup on a completely blank page (buttons only).
+      StatusOverlay.Visible := False;
+      if CurPageID = Page_InstallOptions.ID then
+        Page_InstallOptions.Surface.Visible := True;
+      WizardForm.PageNameLabel.Visible := True;
+      WizardForm.PageDescriptionLabel.Visible := True;
+    end;
   end;
 
   // Ensure status overlay is visible on the Installing page (may have been hidden
