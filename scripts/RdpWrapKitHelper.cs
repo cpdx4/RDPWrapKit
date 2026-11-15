@@ -869,20 +869,26 @@ namespace RdpWrapKit
                     return RunListUsers(usersOutPath);
                 }
 
+                // "--sign <file>" is the explicit spelling of the bare-path default.
+                // This MUST be resolved before the unknown-option guard below.
+                // Ordering matters: with the guard first, the installer's own
+                // '--sign "file.rdp"' invocation was rejected with
+                // "unknown option: --sign" (exit 99), the helper never reached the
+                // signing code, and every shortcut was written UNSIGNED while the
+                // installer only logged the failure.
+                int pathArg = 0;
+                if (args.Length >= 1 && string.Equals(args[0], "--sign", StringComparison.OrdinalIgnoreCase))
+                    pathArg = 1;
+
                 // Anything else starting with "--" is an unknown verb, not a file
                 // path. Without this check a typo fell through to the signing path
                 // and reported the misleading "File not found: --nope".
-                if (args.Length >= 1 && args[0].StartsWith("--", StringComparison.Ordinal))
+                else if (args.Length >= 1 && args[0].StartsWith("--", StringComparison.Ordinal))
                 {
                     Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: unknown option: " + args[0]);
                     PrintUsage(Console.Error);
                     return 99;
                 }
-
-                // "--sign <file>" is the explicit spelling of the bare-path default.
-                int pathArg = 0;
-                if (args.Length >= 1 && string.Equals(args[0], "--sign", StringComparison.OrdinalIgnoreCase))
-                    pathArg = 1;
 
                 if (args.Length <= pathArg || string.IsNullOrWhiteSpace(args[pathArg]))
                 {
