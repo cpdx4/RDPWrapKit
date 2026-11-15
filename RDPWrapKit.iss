@@ -358,6 +358,9 @@ var
   RemoveUsersFailureShown: Boolean;            // ensures the failure popup shows only once
   DebugMode: Boolean;    // Set to True to force VC++ download even if installed
   DoShowMstscEdit: Boolean;  // True = open mstsc /edit after writing settings (EditShortcuts path)
+  // True when the Shortcut Settings page deferred the actual .rdp writes to the
+  // Installing page instead of blocking the [Next] click (see ApplyEditShortcutSettings).
+  EditShortcutApplyPending: Boolean;
   // Simulation marker flags (log once per run)
   SimLogNoMstscShown: Boolean;
   SimLogNoVCRedistShown: Boolean;
@@ -759,6 +762,85 @@ function OpenProcess(dwDesiredAccess: DWORD; bInheritHandle: Boolean; dwProcessI
 
 function GetExitCodeProcess(hProcess: Cardinal; var lpExitCode: DWORD): Boolean;
   external 'GetExitCodeProcess@kernel32.dll stdcall';
+
+// ---------------------------------------------------------------------------
+// IN-PROCESS SERVICE STATE (no child process, no PowerShell)
+// ---------------------------------------------------------------------------
+// Anything that runs inside a [Next]/[Back] handler must not spawn a process:
+// "Get-Service -Name TermService" cost ~1.0s and "Get-ScheduledTask" 3.4s in the
+// field log of 04:00:01-04:00:05, during which the wizard button looked frozen.
+// QueryServiceStatus answers the same question in microseconds.
+const
+  SC_MANAGER_CONNECT  = $0001;
+  SERVICE_QUERY_STATUS = $0004;
+  SVC_STATE_STOPPED      = 1;
+  SVC_STATE_START_PENDING = 2;
+  SVC_STATE_STOP_PENDING  = 3;
+  SVC_STATE_RUNNING       = 4;
+  SVC_STATE_CONT_PENDING  = 5;
+  SVC_STATE_PAUSE_PENDING = 6;
+  SVC_STATE_PAUSED        = 7;
+
+type
+  TServiceStatus = record
+    dwServiceType: Cardinal;
+    dwCurrentState: Cardinal;
+    dwControlsAccepted: Cardinal;
+    dwWin32ExitCode: Cardinal;
+    dwServiceSpecificExitCode: Cardinal;
+    dwCheckPoint: Cardinal;
+    dwWaitHint: Cardinal;
+  end;
+
+// NOTE: lpMachineName/lpDatabaseName are declared as Cardinal so that 0 can be
+// passed, i.e. a real NULL pointer. Pascal Script cannot pass NULL for a String
+// parameter (it always passes a pointer to an empty string), and OpenSCManager
+// requires NULL - not "" - to mean "local machine, SERVICES_ACTIVE_DATABASE".
+function OpenSCManagerW(lpMachineName, lpDatabaseName: Cardinal; dwDesiredAccess: Cardinal): Cardinal;
+  external 'OpenSCManagerW@advapi32.dll stdcall';
+
+function OpenServiceW(hSCManager: Cardinal; lpServiceName: String; dwDesiredAccess: Cardinal): Cardinal;
+  external 'OpenServiceW@advapi32.dll stdcall';
+
+function QueryServiceStatus(hService: Cardinal; var lpServiceStatus: TServiceStatus): Boolean;
+  external 'QueryServiceStatus@advapi32.dll stdcall';
+
+function CloseServiceHandle(hSCObject: Cardinal): Boolean;
+  external 'CloseServiceHandle@advapi32.dll stdcall';
+
+// True when the service is installed (OpenService succeeded); StateOut receives
+// dwCurrentState so callers can turn it into the familiar status text.
+function WinQueryServiceState(const ServiceName: string; var StateOut: Cardinal): Boolean;
+var
+  SCM, Svc: Cardinal;
+  St: TServiceStatus;
+begin
+  Result := False;
+  StateOut := 0;
+  SCM := OpenSCManagerW(0, 0, SC_MANAGER_CONNECT);
+  if SCM = 0 then
+  begin
+    LogWarn('WinQueryServiceState: OpenSCManager failed for ' + ServiceName);
+    exit;
+  end;
+  try
+    Svc := OpenServiceW(SCM, ServiceName, SERVICE_QUERY_STATUS);
+    if Svc = 0 then
+      exit;
+    try
+      St.dwCurrentState := 0;
+      if QueryServiceStatus(Svc, St) then
+      begin
+        StateOut := St.dwCurrentState;
+        Result := True;
+      end;
+    finally
+      CloseServiceHandle(Svc);
+    end;
+  finally
+    CloseServiceHandle(SCM);
+  end;
+end;
 
 // ---------------------------------------------------------------------------
 // SPAWN-FREE IDENTITY HELPERS
@@ -4893,13 +4975,23 @@ end;
 // Returns True when the "RDP Wrapper Autoupdate" scheduled task exists.
 function IsRdpWrapperAutoupdateTaskPresent: Boolean;
 var
-  PSOut: string;
+  TaskFile: string;
+  TaskKey: string;
+  ByFile, ByRegistry: Boolean;
 begin
   LogEntry('IsRdpWrapperAutoupdateTaskPresent');
-  PSOut := GetPSOutput(
-    '$t = Get-ScheduledTask -TaskName ''RDP Wrapper Autoupdate'' -ErrorAction SilentlyContinue; ' +
-    'if ($t) { Write-Output ''PRESENT'' } else { Write-Output ''ABSENT'' }');
-  Result := Pos('PRESENT', PSOut) > 0;
+  // In-process checks only. The previous "Get-ScheduledTask" PowerShell query cost
+  // 3.4s of frozen UI in the field log of 04:00:02-04:00:05 because it runs inside
+  // the Setup Options [Next] handler. A task in the root task folder always has a
+  // definition file under System32\Tasks and a TaskCache\Tree registry key, so
+  // either signal proves the task exists - no process spawn needed.
+  TaskFile := ExpandConstant('{sys}\Tasks\RDP Wrapper Autoupdate');
+  TaskKey := 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\RDP Wrapper Autoupdate';
+  ByFile := FileExists(TaskFile);
+  ByRegistry := RegKeyExists(HKLM, TaskKey);
+  Result := ByFile or ByRegistry;
+  LogDebug('IsRdpWrapperAutoupdateTaskPresent: file=' + BoolToStr(ByFile) + ' (' + TaskFile +
+    '), registry=' + BoolToStr(ByRegistry) + ' -> present=' + BoolToStr(Result));
   LogInfo('RDP Wrapper autoupdate task present: ' + BoolToStr(Result));
   LogExit('IsRdpWrapperAutoupdateTaskPresent');
 end;
@@ -5103,9 +5195,27 @@ end;
 // when the service is not installed at all. This is the single query used by both
 // the Show RDP Info page and the Install TermWrap guard.
 function GetTermServiceStatus: string;
+var
+  State: Cardinal;
 begin
   LogEntry('GetTermServiceStatus');
-  Result := Trim(GetPSOutput('(Get-Service -Name TermService -ErrorAction SilentlyContinue).Status'));
+  // Queried through the service control manager in-process. The old
+  // "(Get-Service ...).Status" PowerShell call cost ~1s inside a [Next] handler.
+  Result := '';
+  if WinQueryServiceState('TermService', State) then
+  begin
+    case State of
+      SVC_STATE_STOPPED:       Result := 'Stopped';
+      SVC_STATE_START_PENDING: Result := 'Start Pending';
+      SVC_STATE_STOP_PENDING:  Result := 'Stop Pending';
+      SVC_STATE_RUNNING:       Result := 'Running';
+      SVC_STATE_CONT_PENDING:  Result := 'Continue Pending';
+      SVC_STATE_PAUSE_PENDING: Result := 'Pause Pending';
+      SVC_STATE_PAUSED:        Result := 'Paused';
+    else
+      Result := 'Unknown (' + IntToStr(State) + ')';
+    end;
+  end;
   LogDebug('GetTermServiceStatus: "' + Result + '"');
 end;
 
@@ -5113,22 +5223,24 @@ end;
 // TermWrap works by replacing the ServiceDll of TermService, so a missing service
 // makes the whole Install TermWrap flow impossible.
 function IsTermServiceInstalled: Boolean;
+var
+  State: Cardinal;
 begin
   LogEntry('IsTermServiceInstalled');
-  // Primary check: ask the service control manager (same query the Show RDP Info
-  // page uses to report "Not installed").
-  if GetTermServiceStatus <> '' then
+  // Primary check: the service control manager (same query the Show RDP Info page
+  // uses to report "Not installed"), answered in-process.
+  State := 0;
+  if WinQueryServiceState('TermService', State) then
   begin
     Result := True;
-    LogDebug('IsTermServiceInstalled: TermService reported by Get-Service');
+    LogDebug('IsTermServiceInstalled: TermService resolved by the service control manager');
   end
   else
   begin
-    // The PowerShell query can fail or time out (GetPSOutput returns '' in that
-    // case), so never treat an empty result alone as "missing". The service key in
-    // the registry is the authoritative "service is installed" marker.
+    // Never treat a failed SCM query alone as "missing": the service key in the
+    // registry is the authoritative "service is installed" marker.
     Result := RegKeyExists(HKLM, REG_TERMSERVICE);
-    LogDebug('IsTermServiceInstalled: Get-Service returned nothing, registry key ' +
+    LogDebug('IsTermServiceInstalled: SCM query failed, registry key ' +
       REG_TERMSERVICE + ' exists=' + BoolToStr(Result));
   end;
   LogExit('IsTermServiceInstalled');
@@ -6114,6 +6226,29 @@ begin
         Result := Int64ToStr(Sz);
     end;
   end;
+end;
+
+// "<version> (<bytes> bytes)" for a DLL, read in-process. Replaces the
+// "(Get-Item ...).VersionInfo.FileVersionRaw" PowerShell spawns that the System
+// Status panel used on every page change (~1s each).
+function FileVersionWithSize(const FilePath: string): string;
+var
+  Ver: string;
+  Sz: Int64;
+begin
+  Result := '';
+  Ver := '';
+  if not GetVersionNumbersString(FilePath, Ver) then
+    Ver := '';
+  Sz := WinGetFileSize(FilePath);
+  if (Ver = '') and (Sz < 0) then
+    exit;
+  if Ver <> '' then
+    Result := Ver
+  else
+    Result := 'unknown version';
+  if Sz >= 0 then
+    Result := Result + ' (' + Int64ToStr(Sz) + ' bytes)';
 end;
 
 
@@ -10453,12 +10588,88 @@ begin
   FinishedShortcutImage.Visible := False;
 end;
 
+// Applies the settings chosen on the Shortcut Settings page to the selected .rdp
+// files and (re)signs them.
+//
+// WHY THIS IS ITS OWN ROUTINE: these writes used to run inside NextButtonClick.
+// Writing + signing one shortcut takes ~1.4s (and the first one also pays the
+// certificate/CNG pre-flight), so with two shortcuts the wizard sat motionless on
+// the settings page for ~4.5s, then flashed Preparing -> Installing -> Finished,
+// because by the time the Installing page appeared the work was already done.
+// Running the work from CurStepChanged(ssPostInstall) means [Next] advances to the
+// Installing page immediately and the writes are visible on the gauge, in the step
+// checklist and in the status overlay.
+//
+// The one exception is the advanced (mstsc /edit) path: the Advanced Shortcut
+// Editing page comes right after the settings page and launches mstsc /edit on the
+// file, so the settings must already be on disk when NextButtonClick returns. That
+// path calls this routine directly.
+procedure ApplyEditShortcutSettings;
+var
+  i: Integer;
+  Total: Integer;
+begin
+  LogEntry('ApplyEditShortcutSettings');
+
+  Total := 0;
+  if SelectedShortcutPath <> '' then
+    Total := 1
+  else if Assigned(SelectedShortcutPaths) then
+    Total := SelectedShortcutPaths.Count;
+
+  if Total = 0 then
+  begin
+    LogWarn('ApplyEditShortcutSettings: no shortcut selected, nothing to apply');
+    LogExit('ApplyEditShortcutSettings');
+    exit;
+  end;
+
+  if SelectedShortcutPath <> '' then
+  begin
+    // Single selection (also the only case the advanced editor handles).
+    StatusOverlay.Caption := 'Applying shortcut settings: ' + ExtractFileName(SelectedShortcutPath) + '...';
+    if Assigned(WizardForm) then
+      WizardForm.Update;
+    WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
+    WriteInstallerLog('Edit Shortcut: Settings written to ' + SelectedShortcutPath);
+    if DoShowMstscEdit then
+    begin
+      WriteInstallerLog('Edit Shortcut: Advanced mode - stripping signature for mstsc edit');
+      UnSignRdpFile(SelectedShortcutPath);
+    end;
+  end
+  else
+  begin
+    // Multi-selection: report per-file progress so the Installing page shows movement.
+    for i := 0 to Total - 1 do
+    begin
+      StatusOverlay.Caption := 'Applying shortcut settings (' + IntToStr(i + 1) + '/' + IntToStr(Total) + '): ' +
+        ExtractFileName(SelectedShortcutPaths[i]) + '...';
+      if Assigned(WizardForm) then
+        WizardForm.Update;
+      WriteInstallerLog('Edit Shortcut: Applying settings to (' + IntToStr(i + 1) + '/' + IntToStr(Total) + '): ' + SelectedShortcutPaths[i]);
+      WriteShortcutSettingsToRdpFile(SelectedShortcutPaths[i]);
+    end;
+    if DoShowMstscEdit then
+    begin
+      for i := 0 to Total - 1 do
+      begin
+        WriteInstallerLog('Edit Shortcut: Stripping signature from (' + IntToStr(i + 1) + '/' + IntToStr(Total) + '): ' + SelectedShortcutPaths[i]);
+        UnSignRdpFile(SelectedShortcutPaths[i]);
+      end;
+    end;
+  end;
+
+  LogExit('ApplyEditShortcutSettings');
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   UserName: string;
   Password: string;
   i: Integer;
   SelectedCount: Integer;
+  SelectedTotal: Integer;
   HasErrors: Boolean;
   RdpPortValue: Integer;
   PortError: string;
@@ -10594,17 +10805,12 @@ begin
         end;
       end;
 
-      // Pre-populate the existing-users page when taking that path
+      // The existing-users list is NOT loaded here any more: querying local accounts
+      // costs ~1s and used to freeze this [Next] button. It is lazy-loaded by
+      // CurPageChanged(Page_CreateShortcutsForExistingUsers) instead, so the click
+      // returns immediately and the page fills in behind itself.
       if DoCreateRdpShortcuts and (CreateUserMode = createUserModeExisting) then
-      begin
-        LocalUsersList.Clear;
-        LocalUserDisplayList.Clear;
-        GetLocalUsers(LocalUsersList, LocalUserDisplayList);
-        SetLength(UserCheckBoxes, LocalUsersList.Count);
-        SetLength(UserPasswordEdits, LocalUsersList.Count);
-        SetLength(UserPasswordStatus, LocalUsersList.Count);
-        BuildCreateShortcutsControls;
-      end;
+        LogDebug('NextButtonClick: existing-users list will be lazy-loaded by the Create Shortcuts page');
     end;
 
     // Log detailed user selections on the Install Options page
@@ -10834,43 +11040,38 @@ begin
         if chkExpVisualStyles.Checked then LogInfo('  [x] Experience: Visual Styles') else LogInfo('  [ ] Experience: Visual Styles');
       end;
 
-      // Write shortcut settings NOW (NextButtonClick fires for all modes, unlike ssPostInstall
-      // which is skipped by Inno Setup when there are no files to install).
-      // Single shortcut: write + optionally strip signature for advanced mode
-      if SelectedShortcutPath <> '' then
+      // The actual .rdp writes do NOT happen here any more. Writing and signing
+      // every selected shortcut takes seconds per file, and doing it inside this
+      // click handler kept the wizard frozen on this page and then flashed
+      // Preparing -> Installing -> Finished with nothing left to show. The writes
+      // now run on the Installing page (CurStepChanged / ssPostInstall).
+      // Exception: the advanced mstsc editor needs the file on disk before its page
+      // opens, so that path still applies the settings right here.
+      if DoShowMstscEdit then
+        ApplyEditShortcutSettings
+      else
       begin
-        WriteShortcutSettingsToRdpFile(SelectedShortcutPath);
-        WriteInstallerLog('Edit Shortcut: Settings written to ' + SelectedShortcutPath);
-        if DoShowMstscEdit then
-        begin
-          WriteInstallerLog('Edit Shortcut: Advanced mode - stripping signature for mstsc edit');
-          UnSignRdpFile(SelectedShortcutPath);
-        end;
-      end
-      else if Assigned(SelectedShortcutPaths) and (SelectedShortcutPaths.Count > 0) then
-      begin
-        // Multi-edit: write to all selected shortcuts, then strip all if advanced
-        for i := 0 to SelectedShortcutPaths.Count - 1 do
-        begin
-          WriteInstallerLog('Edit Shortcut: Applying settings to (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
-          WriteShortcutSettingsToRdpFile(SelectedShortcutPaths[i]);
-        end;
-        if DoShowMstscEdit then
-        begin
-          for i := 0 to SelectedShortcutPaths.Count - 1 do
-          begin
-            WriteInstallerLog('Edit Shortcut: Stripping signature from (' + IntToStr(i+1) + '/' + IntToStr(SelectedShortcutPaths.Count) + '): ' + SelectedShortcutPaths[i]);
-            UnSignRdpFile(SelectedShortcutPaths[i]);
-          end;
-        end;
+        SelectedTotal := 0;
+        if SelectedShortcutPath <> '' then
+          SelectedTotal := 1
+        else if Assigned(SelectedShortcutPaths) then
+          SelectedTotal := SelectedShortcutPaths.Count;
+        EditShortcutApplyPending := SelectedTotal > 0;
+        WriteInstallerLog('Edit Shortcut: settings write deferred to the Installing page (selected=' +
+          IntToStr(SelectedTotal) + ', pending=' + BoolToStr(EditShortcutApplyPending) + ')');
       end;
     end;
   end
   else if CurPageID = Page_EditShortcutAdvanced.ID then
   begin
-    // User finished editing in mstsc - re-sign the shortcut(s)
+    // User finished editing in mstsc - re-sign the shortcut(s).
+    // Signing spawns RdpSignTool.exe, so show what is happening instead of leaving
+    // the page looking frozen after the click.
     if SelectedShortcutPath <> '' then
     begin
+      StatusOverlay.Caption := 'Saving and signing ' + ExtractFileName(SelectedShortcutPath) + '...';
+      if Assigned(WizardForm) then
+        WizardForm.Update;
       WriteInstallerLog('Advanced Edit: Re-signing shortcut after manual edit: ' + SelectedShortcutPath);
       SignRdpFile(SelectedShortcutPath);
     end
@@ -10887,6 +11088,9 @@ begin
     // User finished editing in mstsc - re-sign the shortcut
     if AdvancedEditShortcutPath <> '' then
     begin
+      StatusOverlay.Caption := 'Saving and signing ' + ExtractFileName(AdvancedEditShortcutPath) + '...';
+      if Assigned(WizardForm) then
+        WizardForm.Update;
       WriteInstallerLog('Create Shortcut Advanced: Re-signing shortcut after manual edit: ' + AdvancedEditShortcutPath);
       SignRdpFile(AdvancedEditShortcutPath);
     end;
@@ -11716,12 +11920,19 @@ begin
     end
     else if SelectedInstallMode = installModeEditShortcuts then
     begin
-      // NOTE: WriteShortcutSettingsToRdpFile + UnSignRdpFile are now handled in
-      // NextButtonClick(Page_ShortcutSettings.ID) because CurStepChanged is NOT
-      // called by Inno Setup when no [Files] entries are selected (edit mode).
-      // This block only sets up the progress bar UI for the Installing page
-      // (which may still appear briefly during page transitions).
+      // Apply the deferred shortcut writes HERE, on the Installing page, so the
+      // user actually sees the progress page while the .rdp files are written and
+      // signed (NextButtonClick only queued the work - see ApplyEditShortcutSettings).
       SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
+      if EditShortcutApplyPending then
+      begin
+        StatusOverlay.Caption := 'Applying shortcut settings...';
+        WizardForm.Update;
+        ApplyEditShortcutSettings;
+        EditShortcutApplyPending := False;
+      end
+      else
+        LogDebug('ssPostInstall: no deferred shortcut settings to apply');
       StatusOverlay.Caption := 'Shortcut settings applied.';
       SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
     end
@@ -12402,9 +12613,16 @@ begin
     end;
   end;
 
-  // Lazy-load user list only when Create Shortcuts page is first shown
-  if (CurPageID = EditSystemwideSettingsPage.ID) and (LocalUsersList.Count = 0) then
+  // Lazy-load the existing-user list the first time the Create Shortcuts page is
+  // shown. This used to run inside the Setup Options [Next] handler (where it froze
+  // the button for ~1s), and the condition below was accidentally keyed on the
+  // wrong page (EditSystemwideSettingsPage), so the list was only ever populated by
+  // that click handler. Now the page appears immediately and fills in behind itself.
+  if (CurPageID = Page_CreateShortcutsForExistingUsers.ID) and (LocalUsersList.Count = 0) then
   begin
+    StatusOverlay.Caption := 'Looking for local user accounts...';
+    if Assigned(WizardForm) then
+      WizardForm.Update;
     LocalUsersList.Clear;
     LocalUserDisplayList.Clear;
     GetLocalUsers(LocalUsersList, LocalUserDisplayList);
@@ -12413,6 +12631,7 @@ begin
     SetLength(UserPasswordStatus, LocalUsersList.Count);
     // Build per-user controls on Create Shortcuts page
     BuildCreateShortcutsControls;
+    StatusOverlay.Caption := 'Select the users you want RDP shortcuts for.';
   end;
 
   // Quick Fixes page: no dynamic data to load
@@ -12485,16 +12704,16 @@ begin
     SetShowRDPInfoValueColor(lblRDPService, lblRDPService.Caption);
 
     // termsrv.dll exists only in the native System32 directory (SysWOW64 has no
-    // counterpart), so this lookup must not depend on how the spawned
-    // powershell.exe resolves 'System32'. If that PowerShell is running 32-bit,
-    // WOW64 silently redirects System32 to SysWOW64, the file is not found and
-    // the label degrades to 'Unknown'. Probe the native path first, then fall
-    // back to the Sysnative alias (valid from a 32-bit process) so that the real
-    // System32\termsrv.dll is read from either architecture.
-    TermsrvVer := GetPSOutput(
-      '$p = Join-Path $env:windir ''System32\termsrv.dll''; ' +
-      'if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path $env:windir ''Sysnative\termsrv.dll'' }; ' +
-      '(Get-Item -LiteralPath $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion');
+    // counterpart). In 64-bit install mode '{sys}' already resolves to the real
+    // System32; '{win}\System32' is the explicit fallback. Read in-process - the
+    // previous PowerShell version-info query froze this page for ~1s on every
+    // single visit to the page.
+    TermsrvVer := '';
+    if not GetVersionNumbersString(ExpandConstant('{sys}\termsrv.dll'), TermsrvVer) then
+    begin
+      TermsrvVer := '';
+      GetVersionNumbersString(ExpandConstant('{win}\System32\termsrv.dll'), TermsrvVer);
+    end;
     if TermsrvVer = '' then lblWinRDPVer.Caption := 'Unknown'
     else lblWinRDPVer.Caption := TermsrvVer;
     SetShowRDPInfoValueColor(lblWinRDPVer, lblWinRDPVer.Caption);
@@ -12516,7 +12735,7 @@ begin
         if FileExists(ServiceDllPath) then
         begin
           TermWrapMissing := False;
-          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          WrapperVersion := FileVersionWithSize(ServiceDllPath);
           if WrapperVersion = '' then lblWrapperVer.Caption := 'TermWrap (unknown version)'
           else lblWrapperVer.Caption := 'TermWrap ' + WrapperVersion;
         end
@@ -12531,7 +12750,7 @@ begin
           ServiceDllPath := ExpandConstant('{commonpf64}\RDP Wrapper\rdpwrap.dll');
         if FileExists(ServiceDllPath) then
         begin
-          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          WrapperVersion := FileVersionWithSize(ServiceDllPath);
           if WrapperVersion = '' then lblWrapperVer.Caption := 'RDPWrap (unknown version)'
           else lblWrapperVer.Caption := 'RDPWrap ' + WrapperVersion;
         end
@@ -12548,7 +12767,7 @@ begin
       begin
         if FileExists(ServiceDllPath) then
         begin
-          WrapperVersion := GetPSOutput('$f=Get-Item ''' + ServiceDllPath + '''; $f.VersionInfo.FileVersionRaw.ToString() + '' ('' + $f.Length + '' bytes)''');
+          WrapperVersion := FileVersionWithSize(ServiceDllPath);
           if WrapperVersion = '' then lblWrapperVer.Caption := ExtractFileName(ServiceDllPath) + ' (unknown version)'
           else lblWrapperVer.Caption := ExtractFileName(ServiceDllPath) + ' ' + WrapperVersion;
         end
@@ -12656,6 +12875,17 @@ begin
     // Restore the full text width in case a previous visit narrowed it to make
     // room for the desktop-shortcut screenshot.
     if Assigned(FinishedText) then FinishedText.Width := WizardForm.FinishedLabel.Width;
+
+    // Safety net: if the deferred shortcut writes never ran (Installing step
+    // skipped or aborted) they must still happen before the Finish page claims the
+    // settings were saved.
+    if EditShortcutApplyPending then
+    begin
+      WriteInstallerLog('CurPageChanged: deferred shortcut settings still pending on Finish page - applying now');
+      StatusOverlay.Caption := 'Applying shortcut settings...';
+      ApplyEditShortcutSettings;
+      EditShortcutApplyPending := False;
+    end;
 
     WriteInstallerLog('CurPageChanged: Finish page shown');
     if SelectedInstallMode = installModeUninstall then
