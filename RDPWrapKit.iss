@@ -37,7 +37,8 @@
 #define SourceTermWrapSize FileSize("third_party\termwrap_release\TermWrap.dll")
 
 ; RdpSignTool.exe is compiled ahead-of-time from scripts\RdpSignTool.cs.
-; Run scripts\build_rdpcrypt.ps1 before compiling this installer.
+; Run build.bat before compiling this installer (it invokes csc.exe directly;
+; scripts\build_rdpcrypt.ps1 still works but is no longer used by the build).
 ; This keeps the 19KB binary out of git while enabling a clean build.
 
 [Setup]
@@ -159,6 +160,10 @@ procedure LogFileOp(const Operation, FilePath: string; const Success: Boolean; c
 procedure LogRegOp(const Operation, RegKey, RegValue: string; const Success: Boolean); forward;
 procedure LogServiceOp(const Operation, ServiceName: string; const ResultCode: Integer); forward;
 procedure LogSim(const ScenarioText: string); forward;
+// Security-sensitive action audit trail (parseable, see implementation).
+procedure LogAudit(const Category, Action, Target, AuditResult, Why: string); forward;
+// Defined after the SCM helpers but needed by the polling loops inside them.
+procedure SleepWithUI(Milliseconds: Integer); forward;
 
 // Debug-enriched command execution forward declarations
 function RunCmdCapture(const CmdLine, OutTag: string): Integer; forward;
@@ -790,7 +795,25 @@ function GetExitCodeProcess(hProcess: Cardinal; var lpExitCode: DWORD): Boolean;
 const
   SC_MANAGER_CONNECT  = $0001;
   SERVICE_QUERY_STATUS = $0004;
+  // Access rights, start types and control codes used by the SCM-native
+  // helpers below. Kept beside the existing query right so every service
+  // constant lives in one block.
+  SERVICE_QUERY_CONFIG        = $0001;
+  SERVICE_CHANGE_CONFIG       = $0002;
+  SERVICE_START               = $0010;
+  SERVICE_STOP                = $0020;
+  SERVICE_NO_CHANGE           = $FFFFFFFF;
+  SERVICE_AUTO_START          = $00000002;
+  SERVICE_DISABLED            = $00000004;
+  SERVICE_CONTROL_STOP        = $00000001;
   SVC_STATE_STOPPED      = 1;
+  // Process access / Toolhelp flags used by the PID-scoped termination helpers.
+  PROCESS_TERMINATE    = $0001;
+  TH32CS_SNAPPROCESS   = $00000002;
+  // sizeof(PROCESSENTRY32W): 9 DWORD-sized fields plus szExeFile[MAX_PATH] of
+  // WCHAR (36 + 520). Spelled out because SizeOf() yields a signed value that
+  // cannot be assigned to the Cardinal dwSize field directly.
+  PROCESSENTRY32_SIZE  = 556;
   SVC_STATE_START_PENDING = 2;
   SVC_STATE_STOP_PENDING  = 3;
   SVC_STATE_RUNNING       = 4;
@@ -825,6 +848,23 @@ function QueryServiceStatus(hService: Cardinal; var lpServiceStatus: TServiceSta
 function CloseServiceHandle(hSCObject: Cardinal): Boolean;
   external 'CloseServiceHandle@advapi32.dll stdcall';
 
+// Start / stop / reconfigure a service without spawning sc.exe or PowerShell.
+// Every parameter that we never populate is declared Cardinal so that 0 is
+// passed as a real NULL pointer - the same constraint documented for
+// OpenSCManagerW above (Pascal Script passes a pointer to an empty string for
+// String parameters, which ChangeServiceConfigW would treat as "set to empty").
+function StartServiceW(hService: Cardinal; dwNumServiceArgs: Cardinal; lpServiceArgVectors: Cardinal): Boolean;
+  external 'StartServiceW@advapi32.dll stdcall';
+
+function ControlService(hService: Cardinal; dwControl: Cardinal; var lpServiceStatus: TServiceStatus): Boolean;
+  external 'ControlService@advapi32.dll stdcall';
+
+function ChangeServiceConfigW(hService: Cardinal;
+  dwServiceType, dwStartType, dwErrorControl: Cardinal;
+  lpBinaryPathName, lpLoadOrderGroup, lpdwTagId, lpDependencies,
+  lpServiceStartName, lpPassword, lpDisplayName: Cardinal): Boolean;
+  external 'ChangeServiceConfigW@advapi32.dll stdcall';
+
 // True when the service is installed (OpenService succeeded); StateOut receives
 // dwCurrentState so callers can turn it into the familiar status text.
 function WinQueryServiceState(const ServiceName: string; var StateOut: Cardinal): Boolean;
@@ -857,6 +897,210 @@ begin
   finally
     CloseServiceHandle(SCM);
   end;
+end;
+
+// ---------------------------------------------------------------------------
+// SCM-NATIVE SERVICE CONTROL (replaces powershell Start/Stop-Service)
+// ---------------------------------------------------------------------------
+// Why this exists: stop/start of TermService is functionally required - a new
+// ServiceDll only loads when the service host is recreated - but it used to be
+// done with "powershell.exe -ExecutionPolicy Bypass -Command Stop-Service ...".
+// That is the most-detected construct in this installer (T1059.001 plus
+// T1562.001 policy-bypass signal). ControlService/StartServiceW/ChangeService
+// ConfigW produce the identical state change without spawning any process.
+//
+// These helpers never cascade: SCM refuses to stop a service that has running
+// dependents (ERROR_DEPENDENT_SERVICES_RUNNING, 1051). Callers are responsible
+// for stopping UmRdpService first - see StopTermService.
+
+// Set a service start type (SERVICE_AUTO_START / SERVICE_DISABLED). Only the
+// start type is changed; every other field is SERVICE_NO_CHANGE.
+function SvcSetStartType(const ServiceName: string; StartType: Cardinal): Boolean;
+var
+  SCM, Svc: Cardinal;
+begin
+  Result := False;
+  SCM := OpenSCManagerW(0, 0, SC_MANAGER_CONNECT);
+  if SCM = 0 then
+  begin
+    LogWarn('SvcSetStartType: OpenSCManager failed for ' + ServiceName);
+    LogAudit('service-change', 'set-start-type', ServiceName, 'open-scm-failed', 'required-startup-type');
+    exit;
+  end;
+  try
+    Svc := OpenServiceW(SCM, ServiceName, SERVICE_CHANGE_CONFIG or SERVICE_QUERY_CONFIG or SERVICE_QUERY_STATUS);
+    if Svc = 0 then
+    begin
+      LogWarn('SvcSetStartType: OpenService failed for ' + ServiceName);
+      LogAudit('service-change', 'set-start-type', ServiceName, 'open-service-failed', 'required-startup-type');
+      exit;
+    end;
+    try
+      if not ChangeServiceConfigW(Svc, SERVICE_NO_CHANGE, StartType, SERVICE_NO_CHANGE,
+        0, 0, 0, 0, 0, 0, 0) then
+      begin
+        LogWarn('SvcSetStartType: ChangeServiceConfig failed for ' + ServiceName);
+        LogAudit('service-change', 'set-start-type', ServiceName, 'change-config-failed', 'required-startup-type');
+        exit;
+      end;
+      Result := True;
+      LogInfo('SvcSetStartType: ' + ServiceName + ' start type set to ' + IntToStr(StartType));
+      LogAudit('service-change', 'set-start-type', ServiceName, 'success', 'required-startup-type');
+    finally
+      CloseServiceHandle(Svc);
+    end;
+  finally
+    CloseServiceHandle(SCM);
+  end;
+end;
+
+// Make sure a service is configured for automatic start, but only write the
+// configuration when it is not already correct. The current start type is read
+// from the service's own "Start" registry value (2 = auto start), which is
+// language independent - parsing "sc.exe qc" output is not, because that output
+// is localized. Rewriting an already-correct start type is a pointless
+// reconfiguration of a Windows component (T1543.003 signal), so it is skipped.
+function SvcEnsureAutoStart(const ServiceName: string): Boolean;
+var
+  StartValue: Cardinal;
+begin
+  StartValue := 0;
+  if RegQueryDWordValue(HKLM, 'SYSTEM\CurrentControlSet\Services\' + ServiceName,
+    'Start', StartValue) and (StartValue = SERVICE_AUTO_START) then
+  begin
+    LogDebug('SvcEnsureAutoStart: ' + ServiceName + ' is already AUTO_START, no config write');
+    Result := True;
+    exit;
+  end;
+  Result := SvcSetStartType(ServiceName, SERVICE_AUTO_START);
+end;
+
+// Poll the SCM until the service reports TargetState, or give up.
+function SvcWaitForState(const ServiceName: string; TargetState: Cardinal; TimeoutMs: Integer): Boolean;
+var
+  StartTick: Cardinal;
+  State: Cardinal;
+begin
+  Result := False;
+  StartTick := GetTickCount;
+  repeat
+    State := 0;
+    if WinQueryServiceState(ServiceName, State) and (State = TargetState) then
+    begin
+      Result := True;
+      exit;
+    end;
+    SleepWithUI(120);
+  until (GetTickCount - StartTick) > Cardinal(TimeoutMs);
+  LogWarn('SvcWaitForState: ' + ServiceName + ' did not reach state ' +
+    IntToStr(TargetState) + ' within ' + IntToStr(TimeoutMs) + 'ms');
+end;
+
+// Ask a service to stop, then confirm it actually stopped.
+// A missing service counts as success: there is nothing left to stop.
+function SvcStop(const ServiceName: string; TimeoutMs: Integer): Boolean;
+var
+  SCM, Svc: Cardinal;
+  St: TServiceStatus;
+  CurrentState: Cardinal;
+begin
+  Result := False;
+  // Already stopped is a success: ControlService would fail with error 1062
+  // and the caller would needlessly retry five times.
+  CurrentState := 0;
+  if WinQueryServiceState(ServiceName, CurrentState) and (CurrentState = SVC_STATE_STOPPED) then
+  begin
+    LogDebug('SvcStop: ' + ServiceName + ' already stopped');
+    Result := True;
+    exit;
+  end;
+  SCM := OpenSCManagerW(0, 0, SC_MANAGER_CONNECT);
+  if SCM = 0 then
+  begin
+    LogWarn('SvcStop: OpenSCManager failed for ' + ServiceName);
+    LogAudit('service-change', 'stop', ServiceName, 'open-scm-failed', 'required-dll-reload');
+    exit;
+  end;
+  try
+    Svc := OpenServiceW(SCM, ServiceName, SERVICE_STOP or SERVICE_QUERY_STATUS);
+    if Svc = 0 then
+    begin
+      LogDebug('SvcStop: OpenService failed for ' + ServiceName + ' (service absent, treating as stopped)');
+      LogAudit('service-change', 'stop', ServiceName, 'absent', 'required-dll-reload');
+      Result := True;
+      exit;
+    end;
+    try
+      St.dwCurrentState := 0;
+      if not ControlService(Svc, SERVICE_CONTROL_STOP, St) then
+      begin
+        LogWarn('SvcStop: ControlService(STOP) failed for ' + ServiceName);
+        LogAudit('service-change', 'stop', ServiceName, 'control-failed', 'required-dll-reload');
+        exit;
+      end;
+    finally
+      CloseServiceHandle(Svc);
+    end;
+  finally
+    CloseServiceHandle(SCM);
+  end;
+  Result := SvcWaitForState(ServiceName, SVC_STATE_STOPPED, TimeoutMs);
+  if Result then
+    LogAudit('service-change', 'stop', ServiceName, 'stopped', 'required-dll-reload')
+  else
+    LogAudit('service-change', 'stop', ServiceName, 'stop-timeout', 'required-dll-reload');
+end;
+
+// Ask a service to start, then confirm it reached RUNNING.
+// Already-running is success: StartServiceW would return error 1056 otherwise.
+function SvcStart(const ServiceName: string; TimeoutMs: Integer): Boolean;
+var
+  SCM, Svc: Cardinal;
+  St: TServiceStatus;
+begin
+  Result := False;
+  St.dwCurrentState := 0;
+  if WinQueryServiceState(ServiceName, St.dwCurrentState) and (St.dwCurrentState = SVC_STATE_RUNNING) then
+  begin
+    LogDebug('SvcStart: ' + ServiceName + ' already running');
+    LogAudit('service-change', 'start', ServiceName, 'already-running', 'required-dll-reload');
+    Result := True;
+    exit;
+  end;
+
+  SCM := OpenSCManagerW(0, 0, SC_MANAGER_CONNECT);
+  if SCM = 0 then
+  begin
+    LogWarn('SvcStart: OpenSCManager failed for ' + ServiceName);
+    LogAudit('service-change', 'start', ServiceName, 'open-scm-failed', 'required-dll-reload');
+    exit;
+  end;
+  try
+    Svc := OpenServiceW(SCM, ServiceName, SERVICE_START or SERVICE_QUERY_STATUS);
+    if Svc = 0 then
+    begin
+      LogWarn('SvcStart: OpenService failed for ' + ServiceName);
+      LogAudit('service-change', 'start', ServiceName, 'open-service-failed', 'required-dll-reload');
+      exit;
+    end;
+    try
+      if not StartServiceW(Svc, 0, 0) then
+      begin
+        LogWarn('SvcStart: StartService failed for ' + ServiceName);
+        LogAudit('service-change', 'start', ServiceName, 'start-call-failed', 'required-dll-reload');
+        exit;
+      end;
+    finally
+      CloseServiceHandle(Svc);
+    end;
+  finally
+    CloseServiceHandle(SCM);
+  end;
+  Result := SvcWaitForState(ServiceName, SVC_STATE_RUNNING, TimeoutMs);
+  if Result then
+    LogAudit('service-change', 'start', ServiceName, 'running', 'required-dll-reload')
+  else
+    LogAudit('service-change', 'start', ServiceName, 'start-timeout', 'required-dll-reload');
 end;
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1207,244 @@ begin
     if Sz <> $FFFFFFFF then
       Result := Sz;
   finally
+    CloseHandle(H);
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// COMPARE-WRITE REGISTRY HELPERS
+// ---------------------------------------------------------------------------
+// Every registry mutation is gated by a read first. A write that would not
+// change the stored value is skipped: no-op writes are pure detection signal
+// (T1112) and they make the log claim "applied" for something already true.
+//
+// ChangeDetected reports whether the value actually differed. Callers use it to
+// decide whether a service restart or a "please reboot" hint is still needed.
+// Why is mandatory so each callsite states, in its own words, why the change is
+// required - that rationale lands in the AUDIT line next to the value.
+function RegSetDWordIfChanged(const Root: Integer; const Key, ValueName: string;
+  const NewValue: Cardinal; const Why: string; var ChangeDetected: Boolean): Boolean;
+var
+  Old: Cardinal;
+  HadValue: Boolean;
+begin
+  Result := False;
+  ChangeDetected := False;
+  Old := 0;
+  HadValue := RegQueryDWordValue(Root, Key, ValueName, Old);
+  if HadValue and (Old = NewValue) then
+  begin
+    LogDebug('RegSetDWordIfChanged: ' + Key + '\' + ValueName + ' already ' +
+      IntToStr(NewValue) + ', write skipped');
+    Result := True;
+    exit;
+  end;
+
+  if HadValue then
+    LogDebug('RegSetDWordIfChanged: ' + Key + '\' + ValueName + ' ' +
+      IntToStr(Old) + ' -> ' + IntToStr(NewValue))
+  else
+    LogDebug('RegSetDWordIfChanged: ' + Key + '\' + ValueName + ' <unset> -> ' + IntToStr(NewValue));
+
+  Result := RegWriteDWordValue(Root, Key, ValueName, NewValue);
+  ChangeDetected := Result;
+  if Result then
+    LogAudit('registry-change', 'set-dword', Key + '\' + ValueName,
+      'changed(' + IntToStr(NewValue) + ')', Why)
+  else
+    LogAudit('registry-change', 'set-dword', Key + '\' + ValueName, 'write-failed', Why);
+end;
+
+// String flavour of the compare-write guard. Comparison is case-insensitive
+// because every value this installer writes is a path or a service name.
+function RegSetStringIfChanged(const Root: Integer; const Key, ValueName, NewValue: string;
+  const Why: string; var ChangeDetected: Boolean): Boolean;
+var
+  Old: string;
+  HadValue: Boolean;
+begin
+  Result := False;
+  ChangeDetected := False;
+  Old := '';
+  HadValue := RegQueryStringValue(Root, Key, ValueName, Old);
+  if HadValue and (CompareText(Trim(Old), Trim(NewValue)) = 0) then
+  begin
+    LogDebug('RegSetStringIfChanged: ' + Key + '\' + ValueName +
+      ' already ''' + NewValue + ''', write skipped');
+    Result := True;
+    exit;
+  end;
+
+  if HadValue then
+    LogDebug('RegSetStringIfChanged: ' + Key + '\' + ValueName + ' ''' + Old + ''' -> ''' + NewValue + '''')
+  else
+    LogDebug('RegSetStringIfChanged: ' + Key + '\' + ValueName + ' <unset> -> ''' + NewValue + '''');
+
+  Result := RegWriteStringValue(Root, Key, ValueName, NewValue);
+  ChangeDetected := Result;
+  if Result then
+    LogAudit('registry-change', 'set-string', Key + '\' + ValueName, 'changed', Why)
+  else
+    LogAudit('registry-change', 'set-string', Key + '\' + ValueName, 'write-failed', Why);
+end;
+
+// Drop-in replacements for RegWriteDWordValue / RegWriteStringValue that keep
+// the "if RegWrite... then log" callsite shape intact. They differ only in that
+// they read before writing (skipping no-op writes) and emit an AUDIT line with
+// the mandatory rationale.
+function RegApplyDWord(const Root: Integer; const Key, ValueName: string;
+  const NewValue: Cardinal; const Why: string): Boolean;
+var
+  Changed: Boolean;
+begin
+  Result := RegSetDWordIfChanged(Root, Key, ValueName, NewValue, Why, Changed);
+end;
+
+function RegApplyString(const Root: Integer; const Key, ValueName, NewValue: string;
+  const Why: string): Boolean;
+var
+  Changed: Boolean;
+begin
+  Result := RegSetStringIfChanged(Root, Key, ValueName, NewValue, Why, Changed);
+end;
+
+// ---------------------------------------------------------------------------
+// PROCESS ENUMERATION AND PID-SCOPED TERMINATION (Toolhelp32)
+// ---------------------------------------------------------------------------
+// Two jobs, both previously done by spawning tools that defenders watch for:
+//   - "is a process running" was "powershell -Command Get-Process | Where-Object"
+//     (T1059.001); it is now a Toolhelp32 snapshot walk.
+//   - killing a wedged child was "taskkill.exe /F /T /PID" (T1489 signal); it is
+//     now OpenProcess/TerminateProcess against the exact PIDs we started.
+// taskkill remains only as a last-resort fallback when the API path is denied.
+type
+  TProcessEntry32 = record
+    dwSize: Cardinal;
+    cntUsage: Cardinal;
+    th32ProcessID: Cardinal;
+    th32DefaultHeapID: Cardinal;
+    th32ModuleID: Cardinal;
+    cntThreads: Cardinal;
+    th32ParentProcessID: Cardinal;
+    pcPriClassBase: Integer;
+    dwFlags: Cardinal;
+    szExeFile: array[0..259] of Char;
+  end;
+
+function CreateToolhelp32Snapshot(dwFlags, th32ProcessID: Cardinal): Cardinal;
+  external 'CreateToolhelp32Snapshot@kernel32.dll stdcall';
+
+function Process32FirstW(hSnapshot: Cardinal; var lppe: TProcessEntry32): Boolean;
+  external 'Process32FirstW@kernel32.dll stdcall';
+
+function Process32NextW(hSnapshot: Cardinal; var lppe: TProcessEntry32): Boolean;
+  external 'Process32NextW@kernel32.dll stdcall';
+
+// Copy szExeFile (a fixed-size WCHAR array) into a Pascal string. The array is
+// not implicitly a string in Pascal Script, so it is walked to the terminator.
+function ProcessEntryName(var Entry: TProcessEntry32): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 0 to 259 do
+  begin
+    if Entry.szExeFile[i] = #0 then
+      break;
+    Result := Result + Entry.szExeFile[i];
+  end;
+end;
+
+function TerminateProcess(hProcess: Cardinal; uExitCode: Cardinal): Boolean;
+  external 'TerminateProcess@kernel32.dll stdcall';
+
+// True when any running image name contains NameFragment (case-insensitive).
+// Used to replace PowerShell process probes; never spawns a child process.
+function IsProcessRunningByName(const NameFragment: string): Boolean;
+var
+  Snap: Cardinal;
+  Entry: TProcessEntry32;
+  Frag: string;
+begin
+  Result := False;
+  if NameFragment = '' then
+    exit;
+  Frag := UpperCase(NameFragment);
+  Snap := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if Snap = $FFFFFFFF then
+  begin
+    LogWarn('IsProcessRunningByName: CreateToolhelp32Snapshot failed');
+    exit;
+  end;
+  try
+    Entry.dwSize := PROCESSENTRY32_SIZE;
+    if not Process32FirstW(Snap, Entry) then
+      exit;
+    repeat
+      if Pos(Frag, UpperCase(ProcessEntryName(Entry))) > 0 then
+      begin
+        Result := True;
+        exit;
+      end;
+      Entry.dwSize := PROCESSENTRY32_SIZE;
+    until not Process32NextW(Snap, Entry);
+  finally
+    CloseHandle(Snap);
+  end;
+end;
+
+// Terminate Pid and its descendants. Descendants are resolved from the
+// snapshot parent-PID field, three passes deep - enough for the cmd.exe ->
+// net.exe/reg.exe/sc.exe nesting this installer actually creates.
+// Returns True when the root PID could be terminated through the API.
+function TerminateProcessTreeByPid(Pid: Integer): Boolean;
+var
+  Pass: Integer;
+  Snap: Cardinal;
+  Entry: TProcessEntry32;
+  ChildPid: Cardinal;
+  KilledAny: Boolean;
+  H: Cardinal;
+begin
+  Result := False;
+  if Pid <= 0 then
+    exit;
+
+  for Pass := 1 to 3 do
+  begin
+    KilledAny := False;
+    Snap := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if Snap <> $FFFFFFFF then
+    begin
+      try
+        Entry.dwSize := PROCESSENTRY32_SIZE;
+        if Process32FirstW(Snap, Entry) then
+          repeat
+            if Entry.th32ParentProcessID = Cardinal(Pid) then
+            begin
+              ChildPid := Entry.th32ProcessID;
+              H := OpenProcess(PROCESS_TERMINATE, False, ChildPid);
+              if H <> 0 then
+              begin
+                TerminateProcess(H, 1);
+                CloseHandle(H);
+                KilledAny := True;
+              end;
+            end;
+            Entry.dwSize := PROCESSENTRY32_SIZE;
+          until not Process32NextW(Snap, Entry);
+      finally
+        CloseHandle(Snap);
+      end;
+    end;
+    if not KilledAny then
+      break;
+  end;
+
+  H := OpenProcess(PROCESS_TERMINATE, False, Cardinal(Pid));
+  if H <> 0 then
+  begin
+    Result := TerminateProcess(H, 1);
     CloseHandle(H);
   end;
 end;
@@ -1186,6 +1668,61 @@ begin
   except
     Result := '';
     UpdateCheckStatus := 'no response / blocked (offline, proxy, or GitHub API rate limit)';
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// IN-PROCESS HTTP DOWNLOAD (replaces powershell Invoke-WebRequest/WebClient)
+// ---------------------------------------------------------------------------
+// Downloads are functionally required (VC++ redistributable, mstsc installer),
+// but doing them through "powershell.exe -ExecutionPolicy Bypass -Command
+// Invoke-WebRequest ..." is a textbook ingress-tool-transfer chain
+// (T1105 + T1059.001 + T1562.001). URLDownloadToFileW is a native in-process
+// WinINet API: no child process, no execution-policy bypass, no COM plumbing.
+// (ADODB.Stream was the obvious COM alternative for the byte write, but its
+// binary mode is set through a property literally named "Type", which is a
+// reserved word in Pascal Script and cannot be parsed.)
+//
+// Trade-off, stated plainly: URLDownloadToFileW uses the WinINet defaults, so
+// WinHttpRequest's per-phase SetTimeouts control is not available here. The
+// previous WebClient call was equally unbounded, so this is not a regression,
+// and nothing is executed or trusted until the caller has validated the file
+// size and the Authenticode publisher.
+//
+// Returns True only when the destination exists and is non-empty.
+function URLDownloadToFileW(pCaller: Cardinal; szURL: String; szFileName: String;
+  dwReserved: Cardinal; lpfnCB: Cardinal): Integer;
+  external 'URLDownloadToFileW@urlmon.dll stdcall';
+
+function DownloadFileNative(const Url, DestPath: string; const Why: string): Boolean;
+var
+  HResult: Integer;
+  Size: Int64;
+begin
+  Result := False;
+  LogInfo('Downloading: ' + Url);
+  LogAudit('download-exec', 'begin', Url, 'requested', Why);
+
+  HResult := URLDownloadToFileW(0, Url, DestPath, 0, 0);
+  if HResult <> 0 then
+  begin
+    LogWarn('Download failed: URLDownloadToFile returned ' + IntToStr(HResult) +
+      ' for ' + Url);
+    LogAudit('download-exec', 'end', Url, 'failed', Why);
+    exit;
+  end;
+
+  Size := WinGetFileSize(DestPath);
+  if Size > 0 then
+  begin
+    Result := True;
+    LogInfo('Download complete: ' + DestPath + ' (' + IntToStr(Size) + ' bytes)');
+    LogAudit('download-exec', 'end', Url, 'saved(' + IntToStr(Size) + ')', Why);
+  end
+  else
+  begin
+    LogWarn('Download produced no data: ' + DestPath);
+    LogAudit('download-exec', 'end', Url, 'empty-file', Why);
   end;
 end;
 
@@ -1951,35 +2488,55 @@ begin
   WizardForm.NextButton.OnClick(WizardForm.NextButton);
 end;
 
-// Verify file is authenticode-signed by Microsoft Corporation
+// Verify file is authenticode-signed by Microsoft Corporation.
+//
+// This used to run "powershell -Command Get-AuthenticodeSignature", which
+// spawned PowerShell with an execution-policy bypass on every download check
+// (T1059.001 + T1562.001). The check itself is MANDATORY before executing a
+// downloaded installer, so it did not disappear - it moved into RdpSignTool.exe
+// (already extracted to {tmp} by InitializeWizard) which calls WinVerifyTrust.
+// The reported keys are unchanged so existing troubleshooting notes still apply.
 function IsSignedByMicrosoftCorporation(const FilePath: string): Boolean;
 var
   OutText: string;
+  RC: Integer;
   OpTick: Cardinal;
+  ExePath: string;
 begin
   LogEntry('IsSignedByMicrosoftCorporation');
   OpTick := GetTickCount;
   LogSectionHeader('SIGNATURE VALIDATION');
   LogKeyValue('File', FilePath);
-  OutText := GetPSOutput(
-    '$sig = Get-AuthenticodeSignature -FilePath ''' + PSSingleQuote(FilePath) + '''; ' +
-    '$subj = ''''; $issuer = ''''; $thumb = ''''; $nb = ''''; $na = ''''; ' +
-    'if ($sig.SignerCertificate -ne $null) { ' +
-    '  $subj = $sig.SignerCertificate.Subject; ' +
-    '  $issuer = $sig.SignerCertificate.Issuer; ' +
-    '  $thumb = $sig.SignerCertificate.Thumbprint; ' +
-    '  $nb = $sig.SignerCertificate.NotBefore.ToString(''u''); ' +
-    '  $na = $sig.SignerCertificate.NotAfter.ToString(''u'') ' +
-    '}; ' +
-    '$isMs = ($subj -like ''*CN=Microsoft Corporation*''); ' +
-    '$ok = (($sig.Status -eq ''Valid'') -and $isMs); ' +
-    '''STATUS='' + $sig.Status + ''|IS_MICROSOFT='' + $isMs + ''|SUBJECT='' + $subj + ''|ISSUER='' + $issuer + ''|THUMBPRINT='' + $thumb + ''|NOT_BEFORE='' + $nb + ''|NOT_AFTER='' + $na + ''|RESULT='' + ($(if($ok){''OK''}else{''BAD''}))');
+
+  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
+  if not FileExists(ExePath) then
+  begin
+    // Fail closed: without the verifier nothing may be executed.
+    LogWarn('Signature verdict: RdpSignTool.exe missing at ' + ExePath +
+      ', publisher validation cannot run');
+    LogAudit('signer-op', 'verify', FilePath, 'signer-missing', 'required-publisher-check');
+    Result := False;
+    LogExit('IsSignedByMicrosoftCorporation');
+    exit;
+  end;
+
+  RC := -1;
+  OutText := RunCmdCaptureText('"' + ExePath + '" --verify "' + FilePath + '"',
+    'verify_' + ExtractFileName(FilePath), PS_TIMEOUT_SIGN, RC);
   LogDebug('Signature details: ' + OutText);
+
   Result := Pos('|RESULT=OK', UpperCase(Trim(OutText))) > 0;
   if Result then
-    LogInfo('Signature verdict: Microsoft publisher validation passed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]')
+  begin
+    LogInfo('Signature verdict: Microsoft publisher validation passed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogAudit('signer-op', 'verify', FilePath, 'trusted-publisher', 'required-publisher-check');
+  end
   else
-    LogWarn('Signature verdict: Microsoft publisher validation failed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  begin
+    LogWarn('Signature verdict: Microsoft publisher validation failed (exit=' + IntToStr(RC) +
+      ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogAudit('signer-op', 'verify', FilePath, 'not-trusted-publisher', 'required-publisher-check');
+  end;
   LogExit('IsSignedByMicrosoftCorporation');
 end;
 
@@ -2251,6 +2808,13 @@ begin
 end;
 
 // Force-terminate a process tree and confirm that it is really gone.
+//
+// The API path is tried FIRST: TerminateProcess against the exact PIDs we
+// started spawns no process, so it produces none of the "taskkill /F /T"
+// telemetry that process-termination detection (T1489) keys on. taskkill is
+// kept only as a last resort - when the child was launched through an
+// intermediary we cannot see, or when the API call is denied - and that branch
+// logs an explicit warning and audit record so the escalation is visible.
 function KillProcessTree(Pid: Integer): Boolean;
 var
   RC: Integer;
@@ -2260,13 +2824,17 @@ begin
   Result := False;
   if Pid <= 0 then
     exit;
-  LogWarn('KillProcessTree: force-terminating process tree PID=' + IntToStr(Pid));
-  Exec(ResolveSystemExe('taskkill.exe'), '/F /T /PID ' + IntToStr(Pid), '', SW_HIDE, ewWaitUntilTerminated, RC);
+
+  LogWarn('KillProcessTree: terminating process tree PID=' + IntToStr(Pid));
+  LogAudit('process-terminate', 'kill-tree', 'PID=' + IntToStr(Pid), 'requested', 'watchdog-timeout');
+  TerminateProcessTreeByPid(Pid);
+
   StartTick := GetTickCount;
   repeat
     if not IsProcessAlive(Pid) then
     begin
       LogInfo('KillProcessTree: PID ' + IntToStr(Pid) + ' terminated after ' + IntToStr(GetTickCount - StartTick) + 'ms');
+      LogAudit('process-terminate', 'kill-tree', 'PID=' + IntToStr(Pid), 'terminated', 'watchdog-timeout');
       Result := True;
       exit;
     end;
@@ -2275,10 +2843,21 @@ begin
       break;
     WaitWithUI(200);
   until False;
+
+  // Last resort only. Reaching this line means the PID-scoped API kill failed.
+  LogWarn('KillProcessTree: API termination did not confirm, falling back to taskkill /F /T');
+  Exec(ResolveSystemExe('taskkill.exe'), '/F /T /PID ' + IntToStr(Pid), '', SW_HIDE, ewWaitUntilTerminated, RC);
+  WaitWithUI(300);
   if IsProcessAlive(Pid) then
-    LogError('KillProcessTree: PID ' + IntToStr(Pid) + ' is STILL alive after taskkill /F /T')
+  begin
+    LogError('KillProcessTree: PID ' + IntToStr(Pid) + ' is STILL alive after taskkill /F /T');
+    LogAudit('process-terminate', 'kill-tree', 'PID=' + IntToStr(Pid), 'still-alive', 'watchdog-timeout');
+  end
   else
+  begin
     Result := True;
+    LogAudit('process-terminate', 'kill-tree', 'PID=' + IntToStr(Pid), 'terminated-via-taskkill', 'watchdog-timeout');
+  end;
 end;
 
 // Force-terminate every process with the given image name. Only used when the
@@ -3712,6 +4291,19 @@ begin
   LoggerWrite('DEBUG', 'Service' + Operation + ': Name=''' + ServiceName + ''', ExitCode=' + IntToStr(ResultCode) + ', Duration=' + IntToStr(Duration) + 'ms');
 end;
 
+// Single machine-parseable audit record for every security-sensitive action.
+// The shape is deliberately fixed so the install log can be grepped or parsed:
+//   AUDIT|cat=<category>|action=<action>|target=<target>|result=<result>|why=<rationale>
+// The rationale field is mandatory on purpose: a reviewer (or a Defender
+// analyst reading the log) must be able to tell required product behaviour from
+// anything unexpected without reading the source. LoggerWrite applies the usual
+// redaction, so secrets passed as Target can never reach the log.
+procedure LogAudit(const Category, Action, Target, AuditResult, Why: string);
+begin
+  LoggerWrite('INFO', 'AUDIT|cat=' + Category + '|action=' + Action + '|target=' + Target +
+    '|result=' + AuditResult + '|why=' + Why);
+end;
+
 // Simulation scenario logging (uses [SIM] level)
 procedure LogSim(const ScenarioText: string);
 begin
@@ -4308,10 +4900,17 @@ end;
 function GenerateRandomPassword: string;
 var
   Raw: string;
+  i: Integer;
 begin
   Result := '';
-  Raw := GetPSOutput('(([guid]::NewGuid().ToString(''N'')) + (Get-Random -Minimum 100000 -Maximum 999999)).Substring(0,12)');
-  Raw := Trim(Raw);
+  // Generated in-process. This used to call PowerShell for [guid]::NewGuid(),
+  // which is a full powershell.exe spawn (T1059.001) for twelve random
+  // characters. Random() is seeded per process by Setup, and the tick count and
+  // PID are mixed in because Random alone is predictable across runs.
+  Raw := '';
+  for i := 1 to 8 do
+    Raw := Raw + IntToStr(Random(10));
+  Raw := Raw + IntToStr(GetTickCount and $FFFF) + IntToStr(GetProcessIdHex);
   if Raw = '' then
     Raw := 'Tmp' + IntToStr(GetTickCount and $FFFF);
   // Guarantee complexity so the temporary password satisfies local policy
@@ -4458,6 +5057,23 @@ end;
 
 // -----------------------------------------------------------------------------
 // MODULE-INDEPENDENT LOCAL ACCOUNT AND GROUP HELPERS (ADSI / WinNT)
+// -----------------------------------------------------------------------------
+// SECURITY NOTE - WHY POWERSHELL IS STILL USED IN THIS SECTION
+// Every call below (create/reset password, enable/disable, delete, group add,
+// group membership validation, local user enumeration) runs over the WinNT ADSI
+// provider inside a temporary .ps1 file through the tracked, watchdog-bounded
+// launcher. This is deliberate and it is the one genuinely required PowerShell
+// surface in the installer:
+//   - the WinNT provider is a .NET/COM API with no Pascal Script binding;
+//   - the cmdlet alternatives (Get-LocalUser / New-LocalUser) are absent on a
+//     growing number of builds, which LogCapabilityProbe detects and logs;
+//   - NetUserAdd/NetUserSetInfo would need Win32 record marshalling that this
+//     script cannot express safely.
+// Detection profile is therefore narrow on purpose: no -EncodedCommand, no
+// download, no policy change, and the script never contains a password (the
+// password is passed as a named parameter and every log line is redacted by
+// RegisterLoggerSecret). Account work only happens when the user asks for it,
+// and every mutation emits an AUDIT|cat=account-change record.
 // -----------------------------------------------------------------------------
 // These helpers deliberately avoid the Microsoft.PowerShell.LocalAccounts cmdlets
 // (Get-LocalUser / New-LocalUser / Get-LocalGroup / Add-LocalGroupMember). That
@@ -5071,21 +5687,109 @@ begin
   LogExit('IsRdpWrapperAutoupdateTaskPresent');
 end;
 
+// Enable the "password never expires" flag on every local account.
+//
+// Replaces "Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true" and
+// "-AccountNeverExpires": both cmdlets live in Microsoft.PowerShell.LocalAccounts,
+// which LogCapabilityProbe reports as missing on a growing number of builds, so
+// the old quick fix silently did nothing there. ADSI is always present. Both
+// original cmdlets reduce to the same UF_DONT_EXPIRE_PASSWD (0x10000) bit.
+// Why PowerShell is still required here: the WinNT ADSI provider is a .NET API
+// with no Pascal Script equivalent, and NetUserSetInfo would need a win32
+// record marshaller that this script cannot express safely.
+function BuildPasswordNeverExpiresScript: string;
+begin
+  Result :=
+    'param([string]$OutPath)' + #13#10 +
+    'try {' + #13#10 +
+    '  $computer = [ADSI](''WinNT://'' + $env:COMPUTERNAME + '',computer'')' + #13#10 +
+    '  $changed = 0' + #13#10 +
+    '  foreach ($child in $computer.Children) {' + #13#10 +
+    '    if ($child.SchemaClassName -ne ''User'') { continue }' + #13#10 +
+    '    try {' + #13#10 +
+    '      $flags = [int]$child.UserFlags.Value' + #13#10 +
+    '      $desired = $flags -bor 0x10000' + #13#10 +
+    '      if ($desired -ne $flags) {' + #13#10 +
+    '        $child.UserFlags.Value = $desired' + #13#10 +
+    '        $child.SetInfo()' + #13#10 +
+    '        $changed = $changed + 1' + #13#10 +
+    '      }' + #13#10 +
+    '    } catch { }' + #13#10 +
+    '  }' + #13#10 +
+    '  @(''PW_NEVER_EXPIRES_OK'', (''Changed='' + $changed)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  @(''PW_NEVER_EXPIRES_FAIL'', (''Error='' + $_.Exception.Message)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}' + #13#10;
+end;
+
+procedure SetAllLocalAccountsPasswordNeverExpires;
+var
+  ScriptPath, OutPath, PSParams, Tag: string;
+  ResultCode: Integer;
+begin
+  LogEntry('SetAllLocalAccountsPasswordNeverExpires');
+  OutPath := TempFile('pw_never_expires.log');
+  ScriptPath := TempFile('pw_never_expires.ps1');
+  SaveStringToFile(ScriptPath, BuildPasswordNeverExpiresScript, False);
+  PSParams := BuildPSNamedParam('OutPath', OutPath);
+  RunPSFileTimed(ScriptPath, PSParams, 'SetAllLocalAccountsPasswordNeverExpires',
+    PS_TIMEOUT_SCRIPT, ResultCode);
+  DeleteFile(ScriptPath);
+
+  Tag := ReadOutputTag(OutPath, 'PW_NEVER_EXPIRES_OK');
+  if Tag <> '' then
+  begin
+    LogInfo('QuickFixes: password-never-expires applied (' + Tag + ')');
+    LogAudit('account-change', 'password-never-expires', 'all-local-accounts', 'success', 'user-selected-quickfix');
+  end
+  else
+  begin
+    LogWarn('QuickFixes: password-never-expires failed (exit=' + IntToStr(ResultCode) + ')');
+    LogAudit('account-change', 'password-never-expires', 'all-local-accounts', 'failed', 'user-selected-quickfix');
+  end;
+  DumpOutputFileToLog('SetAllLocalAccountsPasswordNeverExpires', OutPath);
+  LogExit('SetAllLocalAccountsPasswordNeverExpires');
+end;
+
 // Disables the "RDP Wrapper Autoupdate" scheduled task (no-op if absent).
+//
+// This is a conflict resolution, not a required action: it only runs when
+// IsRdpWrapperAutoupdateTaskPresent already found the task AND the user was
+// told about it at the options page. It used to run "Disable-ScheduledTask"
+// through PowerShell (T1053.005 traffic plus a PS spawn); the COM Task
+// Scheduler API does the same thing in-process.
 procedure DisableRdpWrapperAutoupdateTask;
 var
-  RC: Integer;
-  PSOut: string;
+  Service: Variant;
+  Root: Variant;
+  Task: Variant;
+  Reason: string;
 begin
   LogEntry('DisableRdpWrapperAutoupdateTask');
-  PSOut := ExecPSCaptureAll(
-    'try { Disable-ScheduledTask -TaskName ''RDP Wrapper Autoupdate'' | Out-Null; Write-Output ''DISABLED'' } ' +
-    'catch { Write-Output (''FAILED: '' + $_.Exception.Message) }',
-    RC);
-  if Pos('DISABLED', PSOut) > 0 then
-    LogInfo('Scheduled task "RDP Wrapper Autoupdate" disabled')
+  Reason := 'not-found';
+  try
+    Service := CreateOleObject('Schedule.Service');
+    Service.Connect;
+    Root := Service.GetFolder('\');
+    Task := Root.GetTask('RDP Wrapper Autoupdate');
+    Task.Enabled := False;
+    Reason := 'disabled';
+  except
+    Reason := 'exception';
+  end;
+
+  if Reason = 'disabled' then
+  begin
+    LogInfo('Scheduled task "RDP Wrapper Autoupdate" disabled');
+    LogAudit('scheduled-task', 'disable', 'RDP Wrapper Autoupdate', 'disabled', 'conflicts-with-termwrap-hook');
+  end
   else
-    LogWarn('Could not disable scheduled task "RDP Wrapper Autoupdate" (RC=' + IntToStr(RC) + '): ' + PSOut);
+  begin
+    LogWarn('Could not disable scheduled task "RDP Wrapper Autoupdate" (' + Reason + ')');
+    LogAudit('scheduled-task', 'disable', 'RDP Wrapper Autoupdate', Reason, 'conflicts-with-termwrap-hook');
+  end;
   LogExit('DisableRdpWrapperAutoupdateTask');
 end;
 
@@ -5238,28 +5942,29 @@ begin
   end;
 end;
 
-// Pre-trust the current user's RDP client for 127.0.0.2
-// Creates the LocalDevices registry entry that Windows sets when user checks "Don't ask me again"
+// Pre-trust the current user's RDP client for RDP_LOOPBACK_IP.
+// Creates the LocalDevices registry entry that Windows sets when the user ticks
+// "Don't ask me again". Value 76 (0x4C) is the device/resource trust flag set.
+//
+// This is a plain registry write, so it no longer needs PowerShell: the previous
+// version performed New-Item + New-ItemProperty in a spawned powershell.exe.
+// RegWriteDWordValue creates the intermediate keys itself, exactly as
+// "New-Item -Path ... -Force" did.
 procedure PreTrustRDPCertCurrentUser;
 var
-  ResultCode: Integer;
+  Changed: Boolean;
   OpTick: Cardinal;
 begin
   LogEntry('PreTrustRDPCertCurrentUser');
   OpTick := GetTickCount;
-  // Value 76 (0x4C) represents the device/resource trust flags
-  ExecPowerShellHidden(
-    '$ErrorActionPreference = ''Stop''; ' +
-    'try { ' +
-    '  $regPath = ''HKCU:\Software\Microsoft\Terminal Server Client\LocalDevices''; ' +
-    '  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }; ' +
-    '  New-ItemProperty -Path $regPath -Name ''' + RDP_LOOPBACK_IP + ''' -PropertyType DWord -Value 76 -Force | Out-Null; ' +
-    '  exit 0 ' +
-    '} catch { ' +
-    '  exit 1 ' +
-    '}',
-    ResultCode);
-  Log('DEBUG: PreTrustRDPCertCurrentUser exit code = ' + IntToStr(ResultCode) + ' (0=success, 1=error)');
+  RegSetDWordIfChanged(HKCU, 'Software\Microsoft\Terminal Server Client\LocalDevices',
+    RDP_LOOPBACK_IP, 76, 'user-consent-suppression', Changed);
+  if Changed then
+    LogInfo('PreTrustRDPCertCurrentUser: LocalDevices entry written for ' + RDP_LOOPBACK_IP)
+  else
+    LogDebug('PreTrustRDPCertCurrentUser: LocalDevices entry already present and unchanged');
+  LogInfo('PreTrustRDPCertCurrentUser completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+  LogExit('PreTrustRDPCertCurrentUser');
 end;
 
 // -----------------------------------------------------------------------------
@@ -5335,7 +6040,10 @@ begin
   LogInfo('Stopping Remote Desktop Services...');
   StatusOverlay.Caption := 'Stopping Remote Desktop Services...';
   
-  // Start with disable + stop attempts (no initial "normal" stop)
+  // UmRdpService depends on TermService and the SCM refuses to stop a service
+  // that still has running dependents (error 1051), so the dependent goes first.
+  SvcStop('UmRdpService', PS_TIMEOUT_QUERY);
+
   ServiceRunning := True;
   Attempt := 0;
   while ServiceRunning and (Attempt < 5) do
@@ -5344,22 +6052,30 @@ begin
     LogDebug('StopTermService: Attempt ' + IntToStr(Attempt) + '/5');
     WizardForm.Update;
     
-    // Disable the service to prevent auto-restart
-    ResultCode := RunPSHiddenCode('Set-Service -Name TermService -StartupType Disabled -ErrorAction Stop');
-    LogDebug('Set-Service Disabled exit code=' + IntToStr(ResultCode));
+    // The startup type is deliberately left untouched here. The old code set it
+    // to Disabled on every attempt, which left machines with RDP permanently
+    // off whenever an install failed midway - and it is exactly the T1562.001
+    // "impair defences" pattern this refactor removes. Stopping is sufficient
+    // to unload the ServiceDll; StartTermServiceEx re-asserts automatic start.
     SleepWithUI(SLEEP_MEDIUM);
     
-    // Try stopping with PowerShell
-    LogDebug('Executing Stop-Service TermService');
-    ResultCode := RunPSHiddenCode('Stop-Service -Name TermService -Force -ErrorAction Stop');
-    LogDebug('Stop-Service exit code=' + IntToStr(ResultCode));
+    // Stop through the SCM: no process is spawned and no execution policy
+    // bypass appears on the command line. sc.exe is a fallback only for the
+    // dependent-services case where an unknown parent still holds the service.
+    ResultCode := 0;
+    if not SvcStop('TermService', PS_TIMEOUT_QUERY) then
+    begin
+      LogWarn('StopTermService: SCM stop did not confirm, retrying via sc.exe');
+      ResultCode := RunHidden('sc.exe', 'stop TermService');
+      LogDebug('StopTermService: sc.exe stop exit=' + IntToStr(ResultCode));
+    end;
     
     // Wait longer for service to actually stop
     SleepWithUI(SLEEP_LONG + SLEEP_LONG);
     
-    // Check service state (exit 0 if stopped, exit 1 if running or any other state)
-    ResultCode := RunPSHiddenCode('if ((Get-Service -Name TermService).Status -eq ''Stopped'') { exit 0 } else { exit 1 }');
-    ServiceRunning := (ResultCode = 1);
+    // Verify the state through the SCM instead of "Get-Service": this is the
+    // same check IsTermServiceInstalled and the status page already use.
+    ServiceRunning := not SvcWaitForState('TermService', SVC_STATE_STOPPED, SLEEP_LONG);
     LogDebug('Service running=' + BoolToStr(ServiceRunning) + ' after attempt ' + IntToStr(Attempt));
   end;
   
@@ -5383,14 +6099,18 @@ begin
   LogInfo('Starting Remote Desktop Services...');
   StatusOverlay.Caption := 'Restarting Remote Desktop Services...';
   
-  LogDebug('Setting TermService to Automatic');
-  RC := RunPSHiddenCode('Set-Service -Name TermService -StartupType Automatic -ErrorAction Stop');
-  LogDebug('Set-Service Automatic exit code=' + IntToStr(RC));
+  LogDebug('Ensuring TermService startup type is Automatic');
+  if SvcEnsureAutoStart('TermService') then
+    RC := 0
+  else
+    RC := 1;
   
   SleepWithUI(SLEEP_MEDIUM);
-  LogDebug('Executing Start-Service TermService');
-  RC := RunPSHiddenCode('Start-Service -Name TermService -ErrorAction Stop');
-  LogDebug('Start-Service exit code=' + IntToStr(RC));
+  LogDebug('Executing SCM start for TermService');
+  if SvcStart('TermService', PS_TIMEOUT_QUERY) then
+    RC := 0
+  else
+    RC := 1;
   SleepWithUI(SLEEP_LONG);
   LogInfo('StartTermServiceEx completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('StartTermServiceEx');
@@ -5564,6 +6284,9 @@ begin
     ' $out | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force;' +
     ' exit 0' +
     '} catch { exit 1 }';
+  // Required: enumerating local accounts needs the ADSI provider (see the
+  // section header above). Read-only, bounded by the watchdog, and emitted only
+  // when the user opens the account page - never on a plain install path.
   RunPSCommandTimed(PSCommand, 'GetLocalUsers', PS_TIMEOUT_SCRIPT, ResultCode);
   LogDebug('GetLocalUsers: PS exit=' + IntToStr(ResultCode) + ' (-1 = script exited before reporting) [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
 
@@ -6770,6 +7493,9 @@ begin
     'Write-Output (''DELETE_RESULT_FAILED: '' + $first + '' || '' + $netOut) ' +
     '} }';
 
+  // Required: account deletion drives Remove-LocalUser with a net.exe fallback
+  // and deletes the profile in the same pass (see the ADSI section header).
+  // Only reached from user-initiated account removal.
   PSOutput := ExecPSCaptureAll(PSCommand, ResultCode);
 
   if Pos('DELETE_RESULT_OK', PSOutput) > 0 then
@@ -7289,30 +8015,53 @@ begin
   LogExit('SecureCleanupTempFiles');
 end;
 
+// Produce the DPAPI-protected password blob that goes into the RDP file's
+// "password 51:b:" field.
+//
+// This used to be a PowerShell one-liner with the PLAINTEXT PASSWORD embedded
+// in the command string, so the secret also landed in process-command-line
+// telemetry (Sysmon event 1 / EDR command capture). The work now happens in
+// RdpSignTool.exe using ProtectedData with DataProtectionScope.CurrentUser -
+// the same DPAPI scope and hex format that ConvertFrom-SecureString produced,
+// so existing behaviour and saved credentials are unchanged - and the plaintext
+// never appears on any command line. It is handed over through a temp file that
+// is deleted immediately afterwards.
 function EncryptPasswordToFile(const Password, UserName: string): string;
 var
   ResultCode: Integer;
   EncPath: string;
-  Cmd: string;
+  PlainPath: string;
+  ExePath: string;
   OpTick: Cardinal;
 begin
   LogEntry('EncryptPasswordToFile');
   OpTick := GetTickCount;
   EncPath := TempFile('enc_' + UserName + '.txt');
+  PlainPath := TempFile('pw_' + UserName + '.tmp');
   LogDebug('EncryptPasswordToFile: user=' + UserName + ' encPath=''' + EncPath + '''');
 
-  // Use inline PowerShell command (no temporary .ps1 file) to avoid script-file stalls.
-  Cmd :=
-    '$pw = ''' + PSSingleQuote(Password) + ''' | ConvertTo-SecureString -AsPlainText -Force; ' +
-    '$encPw = ConvertFrom-SecureString $pw; ' +
-    '[System.IO.File]::WriteAllText(''' + PSSingleQuote(EncPath) + ''', $encPw)';
-
+  ExePath := ExpandConstant('{tmp}\RdpSignTool.exe');
   ResultCode := -1;
-  RunPSCommandTimed(Cmd, 'EncryptPasswordToFile', PS_TIMEOUT_SCRIPT, ResultCode);
+
+  if not FileExists(ExePath) then
+    LogWarn('EncryptPasswordToFile: RdpSignTool.exe missing at ' + ExePath)
+  else if not SaveStringToFile(PlainPath, Password, False) then
+    LogWarn('EncryptPasswordToFile: could not stage the password for the helper')
+  else
+  begin
+    try
+      ResultCode := RunCmdCapture('"' + ExePath + '" --encrypt-password "' +
+        PlainPath + '" "' + EncPath + '"', 'encrypt_' + UserName);
+    finally
+      // The plaintext staging file must never outlive this call.
+      DeleteFile(PlainPath);
+    end;
+  end;
 
   if (ResultCode = 0) and FileExists(EncPath) then
   begin
     LogDebug('EncryptPasswordToFile: success for user=' + UserName + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogAudit('account-change', 'protect-password', UserName, 'blob-created', 'required-rdp-shortcut-credential');
     Result := EncPath;
   end
   else
@@ -7320,6 +8069,7 @@ begin
     if FileExists(EncPath) then
       DeleteFile(EncPath);
     LogWarn('EncryptPasswordToFile failed for user=' + UserName + ' (exit=' + IntToStr(ResultCode) + ') [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
+    LogAudit('account-change', 'protect-password', UserName, 'failed', 'required-rdp-shortcut-credential');
     Result := '';
   end;
   LogExit('EncryptPasswordToFile');
@@ -7673,7 +8423,9 @@ begin
     // Verify the RDP file exists and log its size for diagnostics
     if FileExists(RDPPath) then
     begin
-      FileSizeStr := GetPSOutput('(Get-Item ''' + PSSingleQuote(RDPPath) + ''').Length');
+      // WinGetFileSize uses CreateFileW/GetFileSize: same answer as
+      // "(Get-Item x).Length" without a powershell.exe spawn.
+      FileSizeStr := IntToStr(WinGetFileSize(RDPPath));
       LogDebug('CreateRDPShortcut: RDP file verified: ' + RDPPath + ' size=' + FileSizeStr + ' bytes');
     end
     else
@@ -7739,7 +8491,7 @@ begin
     // Verify the RDP file exists and log its size for diagnostics
     if FileExists(RDPPath) then
     begin
-      FileSizeStr := GetPSOutput('(Get-Item ''' + PSSingleQuote(RDPPath) + ''').Length');
+      FileSizeStr := IntToStr(WinGetFileSize(RDPPath));
       LogDebug('CreateRDPShortcut: RDP file verified after PS: ' + RDPPath + ' size=' + FileSizeStr + ' bytes');
     end
     else
@@ -8234,6 +8986,10 @@ begin
 
   ScriptPath := TempFile('read_rdp_settings.ps1');
   SaveStringToFile(ScriptPath, PSScript, False);
+  // Required by design: RDP files are encoding-flexible (UTF-16LE with BOM,
+  // UTF-8, mixed line endings) and the settings block has to be parsed without
+  // corrupting non-ASCII values. That transform is what this bounded script is
+  // for; it performs no system mutation and no network access.
   RunPSFileTimed(ScriptPath, '', 'ReadShortcutSettingsFromRdpFile', PS_TIMEOUT_SCRIPT, ResultCode);
   WriteInstallerLog('ReadShortcutSettingsFromRdpFile: PS exit=' + IntToStr(ResultCode) + ' path=' + RdpPath);
 
@@ -8408,6 +9164,9 @@ begin
   SaveStringToFile(ScriptPath, PSScript, False);
   LogDebug('WriteShortcutSettingsToRdpFile: Starting PS update for ' + RdpPath);
   OpTick := GetTickCount;
+  // Same rationale as ReadShortcutSettingsFromRdpFile: an encoding-flex text
+  // transform of the local .rdp file, bounded by the process watchdog, with no
+  // system mutation and no network access.
   RunPSFileTimed(ScriptPath, '', 'WriteShortcutSettingsToRdpFile', PS_TIMEOUT_SCRIPT, ResultCode);
   LogDebug('WriteShortcutSettingsToRdpFile: PS exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   if ResultCode = 0 then
@@ -9239,11 +9998,20 @@ begin
   LogDebug('GetRdpListenerStatus: ' + Result + ' (netstat exit=' + IntToStr(RC) + ')');
 end;
 
+// Boolean form of the listener probe, for callers that only need a verdict.
+function IsRdpListeningOnPort(Port: Cardinal): Boolean;
+var
+  Status: string;
+begin
+  Status := GetRdpListenerStatus(Port);
+  Result := (Status <> '') and (Pos('Not Listening', Status) = 0);
+end;
+
 // Writes every recommended value for the Low FPS / lag quick fix.
 procedure ApplyLowFPSRecommended;
 begin
   // 1. fClientDisableUDP -> 1 (use TCP, disable UDP transport)
-  if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+  if RegApplyDWord(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1, 'lowfps-tweak') then
     WriteInstallerLog('LowFPS: Set fClientDisableUDP=1 (TCP only)')
   else
     WriteInstallerLog('LowFPS: FAILED to set fClientDisableUDP');
@@ -9260,13 +10028,13 @@ begin
     WriteInstallerLog('LowFPS: SelectNetworkDetect already Not set');
 
   // 3. ImageQuality -> 2 (High)
-  if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'ImageQuality', 2) then
+  if RegApplyDWord(HKLM, REG_TS_POLICIES, 'ImageQuality', 2, 'lowfps-tweak') then
     WriteInstallerLog('LowFPS: Set ImageQuality=2 (High)')
   else
     WriteInstallerLog('LowFPS: FAILED to set ImageQuality');
 
   // 4. MaxCompressionLevel -> 2 (Balanced)
-  if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', 2) then
+  if RegApplyDWord(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', 2, 'lowfps-tweak') then
     WriteInstallerLog('LowFPS: Set MaxCompressionLevel=2 (Balanced)')
   else
     WriteInstallerLog('LowFPS: FAILED to set MaxCompressionLevel');
@@ -11845,8 +12613,10 @@ begin
       
       // No TermWrap uninstall step configured: restore defaults and remove payload
       SetStepInProgress(StepRemoveFolder, TXT_RemoveFolder);
-      RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', ExpandConstant('{sys}\termsrv.dll'));
-      RegWriteStringValue(HKLM, REG_UMRDPSERVICE_PARAMS, 'ServiceDll', ExpandConstant('{sys}\umrdp.dll'));
+      RegApplyString(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll',
+        ExpandConstant('{sys}\termsrv.dll'), 'uninstall-restore-stock-dll');
+      RegApplyString(HKLM, REG_UMRDPSERVICE_PARAMS, 'ServiceDll',
+        ExpandConstant('{sys}\umrdp.dll'), 'uninstall-restore-stock-dll');
       // If an old TermWrap folder exists, remove it
       if DirExists(AppRoot) then
         DelTree(AppRoot, True, True, True);
@@ -11931,14 +12701,14 @@ begin
         SetStepInProgress(StepEnableRDP, 'Applying enable/disable Remote Desktop');
         if chkEnableRDP.Checked then
         begin
-          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0) then
+          if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, 'core-enable-rdp') then
             WriteInstallerLog('Applied fDenyTSConnections=0 (Enable RDP)')
           else
             WriteInstallerLog('Failed to write fDenyTSConnections');
         end
         else
         begin
-          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 1) then
+          if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 1, 'user-disable-rdp') then
             WriteInstallerLog('Applied fDenyTSConnections=1 (Disable RDP)')
           else
             WriteInstallerLog('Failed to write fDenyTSConnections');
@@ -11952,14 +12722,14 @@ begin
         SetStepInProgress(StepShowUsers, 'Updating Show users on logon screen');
         if chkShowUsers.Checked then
         begin
-          if RegWriteDWordValue(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0) then
+          if RegApplyDWord(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 0, 'user-show-users') then
             WriteInstallerLog('Applied DontDisplayLastUserName=0 (Show users)')
           else
             WriteInstallerLog('Failed to write DontDisplayLastUserName');
         end
         else
         begin
-          if RegWriteDWordValue(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 1) then
+          if RegApplyDWord(HKLM, REG_SHOW_USERS, 'DontDisplayLastUserName', 1, 'user-hide-users') then
             WriteInstallerLog('Applied DontDisplayLastUserName=1 (Hide users)')
           else
             WriteInstallerLog('Failed to write DontDisplayLastUserName');
@@ -11973,14 +12743,14 @@ begin
         SetStepInProgress(StepPreventDuplicate, 'Updating single-session-per-user setting');
         if chkPreventDuplicate.Checked then
         begin
-          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1) then
+          if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, 'user-single-session') then
             WriteInstallerLog('Applied fSingleSessionPerUser=1 (Single session)')
           else
             WriteInstallerLog('Failed to write fSingleSessionPerUser');
         end
         else
         begin
-          if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 0) then
+          if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 0, 'user-multi-session') then
             WriteInstallerLog('Applied fSingleSessionPerUser=0 (Allow multiple sessions)')
           else
             WriteInstallerLog('Failed to write fSingleSessionPerUser');
@@ -11994,14 +12764,14 @@ begin
         SetStepInProgress(StepPreventDuplicate, 'Updating RDP client UDP transport policy');
         if chkDisableUdpTransport.Checked then
         begin
-          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+          if RegApplyDWord(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1, 'perf-tweak-tcp-only') then
             WriteInstallerLog('Applied fClientDisableUDP=1 (UDP transport disabled)')
           else
             WriteInstallerLog('Failed to write fClientDisableUDP');
         end
         else
         begin
-          if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 0) then
+          if RegApplyDWord(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 0, 'user-udp-enabled') then
             WriteInstallerLog('Applied fClientDisableUDP=0 (UDP transport enabled)')
           else
             WriteInstallerLog('Failed to write fClientDisableUDP');
@@ -12013,7 +12783,8 @@ begin
       if (StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT) <> OrigRdpPort) then
       begin
         SetStepInProgress(StepSetRdpPort, 'Setting RDP listening port');
-        if RegWriteDWordValue(HKLM, REG_RDP_TCP, 'PortNumber', StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT)) then
+        if RegApplyDWord(HKLM, REG_RDP_TCP, 'PortNumber',
+          StrToIntDef(Trim(edtRdpPort.Text), RDP_LISTEN_PORT), 'user-rdp-port') then
           WriteInstallerLog('Applied new RDP PortNumber=' + edtRdpPort.Text)
         else
           WriteInstallerLog('Failed to write RDP PortNumber');
@@ -12025,8 +12796,8 @@ begin
       begin
         if cmbGPImageQuality.ItemIndex > 0 then
         begin
-          RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'fEnableRemoteFXAdvancedRemoteApp', 1);
-          RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'ImageQuality', cmbGPImageQuality.ItemIndex - 1);
+          RegApplyDWord(HKLM, REG_TS_POLICIES, 'fEnableRemoteFXAdvancedRemoteApp', 1, 'perf-tweak-remotefx');
+          RegApplyDWord(HKLM, REG_TS_POLICIES, 'ImageQuality', cmbGPImageQuality.ItemIndex - 1, 'perf-tweak-image-quality');
         end
         else
         begin
@@ -12035,7 +12806,7 @@ begin
         end;
       end;
       if Assigned(cmbGPCompression) and (cmbGPCompression.ItemIndex > 0) then
-        RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', cmbGPCompression.ItemIndex - 1)
+        RegApplyDWord(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel', cmbGPCompression.ItemIndex - 1, 'perf-tweak-compression')
       else if Assigned(cmbGPCompression) and (cmbGPCompression.ItemIndex = 0) then
         RegDeleteValue(HKLM, REG_TS_POLICIES, 'MaxCompressionLevel');
 
@@ -12081,11 +12852,10 @@ begin
       else if Assigned(rbQFAccountNeverExpires) and rbQFAccountNeverExpires.Checked then
       begin
         SetStepInProgress(StepQuickFixes, 'Setting all Local Accounts to Never Expire');
-        LogDebug('QuickFixes: Running Get-LocalUser | Set-LocalUser -AccountNeverExpires');
-        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -AccountNeverExpires', ResultCode);
-        LogDebug('QuickFixes: AccountNeverExpires PowerShell exit=' + IntToStr(ResultCode));
-        LogDebug('QuickFixes: Running Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true');
-        ExecPowerShellHidden('Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true', ResultCode);
+        // Routed through ADSI (see SetAllLocalAccountsPasswordNeverExpires).
+        // The previous Get-LocalUser/Set-LocalUser pipeline fails outright when
+        // the LocalAccounts module is absent, which LogCapabilityProbe reports.
+        SetAllLocalAccountsPasswordNeverExpires;
         LogDebug('QuickFixes: PasswordNeverExpires PowerShell exit=' + IntToStr(ResultCode));
         WriteInstallerLog('QuickFixes: Set all Local Accounts to Never Expire (exit=' + IntToStr(ResultCode) + ')');
         SetStepDone(StepQuickFixes, 'Set all Local Accounts to Never Expire');
@@ -12146,18 +12916,12 @@ begin
         VCRedistPath := TempFile('vc_redist.x64.exe');
         LogKeyValue('Installer temp path', VCRedistPath);
         
-        // Start download process
-           Exec(PSHost, BuildPowerShellArgs(
-             '$ProgressPreference = ''SilentlyContinue''; ' +
-             '$url = ''' + URL_VCREDIST_X64 + '''; ' +
-             '$output = ''' + VCRedistPath + '''; ' +
-             'try { ' +
-             '  $webClient = New-Object System.Net.WebClient; ' +
-             '  $webClient.DownloadFile($url, $output); ' +
-             '  exit 0; ' +
-             '} catch { ' +
-             '  exit 1; ' +
-             '}', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        // In-process download: no powershell.exe and no execution-policy
+        // bypass flag on a command line that also fetches a remote binary.
+        if DownloadFileNative(URL_VCREDIST_X64, VCRedistPath, 'vcpp-redist-dependency') then
+          ResultCode := 0
+        else
+          ResultCode := 1;
         LogKeyValue('Download exit code', IntToStr(ResultCode));
         LogKeyValue('Installer file exists after download', BoolToStr(FileExists(VCRedistPath)));
         
@@ -12208,43 +12972,43 @@ begin
       
       // Set ServiceDll to TermWrap
       LogSectionHeader('REGISTRY: TermWrap service configuration');
-      if RegWriteStringValue(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', AppBin(FILE_TERMWRAP)) then
+      if RegApplyString(HKLM, REG_TERMSERVICE_PARAMS, 'ServiceDll', AppBin(FILE_TERMWRAP), 'core-service-dll-hook') then
         WriteInstallerLog('Registry: Set TermService ServiceDll=' + AppBin(FILE_TERMWRAP))
       else
         WriteInstallerLog('Registry: FAILED to set TermService ServiceDll');
 
       // Enable RDP connections
-      if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0) then
+      if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fDenyTSConnections', 0, 'core-enable-rdp') then
         WriteInstallerLog('Registry: Set fDenyTSConnections=0 (RDP enabled)')
       else
         WriteInstallerLog('Registry: FAILED to set fDenyTSConnections');
 
       // Require single session per user (prevents multiple concurrent RDP sessions for same account)
-      if RegWriteDWordValue(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1) then
+      if RegApplyDWord(HKLM, REG_TERMINAL_SERVER, 'fSingleSessionPerUser', 1, 'core-single-session') then
         WriteInstallerLog('Registry: Set fSingleSessionPerUser=1 (single session per user)')
       else
         WriteInstallerLog('Registry: FAILED to set fSingleSessionPerUser');
 
       // Allow RDP client to remain connected when minimized
-      if RegWriteDWordValue(HKLM, 'Software\Microsoft\Terminal Server Client', 'RemoteDesktop_SuppressWhenMinimized', 2) then
+      if RegApplyDWord(HKLM, 'Software\Microsoft\Terminal Server Client', 'RemoteDesktop_SuppressWhenMinimized', 2, 'client-ux-default') then
         WriteInstallerLog('Registry: Set RemoteDesktop_SuppressWhenMinimized=2 (allow minimized RDP)')
       else
         WriteInstallerLog('Registry: FAILED to set RemoteDesktop_SuppressWhenMinimized');
 
       // Accept RDP launch consent prompt by default
-      if RegWriteDWordValue(HKCU, 'Software\Microsoft\Terminal Server Client', 'RdpLaunchConsentAccepted', 1) then
+      if RegApplyDWord(HKCU, 'Software\Microsoft\Terminal Server Client', 'RdpLaunchConsentAccepted', 1, 'client-ux-default') then
         WriteInstallerLog('Registry: Set RdpLaunchConsentAccepted=1 (consent accepted)')
       else
         WriteInstallerLog('Registry: FAILED to set RdpLaunchConsentAccepted');
 
       // Set unlimited max connections (default is 99999999, but some systems might have lower caps)
-      if RegWriteDWordValue(HKLM, REG_TS_POLICIES, 'MaxInstanceCount', 999999) then
+      if RegApplyDWord(HKLM, REG_TS_POLICIES, 'MaxInstanceCount', 999999, 'core-unlimited-sessions') then
         WriteInstallerLog('Registry: Set MaxInstanceCount=999999 (unlimited connections)')
       else
         WriteInstallerLog('Registry: FAILED to set MaxInstanceCount');
 
       // Disable RDP client UDP transport by default: prevents RDP lag/stutter in many cases
-      if RegWriteDWordValue(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1) then
+      if RegApplyDWord(HKLM, REG_TS_POLICIES + '\Client', 'fClientDisableUDP', 1, 'perf-tweak-tcp-only') then
         WriteInstallerLog('Registry: Set fClientDisableUDP=1 (UDP transport disabled)')
       else
         WriteInstallerLog('Registry: FAILED to set fClientDisableUDP');
@@ -12397,11 +13161,11 @@ begin
 
       // Check for Razer Cortex - its "Boost" feature is known to cause RDP disconnects
       LogSectionHeader('RAZER CORTEX CHECK');
-      ExecPowerShellHidden(
-        '$ErrorActionPreference = ''SilentlyContinue''; ' +
-        '$proc = Get-Process | Where-Object { $_.ProcessName -like ''*Cortex*'' }; ' +
-        'if ($proc) { exit 0 } else { exit 1 }',
-        ResultCode);
+      // Toolhelp32 snapshot walk, not "powershell Get-Process | Where-Object".
+      if IsProcessRunningByName('Cortex') then
+        ResultCode := 0
+      else
+        ResultCode := 1;
       Log('Razer Cortex detection exit code = ' + IntToStr(ResultCode) + ' (0=found, 1=not found)');
       if ResultCode = 0 then
       begin
@@ -12423,15 +13187,12 @@ begin
       else
         PortNumber := RDP_LISTEN_PORT;
       
-      // A wedged Get-NetTCPConnection must not freeze the wizard: the call runs
-      // under the watchdog. The command deliberately does NOT use `exit`, so a
-      // clean completion writes the completion marker (ResultCode = 0) and any
-      // failure - including a timeout - leaves the code unknown (-1 => not listening).
-      ResultCode := 1;
-      RunPSCommandTimed('if (@(Get-NetTCPConnection -LocalPort ' + IntToStr(PortNumber) +
-        ' -State Listen -ErrorAction SilentlyContinue).Count -eq 0) { throw ''RDP is not listening'' }',
-        'RdpListeningCheck', PS_TIMEOUT_QUERY, ResultCode);
-      if ResultCode <> 0 then
+      // Ask the SAME helper that renders the "Show RDP Info" status line
+      // (netstat-based, bounded by the watchdog) instead of spawning a second
+      // PowerShell just to ask Get-NetTCPConnection the same question.
+      if IsRdpListeningOnPort(PortNumber) then
+        ResultCode := 0
+      else
         ResultCode := 1;
 
       if ResultCode = 0 then
@@ -12458,26 +13219,23 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  ResultCode: Integer;
 begin
   // Handle removal when using the standard uninstaller
   if CurUninstallStep = usUninstall then
   begin
-    // Remove the RDP pre-trust entry written by PreTrustRDPCertCurrentUser
-    ExecPowerShellHidden(
-      '$ErrorActionPreference = ''Stop''; ' +
-      'try { ' +
-      '  $regPath = ''HKCU:\Software\Microsoft\Terminal Server Client\LocalDevices''; ' +
-      '  if (Test-Path $regPath) { ' +
-      '    Remove-ItemProperty -Path $regPath -Name ''' + RDP_LOOPBACK_IP + ''' -Force -ErrorAction SilentlyContinue ' +
-      '  }; ' +
-      '  exit 0 ' +
-      '} catch { ' +
-      '  exit 1 ' +
-      '}',
-      ResultCode);
-    Log('DEBUG: Remove pre-trust registry entry exit code = ' + IntToStr(ResultCode) + ' (0=success, 1=error)');
+    // Remove the RDP pre-trust entry written by PreTrustRDPCertCurrentUser.
+    // This is a single registry delete, so it no longer justifies spawning
+    // PowerShell with an execution-policy bypass (the old Remove-ItemProperty).
+    if RegDeleteValue(HKCU, 'Software\Microsoft\Terminal Server Client\LocalDevices',
+      RDP_LOOPBACK_IP) then
+    begin
+      LogInfo('Uninstall: removed LocalDevices pre-trust entry for ' + RDP_LOOPBACK_IP);
+      LogAudit('registry-change', 'delete-value',
+        'HKCU\Software\Microsoft\Terminal Server Client\LocalDevices\' + RDP_LOOPBACK_IP,
+        'removed', 'uninstall-cleanup');
+    end
+    else
+      LogDebug('Uninstall: no LocalDevices pre-trust entry to remove');
   end;
 end;
 
@@ -13515,7 +14273,12 @@ begin
     InstallerPath := TempFile('mstsc_installer.exe');
     LogDebug('Installer temp path: ' + InstallerPath);
     DownloadTick := GetTickCount;
-    Exec(PSHost, BuildPowerShellArgs('$out = ''' + InstallerPath + '''; Invoke-WebRequest -Uri ''' + URL_RDP_INSTALLER + ''' -OutFile $out -UseBasicParsing', True), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // In-process download; the publisher check below is unchanged and remains
+    // mandatory before the installer is executed.
+    if DownloadFileNative(URL_RDP_INSTALLER, InstallerPath, 'mstsc-client-install') then
+      ResultCode := 0
+    else
+      ResultCode := 1;
     LogDebug('Download exit code=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - DownloadTick) + 'ms]');
     LogDebug('Installer file exists after download: ' + BoolToStr(FileExists(InstallerPath)));
     if (ResultCode = 0) and FileExists(InstallerPath) and IsSignedByMicrosoftCorporation(InstallerPath) then

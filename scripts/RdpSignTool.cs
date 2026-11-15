@@ -92,6 +92,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -260,6 +261,193 @@ namespace RdpWrapKit
             ref uint pcbSignedBlob
         );
 
+        // ---- Password protection ---------------------------------------------
+        // Invoked as:  RdpSignTool.exe --encrypt-password <inPath> <outPath>
+        // Replaces a PowerShell ConvertFrom-SecureString call that embedded the
+        // plaintext password in its command line. ProtectedData with the
+        // CurrentUser scope produces the identical DPAPI blob that
+        // ConvertFrom-SecureString produced, and the hex encoding matches, so
+        // the generated .rdp file stays compatible with mstsc.exe.
+        // Exit codes: 0 = written, 2 = input missing, 5 = failure.
+        private static int RunEncryptPassword(string inPath, string outPath)
+        {
+            if (string.IsNullOrEmpty(inPath) || !File.Exists(inPath))
+            {
+                Console.Error.WriteLine("RdpSignTool: ERROR: Password staging file not found");
+                return 2;
+            }
+            if (string.IsNullOrEmpty(outPath))
+            {
+                Console.Error.WriteLine("RdpSignTool: ERROR: Missing output path");
+                return 99;
+            }
+
+            try
+            {
+                string plaintext = File.ReadAllText(inPath);
+                // MUST be UTF-16LE. This mirrors ConvertFrom-SecureString exactly:
+                // .NET protects Encoding.Unicode.GetBytes(value), and mstsc.exe
+                // later treats the unprotected bytes as a wide string. Encoding
+                // these as UTF-8 produced a 7-byte "rdp115$" instead of the
+                // 14-byte wide form, which mstsc read back as garbage - the
+                // saved password was silently wrong.
+                byte[] plainBytes = Encoding.Unicode.GetBytes(plaintext);
+                byte[] protectedBytes = ProtectedData.Protect(
+                    plainBytes, null, DataProtectionScope.CurrentUser);
+
+                StringBuilder hex = new StringBuilder(protectedBytes.Length * 2);
+                for (int i = 0; i < protectedBytes.Length; i++)
+                {
+                    hex.Append(protectedBytes[i].ToString("X2"));
+                }
+
+                File.WriteAllText(outPath, hex.ToString());
+                Console.WriteLine("ENCRYPT|RESULT=OK|BYTES=" + protectedBytes.Length);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("RdpSignTool: password protection failed: " + ex.Message);
+                return 5;
+            }
+        }
+
+        // ---- Publisher verification -----------------------------------------
+        // Invoked as:  RdpSignTool.exe --verify <file> [expectedSubjectSubstring]
+        // This exists so the installer can validate a downloaded binary's
+        // Authenticode publisher without spawning powershell.exe with
+        // "-ExecutionPolicy Bypass -Command Get-AuthenticodeSignature".
+        // Emits one machine-readable line on stdout as its last line:
+        //   VERIFY|STATUS=<status>|IS_MICROSOFT=<True/False>|SUBJECT=...|
+        //   ISSUER=...|THUMBPRINT=...|RESULT=<OK|BAD>
+        // Exit codes: 0 = RESULT=OK, 1 = RESULT=BAD, 2 = file missing, 99 = bad args.
+
+        private const uint WTD_UI_NONE = 2;
+        private const uint WTD_REVOKE_NONE = 0;
+        private const uint WTD_CHOICE_FILE = 1;
+        private const uint WTD_STATEACTION_VERIFY = 1;
+        private const uint WTD_STATEACTION_CLOSE = 2;
+        private const uint WTD_CACHE_ONLY_URL_RETRIEVAL = 0x1000;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WINTRUST_FILE_INFO
+        {
+            public uint cbStruct;
+            public string pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WINTRUST_DATA
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+        }
+
+        [DllImport("wintrust.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint WinVerifyTrust(IntPtr hwnd, ref Guid actionId, ref WINTRUST_DATA data);
+
+        // WINTRUST_ACTION_GENERIC_VERIFY_V2
+        private static readonly Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 =
+            new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+
+        // Returns the Authenticode trust status. 0 means the file signature is
+        // valid and chains to a trusted root; anything else is a failure code.
+        private static uint GetAuthenticodeStatus(string filePath)
+        {
+            WINTRUST_FILE_INFO fileInfo = new WINTRUST_FILE_INFO();
+            fileInfo.cbStruct = (uint)Marshal.SizeOf(typeof(WINTRUST_FILE_INFO));
+            fileInfo.pcwszFilePath = filePath;
+            fileInfo.hFile = IntPtr.Zero;
+            fileInfo.pgKnownSubject = IntPtr.Zero;
+
+            IntPtr fileInfoPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WINTRUST_FILE_INFO)));
+            try
+            {
+                Marshal.StructureToPtr(fileInfo, fileInfoPtr, false);
+
+                WINTRUST_DATA data = new WINTRUST_DATA();
+                data.cbStruct = (uint)Marshal.SizeOf(typeof(WINTRUST_DATA));
+                data.dwUIChoice = WTD_UI_NONE;
+                data.fdwRevocationChecks = WTD_REVOKE_NONE;
+                data.dwUnionChoice = WTD_CHOICE_FILE;
+                data.pFile = fileInfoPtr;
+                data.dwStateAction = WTD_STATEACTION_VERIFY;
+                // Cache-only trust lookup: an installer must never block on a
+                // network round trip to a CRL/OCSP responder.
+                data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+                Guid action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+                uint status = WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+
+                // Release the verification state even when it failed.
+                data.dwStateAction = WTD_STATEACTION_CLOSE;
+                WinVerifyTrust(IntPtr.Zero, ref action, ref data);
+
+                return status;
+            }
+            finally
+            {
+                Marshal.DestroyStructure(fileInfoPtr, typeof(WINTRUST_FILE_INFO));
+                Marshal.FreeHGlobal(fileInfoPtr);
+            }
+        }
+
+        private static int RunVerify(string filePath, string expectedSubjectSubstring)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                Console.Error.WriteLine("RdpSignTool: ERROR: File not found: " + filePath);
+                return 2;
+            }
+
+            uint status = GetAuthenticodeStatus(filePath);
+
+            string subject = "";
+            string issuer = "";
+            string thumbprint = "";
+            try
+            {
+                X509Certificate signer = X509Certificate.CreateFromSignedFile(filePath);
+                X509Certificate2 signer2 = new X509Certificate2(signer);
+                subject = signer2.Subject ?? "";
+                issuer = signer2.Issuer ?? "";
+                thumbprint = signer2.Thumbprint ?? "";
+            }
+            catch (Exception ex)
+            {
+                // No signer certificate to report. The status code already
+                // carries the verdict, so this is not fatal by itself.
+                Console.Error.WriteLine("RdpSignTool: no signer certificate: " + ex.Message);
+            }
+
+            bool isExpectedPublisher = subject.Length > 0
+                && subject.IndexOf(expectedSubjectSubstring, StringComparison.OrdinalIgnoreCase) >= 0;
+            bool ok = (status == 0) && isExpectedPublisher;
+
+            string statusText = (status == 0) ? "Valid" : ("Error_0x" + status.ToString("X8"));
+            Console.WriteLine(
+                "VERIFY|STATUS=" + statusText +
+                "|IS_MICROSOFT=" + isExpectedPublisher +
+                "|SUBJECT=" + subject +
+                "|ISSUER=" + issuer +
+                "|THUMBPRINT=" + thumbprint +
+                "|RESULT=" + (ok ? "OK" : "BAD"));
+
+            return ok ? 0 : 1;
+        }
+
         // ---- Entry point -----------------------------------------------------
 
         private static int Main(string[] args)
@@ -268,9 +456,26 @@ namespace RdpWrapKit
 
             try
             {
+                // Verb dispatch. A bare path keeps the original signing
+                // behaviour, so existing callers are unaffected.
+                if (args.Length >= 1 && string.Equals(args[0], "--encrypt-password", StringComparison.OrdinalIgnoreCase))
+                {
+                    string plainPath = args.Length >= 2 ? args[1].Trim('"') : "";
+                    string encPath = args.Length >= 3 ? args[2].Trim('"') : "";
+                    return RunEncryptPassword(plainPath, encPath);
+                }
+
+                if (args.Length >= 1 && string.Equals(args[0], "--verify", StringComparison.OrdinalIgnoreCase))
+                {
+                    string verifyPath = args.Length >= 2 ? args[1].Trim('"') : "";
+                    string expectedPublisher = args.Length >= 3 ? args[2].Trim('"') : "CN=Microsoft Corporation";
+                    return RunVerify(verifyPath, expectedPublisher);
+                }
+
                 if (args.Length < 1 || string.IsNullOrWhiteSpace(args[0]))
                 {
                     Console.Error.WriteLine("RdpSignTool: ERROR: Usage: RdpSignTool.exe <path-to-rdp-file>");
+                    Console.Error.WriteLine("       RdpSignTool.exe --verify <file> [expectedSubjectSubstring]");
                     return 99;
                 }
 

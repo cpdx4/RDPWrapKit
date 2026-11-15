@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Why security tools flag RDPWrapKit | RDPWrapKit</title>
+    <meta
+      name="description"
+      content="Security tools sometimes flag RDPWrapKit. Here is what the installer does, why each step is needed, and how the toolkit keeps each one in check."
+    />
+    <meta name="author" content="cpdx4" />
+    <meta property="og:title" content="Why security tools flag RDPWrapKit | RDPWrapKit" />
+    <meta
+      property="og:description"
+      content="What RDPWrapKit does, why each step is needed for Remote Desktop to work, and how each step is kept in check."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://rdpwrapkit.cpdx4.space/troubleshooting/antivirus-detections.html" />
+    <meta property="og:site_name" content="RDPWrapKit" />
+    <link rel="canonical" href="https://rdpwrapkit.cpdx4.space/troubleshooting/antivirus-detections.html" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="../favicon.ico" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <nav class="site-nav" aria-label="Main">
+      <div class="container nav-bar">
+        <a class="nav-brand" href="../index.html">
+          <span class="nav-brand-main">RDP</span><span class="nav-brand-accent">WrapKit</span>
+        </a>
+        <div class="nav-links">
+          <a href="../index.html#quickstart">Quick Start</a>
+          <a href="../troubleshooting/" class="active" aria-current="page">Troubleshooting</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="container">
+        <nav class="breadcrumb" aria-label="Breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <a href="../troubleshooting/">Troubleshooting</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <span class="current" aria-current="page">Security warnings</span>
+        </nav>
+        <h1>Security tools flag RDPWrapKit</h1>
+        <p class="lead">Some security tools and online scanners warn about RDPWrapKit. That can look alarming, so this page explains what the installer actually does, why each step is needed, and how each step is kept in check.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="container narrow">
+          <h2>Why scanners flag it</h2>
+          <p class="section-subtitle">Security tools judge what a program does, not why it does it</p>
+          <div class="callout">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>What you might see:</strong> a warning or a low trust rating from a security tool.</p>
+              <p><strong>What it means:</strong> the tool noticed that the installer stops a Windows service and changes a Remote Desktop setting, so it treats it with suspicion.</p>
+            </div>
+          </div>
+          <p>To add remote-desktop support, an installer has to change how Remote Desktop is configured on the machine and restart the service that uses that configuration. Malware does some of the same things, so scanners treat the actions themselves as a warning sign. They cannot tell whether a program is doing it to help you or to hurt you.</p>
+          <p>RDPWrapKit is an RDP wrapper, and tools in that category are often labelled as hack tools or riskware by the companies that make the scanners. That label describes the category of the tool, not something harmful inside the file.</p>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>What it does, and why</h2>
+          <p class="section-subtitle">Every step below is required for the product to work, and each one is kept narrow</p>
+
+          <ol class="steps">
+            <li>
+              <span class="step-number">01</span>
+              <div class="step-content">
+                <h3>Changing one Remote Desktop setting</h3>
+                <p>We change a single Windows setting that tells Remote Desktop to load the TermWrap component. That setting is the on switch, so nothing works unless it is changed.</p>
+                <p class="step-note">We only change the values Remote Desktop needs, and we skip any value that is already correct.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div class="step-content">
+                <h3>Stopping and starting Remote Desktop</h3>
+                <p>We need to modify how Remote Desktop works so it can run on your edition of Windows. To do that we stop the service, hook TermWrap in, and start the service again. Windows only picks up the change when the service starts, so the restart is the part that makes it work.</p>
+                <p class="step-note">It happens once, and Remote Desktop is left running and set to start automatically when Windows boots.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div class="step-content">
+                <h3>Closing a small helper service first</h3>
+                <p>Remote Desktop has a helper service that depends on it. Windows will not stop Remote Desktop while that helper is still running, so we close the helper first.</p>
+                <p class="step-note">Only that one helper, and only while the restart is happening.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div class="step-content">
+                <h3>Creating a local account, only if you ask</h3>
+                <p>The optional shortcut feature needs a Windows account to sign in with, so the installer creates one and gives it permission to connect. On Windows Home, the Administrators group is the only thing that grants that permission.</p>
+                <p class="step-note">This only runs when you turn the feature on, the name and password are yours to choose, and an account that fails to finish is disabled so it cannot be signed into.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">05</span>
+              <div class="step-content">
+                <h3>Using PowerShell for the account step</h3>
+                <p>Windows has no dependable built-in way for an installer to create a local account, so that one step uses a short PowerShell script.</p>
+                <p class="step-note">It is used for accounts only, and only after you open the account page. Service control, downloads, checks and cleanup all happen without it.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">06</span>
+              <div class="step-content">
+                <h3>Downloading two Microsoft files</h3>
+                <p>TermWrap needs the Microsoft Visual C++ runtime, and the shortcut is no use if the machine has no Remote Desktop client, so the installer fetches both from Microsoft.</p>
+                <p class="step-note">The addresses are Microsoft's own, the file size is checked, and a download is never run unless it carries a valid Microsoft signature. If a download fails you can install the file yourself.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">07</span>
+              <div class="step-content">
+                <h3>Signing the shortcut and storing the password safely</h3>
+                <p>Windows shows a warning on any unsigned Remote Desktop shortcut, and the client will only accept a saved password in protected form. So the shortcut is signed, and the password is locked to your own Windows login.</p>
+                <p class="step-note">Only the shortcut the toolkit just created is signed, with a certificate made on your PC and trusted for nothing else. The readable password is deleted as soon as the protected one exists.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">08</span>
+              <div class="step-content">
+                <h3>Ending a helper that stops responding</h3>
+                <p>If a helper hangs, setup would wait forever with Remote Desktop half-restarted, so the installer can end the process it started.</p>
+                <p class="step-note">Only our own processes, and only after a long wait.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">09</span>
+              <div class="step-content">
+                <h3>Turning off an old autoupdate task</h3>
+                <p>An older RDP Wrapper autoupdate task downloads and replaces the same files, which would undo what the installer just set up. When one is found, the installer asks before anything changes.</p>
+                <p class="step-note">One task, only with your permission.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">10</span>
+              <div class="step-content">
+                <h3>Checking that Remote Desktop is listening</h3>
+                <p>So the RDP Info page can tell you whether Remote Desktop is actually accepting connections, the installer looks at whether the RDP port is open on your own machine.</p>
+                <p class="step-note">Local only, and only the RDP port.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>What it does not do</h2>
+          <p class="section-subtitle">The short list that matters more than a scan result</p>
+          <ul>
+            <li>It does not turn Remote Desktop off or leave it disabled.</li>
+            <li>It does not add itself to startup, to scheduled tasks, or to any service other than the Remote Desktop hook.</li>
+            <li>It does not open firewall ports or listen on the network by itself.</li>
+            <li>It does not download anything that is not from Microsoft, and it will not run a download that Microsoft did not sign.</li>
+            <li>It does not keep your password in readable form.</li>
+            <li>It does not switch off Defender, your antivirus, or Windows logging.</li>
+            <li>It does not contact any server of its own. There is no telemetry and no licence check.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>If a scan worries you</h2>
+          <p class="section-subtitle">Three quick checks you can do yourself</p>
+          <ol class="steps">
+            <li>
+              <span class="step-number">01</span>
+              <div class="step-content">
+                <h3>Check that the installer is signed</h3>
+                <p>Right-click the setup file, choose <strong>Properties</strong>, and open the <strong>Digital Signatures</strong> tab. It should list a signature and say it is valid.</p>
+                <p class="step-note">If a file is edited by anyone, that signature stops being valid, so this is the quickest way to tell a real release from a modified copy.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div class="step-content">
+                <h3>Make sure it came from the official releases page</h3>
+                <p>Download RDPWrapKit from the project's <a href="https://github.com/cpdx4/RDPWrapKit/releases" target="_blank" rel="noopener noreferrer">GitHub releases page</a>, where the signed build is published.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div class="step-content">
+                <h3>Look at what the installer did</h3>
+                <p>The installer writes a line into its log for each of the steps on this page, including the reason for it. If a scan worries you, the log is the plain record of what changed on your PC.</p>
+                <p class="step-note">You can find it in your temporary folder, in a file named <code>RDPWrapKit_install_*.log</code>, and read it in Notepad.</p>
+              </div>
+            </li>
+          </ol>
+          <p>If a vendor still reports the file, you can report it as a false positive and mention which step on this page it flagged. Some will reclassify it; some will not, because extending Remote Desktop is what the tool is built to do. Either way, the checks above tell you whether the file in front of you is the one we published.</p>
+          <div class="cta-row">
+            <a class="btn btn-outline" href="https://github.com/cpdx4/RDPWrapKit/issues" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Ask about a detection
+            </a>
+            <a class="btn btn-solid" href="../troubleshooting/">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              All fixes
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-content">
+        <p>RDPWrapKit ©2026 <span id="year"></span> · Maintained by <a href="https://github.com/cpdx4" target="_blank" rel="noopener noreferrer">cpdx4</a></p>
+        <nav>
+          <a href="https://github.com/cpdx4/RDPWrapKit/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="../script.js"></script>
+  </body>
+</html>
