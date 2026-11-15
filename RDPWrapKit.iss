@@ -10770,6 +10770,17 @@ begin
   FinishedShortcutImage.Visible := False;
 end;
 
+// Caption for the shortcut "apply" step on the Installing page. The advanced
+// mstsc editor only opens when the user ticked the advanced option, so the
+// "and open in editor" suffix must not be shown in the plain apply case.
+function ShortcutApplyStepCaption: String;
+begin
+  if DoShowMstscEdit then
+    Result := 'Apply settings and open in editor'
+  else
+    Result := 'Apply settings';
+end;
+
 // Applies the settings chosen on the Shortcut Settings page to the selected .rdp
 // files and (re)signs them.
 //
@@ -11811,7 +11822,7 @@ begin
     else // SelectedInstallMode = installModeEditShortcuts (Edit Shortcut Settings)
     begin
       StepsHeaderLabel.Caption := 'Shortcut Settings:';
-      AddStepPendingLabel(StepCreateShortcuts, 'Apply settings and open in editor');
+      AddStepPendingLabel(StepCreateShortcuts, ShortcutApplyStepCaption);
     end;
 
     if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
@@ -12105,7 +12116,7 @@ begin
       // Apply the deferred shortcut writes HERE, on the Installing page, so the
       // user actually sees the progress page while the .rdp files are written and
       // signed (NextButtonClick only queued the work - see ApplyEditShortcutSettings).
-      SetStepInProgress(StepCreateShortcuts, 'Apply settings and open in editor');
+      SetStepInProgress(StepCreateShortcuts, ShortcutApplyStepCaption);
       if EditShortcutApplyPending then
       begin
         StatusOverlay.Caption := 'Applying shortcut settings...';
@@ -12116,7 +12127,7 @@ begin
       else
         LogDebug('ssPostInstall: no deferred shortcut settings to apply');
       StatusOverlay.Caption := 'Shortcut settings applied.';
-      SetStepDone(StepCreateShortcuts, 'Apply settings and open in editor');
+      SetStepDone(StepCreateShortcuts, ShortcutApplyStepCaption);
     end
     // Install TermWrap: Download VC++, apply registry, start service
     else if (SelectedInstallMode = installModeInstall) and DoInstallTermWrap then
