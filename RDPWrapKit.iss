@@ -6996,9 +6996,11 @@ begin
     else
       SL.Add('full address:s:' + RDP_LOOPBACK_IP + ':' + IntToStr(RdpPort));
     SL.Add('autoreconnection enabled:i:1');
+    SL.Add('enableworkspacereconnect:i:1');
     SL.Add('compression:i:1');
-    SL.Add('networkautodetect:i:1');
-    SL.Add('bandwidthautodetect:i:1');
+    SL.Add('networkautodetect:i:0');
+    SL.Add('bandwidthautodetect:i:0');
+    SL.Add('connection type:i:6');
     SL.Add('keyboardhook:i:' + IntToStr(KeyboardHook));
     SL.Add('audiocapturemode:i:0');
     SL.Add('audiomode:i:' + IntToStr(AudioMode));
@@ -7101,9 +7103,11 @@ begin
     '  $rdp += "smart sizing:i:1"' + #13#10 +
     '  $rdp += "dynamic resolution:i:1"' + #13#10 +
     '  $rdp += "autoreconnection enabled:i:1"' + #13#10 +
+    '  $rdp += "enableworkspacereconnect:i:1"' + #13#10 +
     '  $rdp += "compression:i:1"' + #13#10 +
-    '  $rdp += "networkautodetect:i:1"' + #13#10 +
-    '  $rdp += "bandwidthautodetect:i:1"' + #13#10 +
+    '  $rdp += "networkautodetect:i:0"' + #13#10 +
+    '  $rdp += "connection type:i:6"' + #13#10 +
+    '  $rdp += "bandwidthautodetect:i:0"' + #13#10 +
     '  $rdp += "keyboardhook:i:' + IntToStr(KeyboardHook) + '"' + #13#10 +
     '  $rdp += "audiocapturemode:i:0"' + #13#10 +
     '  $rdp += "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
@@ -7871,6 +7875,9 @@ end;
 procedure WriteShortcutSettingsToRdpFile(const RdpPath: string);
 // Reads the existing .rdp file and updates the display/audio/experience settings from the
 // current shortcut settings UI controls, then writes the file back in-place.
+// It also repairs a laggy connectivity profile (auto-detect left on, or no "connection type"
+// key at all) by pinning networkautodetect:i:0 / bandwidthautodetect:i:0 / connection type:i:6.
+// See the $autoDetect block in the generated script for the rationale.
 var
   ScreenModeId, DesktopWidth, DesktopHeight, UseMultiMon, AudioMode, RedirectClipboard, KeyboardHook: Integer;
   DisableWallpaper, AllowFontSmooth, AllowComposition: Integer;
@@ -7886,6 +7893,18 @@ begin
   GetExperienceSettings(DisableWallpaper, AllowFontSmooth, AllowComposition, DisableFullWindowDrag, DisableMenuAnims, DisableThemes);
 
   // PowerShell: update specific keys in the .rdp file without touching the rest (e.g. password hash)
+  //
+  // Connectivity keys are handled CONDITIONALLY - see the $autoDetect block below.  Why:
+  //   * RDPWrapKit always connects to loopback (RDP_LOOPBACK_IP), so bandwidth auto-detection
+  //     has nothing meaningful to measure.  networkautodetect:i:1 ("Detect connection quality
+  //     automatically") regularly settles on a slow profile and causes lag.
+  //   * networkautodetect:i:0 with no explicit "connection type" key falls back to 56 kbps,
+  //     which lags even harder on a link that has no bandwidth limit to detect in the first place.
+  // New shortcuts therefore always get networkautodetect:i:0 / bandwidthautodetect:i:0 /
+  // connection type:i:6 (LAN, 10 Mbps or higher) from WriteRDPFileDirect and from the
+  // GenerateRDPPowerShellScript fallback.  When EDITING an existing shortcut we repair only the
+  // broken states - auto-detect left on, or a missing connection type - and otherwise leave
+  // whatever the user selected in the advanced mstsc /edit page (WAN, Satellite, ...) untouched.
   PSScript :=
     '$path = ''' + RdpPath + '''' + #13#10 +
     '$lines = if (Test-Path $path) { [System.IO.File]::ReadAllLines($path) } else { @() }' + #13#10 +
@@ -7897,14 +7916,30 @@ begin
     '  if (-not $found) { $lines += $val }' + #13#10 +
     '  return ,$lines' + #13#10 +
     '}' + #13#10 +
+    // Conditional connectivity repair: only act when the file is in a laggy state.
+    //  $autoDetect  = networkautodetect:i:1 (Auto-detect) is enabled
+    //  $hasConnType = an explicit "connection type:i:N" key exists
+    // If auto-detect is on we turn it off and pin the WAN profile (type 5); a type chosen
+    // while auto-detect was on is ignored by mstsc anyway, so nothing of value is lost.
+    // If no connection type exists at all we append type 5, because autodetect-off without a
+    // type falls back to 56 kbps.  An explicit user choice (e.g. type 6 = LAN) is left alone.
+    '$autoDetect = $false' + #13#10 +
+    '$hasConnType = $false' + #13#10 +
+    'foreach ($l in $lines) {' + #13#10 +
+    '  if ([regex]::IsMatch($l, ''^networkautodetect:i:1\s*$'')) { $autoDetect = $true }' + #13#10 +
+    '  if ([regex]::IsMatch($l, ''^connection type:'')) { $hasConnType = $true }' + #13#10 +
+    '}' + #13#10 +
+    'if ($autoDetect -or (-not $hasConnType)) {' + #13#10 +
+    '  $lines = Set-RdpKey $lines "networkautodetect" "networkautodetect:i:0"' + #13#10 +
+    '  $lines = Set-RdpKey $lines "bandwidthautodetect" "bandwidthautodetect:i:0"' + #13#10 +
+    '  $lines = Set-RdpKey $lines "connection type" "connection type:i:6"' + #13#10 +
+    '}' + #13#10 +
     '$lines = Set-RdpKey $lines "screen mode id" "screen mode id:i:' + IntToStr(ScreenModeId) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "desktopwidth" "desktopwidth:i:' + IntToStr(DesktopWidth) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "desktopheight" "desktopheight:i:' + IntToStr(DesktopHeight) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "use multimon" "use multimon:i:' + IntToStr(UseMultiMon) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "audiomode" "audiomode:i:' + IntToStr(AudioMode) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "redirectclipboard" "redirectclipboard:i:' + IntToStr(RedirectClipboard) + '"' + #13#10 +
-    '$lines = Set-RdpKey $lines "networkautodetect" "networkautodetect:i:1"' + #13#10 +
-    '$lines = Set-RdpKey $lines "bandwidthautodetect" "bandwidthautodetect:i:1"' + #13#10 +
     '$lines = Set-RdpKey $lines "disable wallpaper" "disable wallpaper:i:' + IntToStr(DisableWallpaper) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "allow font smoothing" "allow font smoothing:i:' + IntToStr(AllowFontSmooth) + '"' + #13#10 +
     '$lines = Set-RdpKey $lines "allow desktop composition" "allow desktop composition:i:' + IntToStr(AllowComposition) + '"' + #13#10 +
