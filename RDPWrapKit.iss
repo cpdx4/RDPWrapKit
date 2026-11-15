@@ -484,6 +484,23 @@ var
   UserCreateFailures: TStringList;   // 'username|reason' entries
   UserCreateFailureShown: Boolean;   // ensures the failure popup shows only once
   BusyDepth: Integer;                // Reentrancy guard: non-zero when a background/install action is active
+  // Reentrancy guard for CurPageChanged. The PowerShell/cmd watchdogs pump the
+  // window message queue (WaitWithUI -> PumpMessages), so a queued Back/Next click
+  // is dispatched while a page is still being populated. Without this flag that
+  // click re-enters CurPageChanged and starts a second populate pass - which is
+  // how two PowerShell queries ended up sharing one temp output file and aborted
+  // Setup with "Cannot open file ...psout.txt ... used by another process".
+  PagePopulateActive: Boolean;
+  // Deferred focus request. CurPageChanged freezes the Back/Next buttons while a
+  // page is being populated, so any ActiveControl assignment made from inside
+  // PopulateCurrentPage must be postponed until the buttons are enabled again -
+  // focusing a disabled control aborts Setup with
+  // "Runtime error: Cannot focus a disabled or invisible window".
+  FocusNextButtonAfterPopulate: Boolean;
+  // Monotonic counter used by NextTempToken to build unique per-call temp file
+  // names. Temp names used to be constants ({tmp}\psout.txt, {tmp}\psall.txt,
+  // {tmp}\cmd_<tag>.log), so any overlap made two helpers fight over one file.
+  TempFileSeq: Integer;
 
 const
   // -------------------------------------------------------------------------
@@ -1386,6 +1403,19 @@ end;
 function TempFile(const FileName: string): string;
 begin
   Result := ExpandConstant('{tmp}\' + FileName);
+end;
+
+// Return a token that is unique for the lifetime of this Setup process.
+// Every helper that writes a temp file MUST include it in the file name: the
+// watchdogs pump the message queue, so a helper can legitimately be entered again
+// while a previous instance is still running. With fixed names the second child
+// opened the file the first child still held, and Setup died with
+// "Cannot open file ...\psout.txt. The process cannot access the file because it
+// is being used by another process."
+function NextTempToken: string;
+begin
+  Inc(TempFileSeq);
+  Result := IntToStr(GetTickCount) + '_' + IntToStr(TempFileSeq);
 end;
 
 // -----------------------------------------------------------------------------
@@ -2406,8 +2436,16 @@ begin
   end
   else if StartFailed then
   begin
-    LogError('WaitForChildCompletion[' + Tag + ']: the PowerShell child never reported a PID within ' +
+    LogError('WaitForChildCompletion[' + Tag + ']: the child never reported a PID within ' +
       IntToStr(GetTickCount - StartTick) + 'ms - assuming it failed to start');
+    // A host that never reported its PID can still be alive. Terminate it before
+    // returning: an orphaned child keeps the helper's output file open, which used
+    // to leak into the next query and end in a "file in use" runtime error.
+    if KillImage <> '' then
+      KillProcessImage(KillImage)
+    else
+      LogWarn('WaitForChildCompletion[' + Tag + ']: no image name to kill by - an orphaned child ' +
+        '(if any) exits on its own; temp files are per-call unique, so it cannot disturb later queries');
     Result := True;
   end
   else if ChildGone then
@@ -2582,7 +2620,7 @@ end;
 function RunCmdCaptureText(const CmdLine, OutTag: string; TimeoutMs: Integer;
   var ExitCodeOut: Integer): string;
 var
-  OutPath, DonePath, FullCmd, KillImage: string;
+  OutPath, DonePath, FullCmd, KillImage, Token: string;
   TimedOut: Boolean;
   OpTick: Cardinal;
   LaunchRc, ChildPid: Integer;
@@ -2592,8 +2630,11 @@ begin
   Result := '';
   ExitCodeOut := -1;
   TimedOut := False;
-  OutPath := TempFile('cmd_' + SanitizeFileName(OutTag) + '.log');
-  DonePath := TempFile('cmd_' + SanitizeFileName(OutTag) + '.done');
+  // Unique per call: the watchdog pumps the message queue, so this function can be
+  // re-entered while a previous instance is still running.
+  Token := NextTempToken;
+  OutPath := TempFile('cmd_' + SanitizeFileName(OutTag) + '_' + Token + '.log');
+  DonePath := TempFile('cmd_' + SanitizeFileName(OutTag) + '_' + Token + '.done');
   DeleteFile(OutPath);
   DeleteFile(DonePath);
 
@@ -2640,7 +2681,7 @@ end;
 // is deleted, so no external log files remain.
 function GetPSOutput(const Command: string): string;
 var
-  PSPath, DonePath, PidPath, ScriptPath, Body: string;
+  PSPath, DonePath, PidPath, ScriptPath, Body, Token: string;
   RC: Integer;
   SL: TStringList;
   j: Integer;
@@ -2652,10 +2693,16 @@ begin
   Result := '';
   RC := -1;
   TimedOut := False;
-  PSPath := TempFile('psout.txt');
-  DonePath := TempFile('psout.done');
-  PidPath := TempFile('psout.pid');
-  ScriptPath := TempFile('psquery.ps1');
+  // Every path below carries a unique token. The watchdog pumps the message queue,
+  // so a queued Back/Next click can re-enter this function (through
+  // CurPageChanged) while the previous query is still running; with the old fixed
+  // names the two queries shared one output file, which aborted Setup with
+  // "Cannot open file ...psout.txt ... used by another process".
+  Token := NextTempToken;
+  PSPath := TempFile('psout_' + Token + '.txt');
+  DonePath := TempFile('psout_' + Token + '.done');
+  PidPath := TempFile('psout_' + Token + '.pid');
+  ScriptPath := TempFile('psquery_' + Token + '.ps1');
   DeleteFile(PSPath);
   DeleteFile(DonePath);
   DeleteFile(PidPath);
@@ -2684,8 +2731,18 @@ begin
   begin
     SL := TStringList.Create;
     try
-      SL.LoadFromFile(PSPath);
-      Result := Trim(SL.Text);
+      try
+        SL.LoadFromFile(PSPath);
+        Result := Trim(SL.Text);
+      except
+        // The child has written its completion marker but may still hold the
+        // output file open (an antivirus scanner can too). This is a status
+        // readout, so a locked file must never abort the wizard the way the old
+        // try..finally did: degrade to '' exactly like ReadTextFileSafe.
+        SL.Clear;
+        Result := '';
+        LogWarn('GetPSOutput: output file could not be read (still in use?) - treating output as empty');
+      end;
       // Log captured output to main installer log
       if Length(Result) > 0 then
       begin
@@ -2697,11 +2754,15 @@ begin
         LogDebug('GetPSOutput: output file empty');
     finally
       SL.Free;
-      DeleteFile(PSPath);
     end;
   end
   else
     LogDebug('GetPSOutput: no output (RC=' + IntToStr(RC) + ')');
+  // Clean up on EVERY exit path. The old code deleted the output file only on the
+  // success path, so a timeout or a failed read left a locked file behind.
+  DeleteFile(PSPath);
+  DeleteFile(DonePath);
+  DeleteFile(PidPath);
   LogDebug('GetPSOutput exit=' + IntToStr(RC) + ' resultLen=' + IntToStr(Length(Result)) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('GetPSOutput');
 end;
@@ -2712,7 +2773,7 @@ end;
 // is deleted, so no external log files remain.
 function ExecPSCaptureAll(const Command: string; var ResultCode: Integer): string;
 var
-  PSPath, DonePath, PidPath, ScriptPath, WrappedCommand: string;
+  PSPath, DonePath, PidPath, ScriptPath, WrappedCommand, Token: string;
   SL: TStringList;
   j: Integer;
   TimedOut: Boolean;
@@ -2725,8 +2786,12 @@ begin
   ResultCode := -1;
   TimedOut := False;
   Finished := False;
-  PSPath := TempFile('psall.txt');
-  DonePath := TempFile('psall.done');
+  // Unique per call for the same reason as GetPSOutput: the watchdog pumps the
+  // message queue, so this function can be re-entered while a previous instance
+  // is still writing its output file.
+  Token := NextTempToken;
+  PSPath := TempFile('psall_' + Token + '.txt');
+  DonePath := TempFile('psall_' + Token + '.done');
   DeleteFile(PSPath);
   DeleteFile(DonePath);
 
@@ -2738,8 +2803,8 @@ begin
   // the original field log impossible to diagnose: the installer stopped inside
   // this function with no record of the PowerShell it was waiting for.
   WrappedCommand := '  & { ' + Command + ' } *>&1 | Out-File -Encoding UTF8 ''' + PSPath + ''' -Force';
-  PidPath := TempFile('psall.pid');
-  ScriptPath := TempFile('pscapture.ps1');
+  PidPath := TempFile('psall_' + Token + '.pid');
+  ScriptPath := TempFile('pscapture_' + Token + '.ps1');
   DeleteFile(PidPath);
   SaveStringToFile(ScriptPath,
     BuildTrackedPSScript(WrappedCommand, DonePath, PidPath, PSPath), False);
@@ -2754,8 +2819,16 @@ begin
   begin
     SL := TStringList.Create;
     try
-      SL.LoadFromFile(PSPath);
-      Result := Trim(SL.Text);
+      try
+        SL.LoadFromFile(PSPath);
+        Result := Trim(SL.Text);
+      except
+        // Same reasoning as GetPSOutput: an output file that is still held open
+        // must never abort Setup, it only loses the captured text.
+        SL.Clear;
+        Result := '';
+        LogWarn('ExecPSCaptureAll: output file could not be read (still in use?) - treating output as empty');
+      end;
       // Log captured output to main installer log
       if Length(Result) > 0 then
       begin
@@ -2771,14 +2844,16 @@ begin
         LogDebug('ExecPSCaptureAll: output file empty');
     finally
       SL.Free;
-      DeleteFile(PSPath);
     end;
   end
   else if TimedOut then
     LogError('ExecPSCaptureAll: TIMEOUT with no output at all - the PowerShell child produced nothing before it was killed')
   else
     LogDebug('ExecPSCaptureAll: no output file');
+  // Clean up on EVERY exit path, including timeout and failed-read cases.
+  DeleteFile(PSPath);
   DeleteFile(DonePath);
+  DeleteFile(PidPath);
 
   if TimedOut then
   begin
@@ -9058,6 +9133,112 @@ begin
     ALabel.Font.Color := clBlack;
 end;
 
+// -----------------------------------------------------------------------------
+// RDP LISTENER PROBE (netstat, no PowerShell child)
+// -----------------------------------------------------------------------------
+// The Show RDP Info page used to answer "is RDP listening?" with a PowerShell
+// child (Get-NetTCPConnection). That started a script host on every visit to the
+// page just to render one status line, made Back/Next navigation slow, and gave
+// the page a file-backed child process to race against. netstat returns the same
+// answer from a tiny console tool that exits immediately.
+
+// Returns the Nth whitespace-separated field of a line (0-based), '' when absent.
+function ExtractWhitespaceField(const Line: string; Index: Integer): string;
+var
+  i, Count: Integer;
+  Cur: string;
+begin
+  Result := '';
+  Count := 0;
+  Cur := '';
+  for i := 1 to Length(Line) do
+  begin
+    if (Line[i] = ' ') or (Line[i] = #9) then
+    begin
+      if Cur <> '' then
+      begin
+        if Count = Index then
+        begin
+          Result := Cur;
+          exit;
+        end;
+        Inc(Count);
+        Cur := '';
+      end;
+    end
+    else
+      Cur := Cur + Line[i];
+  end;
+  if (Cur <> '') and (Count = Index) then
+    Result := Cur;
+end;
+
+// True when a netstat line reports a listening socket on Port. This is language
+// independent on purpose: a listening socket always has a wildcard foreign
+// address (0.0.0.0:0 or [::]:0), so no localised state word ("LISTENING",
+// "ABHÖREN", ...) is needed to recognise it.
+function NetstatLineShowsListener(const Line: string; Port: Cardinal): Boolean;
+var
+  LocalAddr, PeerAddr, PortSuffix: string;
+begin
+  Result := False;
+  LocalAddr := ExtractWhitespaceField(Line, 1);
+  PeerAddr := ExtractWhitespaceField(Line, 2);
+  if (LocalAddr = '') or (PeerAddr = '') then
+    exit;
+  PortSuffix := ':' + IntToStr(Port);
+  if Length(LocalAddr) < Length(PortSuffix) then
+    exit;
+  if Copy(LocalAddr, Length(LocalAddr) - Length(PortSuffix) + 1, Length(PortSuffix)) <> PortSuffix then
+    exit;
+  Result := (PeerAddr = '0.0.0.0:0') or (PeerAddr = '[::]:0');
+end;
+
+// Returns 'Listening on port N' or 'Not Listening on port N' for Port.
+function GetRdpListenerStatus(Port: Cardinal): string;
+var
+  NetstatOut: string;
+  SL: TStringList;
+  i, RC: Integer;
+  Listening: Boolean;
+begin
+  LogEntry('GetRdpListenerStatus');
+  NetstatOut := '';
+  RC := -1;
+  Listening := False;
+  NetstatOut := RunCmdCaptureText('netstat.exe -ano -p tcp', 'RdpListener', PS_TIMEOUT_NET, RC);
+  if NetstatOut <> '' then
+  begin
+    SL := TStringList.Create;
+    try
+      try
+        SL.Text := NetstatOut;
+        for i := 0 to SL.Count - 1 do
+        begin
+          if NetstatLineShowsListener(SL[i], Port) then
+          begin
+            Listening := True;
+            break;
+          end;
+        end;
+      except
+        LogWarn('GetRdpListenerStatus: could not parse netstat output - assuming not listening');
+        Listening := False;
+      end;
+    finally
+      SL.Free;
+    end;
+  end
+  else
+    LogWarn('GetRdpListenerStatus: netstat produced no output (exit=' + IntToStr(RC) + ')');
+
+  if Listening then
+    Result := 'Listening on port ' + IntToStr(Port)
+  else
+    Result := 'Not Listening on port ' + IntToStr(Port);
+  LogDebug('GetRdpListenerStatus: ' + Result + ' (netstat exit=' + IntToStr(RC) + ')');
+end;
+
 // Writes every recommended value for the Low FPS / lag quick fix.
 procedure ApplyLowFPSRecommended;
 begin
@@ -9171,6 +9352,7 @@ begin
   LastLoggedPageId := -1;
   LastLoggedPageTick := 0;
   LastSuppressedPageLogs := 0;
+  FocusNextButtonAfterPopulate := False;
   PendingDebugCleanupFiles := TStringList.Create;
 
   if SimulateNoMstsc then
@@ -12305,7 +12487,10 @@ begin
   LogExit('ShowShortcutNameEdit');
 end;
 
-procedure CurPageChanged(CurPageID: Integer);
+// Populates the page that has just become visible. Never call this directly: call
+// CurPageChanged, which guards against re-entrancy and freezes navigation while
+// the populate pass runs.
+procedure PopulateCurrentPage(CurPageID: Integer);
 var
   i: Integer;
   CompletionText: string;
@@ -12543,7 +12728,12 @@ begin
   if CurPageID = Page_ShortcutSettings.ID then
   begin
     WizardForm.NextButton.Caption := SetupMessage(msgButtonNext);
-    WizardForm.ActiveControl := WizardForm.NextButton;  // prevent cboResolution from receiving initial focus
+    // Prevent cboResolution from receiving initial focus (a stray mouse wheel over
+    // the focused combo box silently changed the resolution). The focus itself is
+    // applied by CurPageChanged once the navigation buttons are re-enabled - the
+    // Next button is disabled during the populate pass, so focusing it here would
+    // fail with "Cannot focus a disabled or invisible window".
+    FocusNextButtonAfterPopulate := True;
 
     if SelectedInstallMode = installModeEditShortcuts then
     begin
@@ -12786,11 +12976,10 @@ begin
     else
       PortNumber := RDP_LISTEN_PORT;
 
-    ListenerStatus := GetPSOutput('$( $p = ' + IntToStr(PortNumber) + '; if (@(Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue).Count -gt 0) { ''Listening on port '' + $p } else { ''Not Listening on port '' + $p } )');
-    if ListenerStatus = '' then
-      lblListener.Caption := 'Not Listening on port ' + IntToStr(PortNumber)
-    else
-      lblListener.Caption := ListenerStatus;
+    // Answered from netstat under the process watchdog (GetRdpListenerStatus):
+    // no PowerShell child is started just to render this status line.
+    ListenerStatus := GetRdpListenerStatus(PortNumber);
+    lblListener.Caption := ListenerStatus;
     SetShowRDPInfoValueColor(lblListener, lblListener.Caption);
 
     // Show the recovery hints in the empty area under the status rows. Each hint is
@@ -13209,6 +13398,63 @@ begin
     else
     begin
       WriteInstallerLog('CurPageChanged: ERROR - ViewLogLink is NOT assigned!');
+    end;
+  end;
+end;
+
+// Inno entry point. The PowerShell/cmd watchdogs pump the Windows message queue
+// (WaitWithUI -> PumpMessages), so a queued Back/Next click is dispatched while a
+// page is still being populated. Two things must therefore be true here:
+//   1. a re-entrant call must not start a second populate pass, and
+//   2. navigation must be frozen for the duration of the pass, otherwise the click
+//      changes pages underneath it and the new page is never populated.
+// Ignoring the click instead of freezing the buttons was not enough: the wizard
+// still switched pages, leaving that page half-populated.
+procedure CurPageChanged(CurPageID: Integer);
+var
+  PrevBackEnabled, PrevNextEnabled: Boolean;
+begin
+  if PagePopulateActive then
+  begin
+    LogDebug('CurPageChanged: re-entrant call for ' + GetPageNameById(CurPageID) +
+      ' ignored while the previous page is still being populated');
+    exit;
+  end;
+
+  PagePopulateActive := True;
+  PrevBackEnabled := WizardForm.BackButton.Enabled;
+  PrevNextEnabled := WizardForm.NextButton.Enabled;
+  WizardForm.BackButton.Enabled := False;
+  WizardForm.NextButton.Enabled := False;
+  try
+    PopulateCurrentPage(CurPageID);
+  finally
+    // Only undo the change made above: when the page logic deliberately enables or
+    // disables a navigation button (e.g. the Remove Users confirmation page), that
+    // decision wins.
+    if not WizardForm.BackButton.Enabled then
+      WizardForm.BackButton.Enabled := PrevBackEnabled;
+    if not WizardForm.NextButton.Enabled then
+      WizardForm.NextButton.Enabled := PrevNextEnabled;
+    PagePopulateActive := False;
+  end;
+
+  // Apply any focus request that was made while the navigation buttons were
+  // frozen for the populate pass. Doing it here guarantees the target button is
+  // enabled and visible again, and that no page is half-populated while it takes
+  // focus.
+  if FocusNextButtonAfterPopulate then
+  begin
+    FocusNextButtonAfterPopulate := False;
+    if Assigned(WizardForm) and Assigned(WizardForm.NextButton) and
+       WizardForm.NextButton.Visible and WizardForm.NextButton.Enabled then
+    begin
+      try
+        WizardForm.ActiveControl := WizardForm.NextButton;
+      except
+        LogDebug('CurPageChanged: could not focus the Next button after populating ' +
+          GetPageNameById(CurPageID));
+      end;
     end;
   end;
 end;
