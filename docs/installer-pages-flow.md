@@ -71,7 +71,7 @@ flowchart TD
 - **Shortcut Settings Page**: Configure RDP session options (resolution, full screen, audio, clipboard, etc.) for shortcuts being created or edited.
 - **Edit System-wide Settings Page**: Change RDP port, enable/disable RDP, show users on login screen, prevent duplicate sessions, etc. (shown only in system settings mode).
 - **Installing**: Shows progress indicators and step-by-step status of each operation.
-- **Finish Page**: Summary of completed actions and links. A persistent **Show Install Log** link is available in the lower-left corner of the wizard footer on every page, so it never overlaps the Back / Next / Cancel buttons.
+- **Finish Page**: Summary of completed actions and links. A persistent **Show Install Log** link is available in the lower-left corner of the wizard footer on every page, so it never overlaps the Back / Next / Cancel buttons. When the run created at least one new Desktop shortcut (new users with shortcuts, or shortcuts created for existing users), the page also shows the reference screenshot `docs/installer-images/DesktopShortcut.png` so the user knows what to look for on the Desktop.
 
 ---
 

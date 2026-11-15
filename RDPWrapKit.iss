@@ -71,6 +71,9 @@ Source: "output\RdpSignTool.exe"; DestDir: "{tmp}"; Flags: ignoreversion dontcop
 Source: "assets\RDPWrapKitIcon.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
 Source: "assets\rdp_edit_save.bmp"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 Source: "assets\RDPWrapInstallerBG.bmp"; DestDir: "{tmp}"; Flags: ignoreversion dontcopy
+; Desktop-shortcut screenshot shown on Finish pages that report a newly created shortcut.
+; Loaded through TBitmapImage.PngImage, which requires Inno Setup 6.5.2 or later.
+Source: "docs\installer-images\DesktopShortcut.png"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 Source: "assets\restore_term_service.reg"; DestDir: "{tmp}"; Flags: ignoreversion skipifsourcedoesntexist dontcopy
 
 
@@ -256,6 +259,7 @@ var
   SelectedShortcutPath: string;
   SelectedShortcutPaths: TStringList;
   FinishedExampleImage: TBitmapImage;
+  FinishedShortcutImage: TBitmapImage;
   EditShortcutAdvancedImage: TBitmapImage;
   EditShortcutAdvancedLabel: TLabel;
   AdvancedEditShortcutPath: string;  // Set during ssPostInstall to trigger unsign→mstsc→resign for new-shortcut advanced editing
@@ -601,9 +605,11 @@ const
   // Using constants avoids repeated ExpandConstant() calls
   FILE_ICON_BMP = 'RDPWrapKitIcon.bmp';
   FILE_RDPEDITSAVE_BMP = 'rdp_edit_save.bmp';
+  FILE_DESKTOPSHORTCUT_PNG = 'DesktopShortcut.png';
   TEMP_LOCAL_USERS = '{tmp}\\local_users.txt';
   TEMP_ICON_BMP = '{tmp}\\' + FILE_ICON_BMP;
   TEMP_RDPEDITSAVE_BMP = '{tmp}\\' + FILE_RDPEDITSAVE_BMP;
+  TEMP_DESKTOPSHORTCUT_PNG = '{tmp}\\' + FILE_DESKTOPSHORTCUT_PNG;
   // Path to installer log file (auto-created in %TEMP%)
   INSTALL_LOG_PATH = '{tmp}\\RDPWrapKit_install.log';
   
@@ -10326,6 +10332,16 @@ begin
   FinishedExampleImage.Height := ScaleY(150);
   FinishedExampleImage.Stretch := False;
   FinishedExampleImage.Visible := False;
+
+  // Screenshot of a freshly created Desktop shortcut. Shown on the Finish page
+  // only when this run created at least one new shortcut. The bitmap is loaded
+  // lazily on the Finish page so runs that create no shortcut never extract it.
+  FinishedShortcutImage := TBitmapImage.Create(WizardForm.FinishedLabel.Parent);
+  FinishedShortcutImage.Parent := WizardForm.FinishedLabel.Parent;
+  FinishedShortcutImage.Width := ScaleX(180);
+  FinishedShortcutImage.Height := ScaleY(129);
+  FinishedShortcutImage.Stretch := True;
+  FinishedShortcutImage.Visible := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -11963,6 +11979,11 @@ var
   NowTick: Cardinal;
   RemovedCount: Integer;
   FailNames: string;
+  ShowShortcutShot: Boolean;
+  ImgW: Integer;
+  ImgH: Integer;
+  ImgLeft: Integer;
+  ImgTop: Integer;
   IsDuplicatePageEvent: Boolean;
   DeltaMs: Cardinal;
   DisplayVersion: string;
@@ -12492,6 +12513,10 @@ begin
   begin
     // Reset optional finish-page image controls by default.
     if Assigned(FinishedExampleImage) then FinishedExampleImage.Visible := False;
+    if Assigned(FinishedShortcutImage) then FinishedShortcutImage.Visible := False;
+    // Restore the full text width in case a previous visit narrowed it to make
+    // room for the desktop-shortcut screenshot.
+    if Assigned(FinishedText) then FinishedText.Width := WizardForm.FinishedLabel.Width;
 
     WriteInstallerLog('CurPageChanged: Finish page shown');
     if SelectedInstallMode = installModeUninstall then
@@ -12762,7 +12787,52 @@ begin
     begin
       WriteInstallerLog('CurPageChanged: ERROR - FinishedText control is NOT assigned!');
     end;
-    
+
+    // Show a screenshot of the Desktop shortcut whenever this run created one
+    // (new users with shortcuts, or shortcuts created for existing users), so
+    // the user immediately knows what to look for on the Desktop.
+    ShowShortcutShot := (SelectedInstallMode = installModeInstall) and
+      (Assigned(CreatedUsersList) and Assigned(ShortcutsList)) and
+      ((CreatedUsersList.Count > 0) or (ShortcutsList.Count > 0));
+    if ShowShortcutShot and Assigned(FinishedShortcutImage) and Assigned(FinishedText) then
+    begin
+      try
+        ExtractTemporaryFile(FILE_DESKTOPSHORTCUT_PNG);
+        FinishedShortcutImage.PngImage.LoadFromFile(ExpandConstant(TEMP_DESKTOPSHORTCUT_PNG));
+        // Re-apply the scaled bounds in case loading resized the control to the
+        // raw PNG dimensions.
+        ImgW := ScaleX(180);
+        ImgH := ScaleY(129);
+        FinishedShortcutImage.Width := ImgW;
+        FinishedShortcutImage.Height := ImgH;
+        ImgLeft := FinishedText.Left + WizardForm.FinishedLabel.Width - ImgW;
+        ImgTop := FinishedText.Top + FinishedText.Height + ScaleY(10);
+        if ImgTop + ImgH <= FinishedText.Parent.Height - ScaleY(8) then
+        begin
+          // Room below the summary: keep the full text width and simply drop the
+          // screenshot underneath it, right-aligned.
+          FinishedShortcutImage.Left := ImgLeft;
+          FinishedShortcutImage.Top := ImgTop;
+        end
+        else
+        begin
+          // Tight page: park the screenshot at the top-right and wrap the text to
+          // its left so the two controls never overlap.
+          FinishedShortcutImage.Left := ImgLeft;
+          FinishedShortcutImage.Top := FinishedText.Top;
+          FinishedText.Width := WizardForm.FinishedLabel.Width - ImgW - ScaleX(16);
+          FinishedText.AutoSize := True;
+          FinishedText.Update;
+        end;
+        FinishedShortcutImage.Visible := True;
+        WriteInstallerLog('CurPageChanged: Showing desktop shortcut screenshot on the Finish page (' +
+          IntToStr(FinishedShortcutImage.Left) + ',' + IntToStr(FinishedShortcutImage.Top) + ')');
+      except
+        FinishedShortcutImage.Visible := False;
+        WriteInstallerLog('CurPageChanged: WARNING - could not load desktop shortcut screenshot');
+      end;
+    end;
+
     if Assigned(ViewLogLink) then
     begin
       WriteInstallerLog('CurPageChanged: ViewLogLink is assigned');
