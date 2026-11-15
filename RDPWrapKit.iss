@@ -12,7 +12,7 @@
 ;   - Automatic installation of TermWrap (llccd)
 ;   - VC++ Redistributable dependency management
 ;   - User account creation with automatic RDP shortcuts
-;   - Security hardening (Windows Defender exclusions, secure credential handling)
+;   - Security hardening (secure credential handling)
 ;   - Create Shortcuts flow for existing users and shortcuts
 ;   - Complete uninstallation support with registry cleanup
 ;
@@ -321,8 +321,6 @@ var
   chkRestartRDP: TCheckBox;
   // Progress UI on Installing page
   StepsHeaderLabel: TLabel;
-  StepAddExcl: TLabel;
-  StepRemoveExcl: TLabel;
   StepDisableRdpWrapperTask: TLabel;
   StepStopSvc: TLabel;
   StepEnsureVC: TLabel;
@@ -489,8 +487,6 @@ const
   // USER INTERFACE TEXT
   // -------------------------------------------------------------------------
   // Step text constants for progress checklist - displayed during installation
-  TXT_AddExcl = 'Add Windows Defender exclusion';
-  TXT_RemoveExcl = 'Remove Windows Defender exclusion';
   TXT_DisableRdpWrapperTask = 'Disable RDP Wrapper autoupdate task';
   TXT_StopSvc = 'Stop Remote Desktop Services';
   TXT_StartSvc = 'Start Remote Desktop Services';
@@ -2075,20 +2071,23 @@ begin
 end;
 
 // Derive the executable image name from a command line (used for the kill-by-image
-// fallback). "C:\x\Tool.exe" "file" -> Tool.exe ; net.exe localgroup ... -> net.exe
+// fallback). "C:\x\Tool.exe" "file" -> Tool.exe ; net.exe localgroup "G" -> net.exe
+// NOTE: only a quote in the FIRST position means the executable path is quoted -
+// later quotes belong to arguments (a quoted group name used to be mistaken for
+// the executable, which made the timeout kill a no-op).
 function ImageNameFromCmdLine(const CmdLine: string): string;
 var
   P1, P2: Integer;
 begin
   Result := '';
-  P1 := Pos('"', CmdLine);
-  if P1 > 0 then
+  if Pos('"', CmdLine) = 1 then
   begin
-    P2 := Pos('"', Copy(CmdLine, P1 + 1, Length(CmdLine)));
+    P1 := 1;
+    P2 := Pos('"', Copy(CmdLine, 2, Length(CmdLine)));
     if P2 > 0 then
-      Result := ExtractFileName(Copy(CmdLine, P1 + 1, P2 - 1))
+      Result := ExtractFileName(Copy(CmdLine, 2, P2 - 1))
     else
-      Result := ExtractFileName(Copy(CmdLine, P1 + 1, Length(CmdLine)));
+      Result := ExtractFileName(Copy(CmdLine, 2, Length(CmdLine)));
   end
   else
     Result := ExtractFileName(Copy(CmdLine, 1, Pos(' ', CmdLine + ' ') - 1));
@@ -4985,38 +4984,6 @@ begin
   Log('DEBUG: PreTrustRDPCertCurrentUser exit code = ' + IntToStr(ResultCode) + ' (0=success, 1=error)');
 end;
 
-procedure AddDefenderExclusionForApp;
-var
-  ResultCode: Integer;
-  OpTick: Cardinal;
-begin
-  LogEntry('AddDefenderExclusionForApp');
-  OpTick := GetTickCount;
-  // Ensure Defender exclusions are scoped to the two runtime DLLs only
-  ExecPowerShellHidden(
-    '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
-    'try { $p = Get-MpPreference; foreach ($path in $paths) { if (-not ($p.ExclusionPath -contains $path)) { Add-MpPreference -ExclusionPath $path } } } catch { }',
-    ResultCode);
-  LogDebug('AddDefenderExclusionForApp: exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
-  LogExit('AddDefenderExclusionForApp');
-end;
-
-procedure RemoveDefenderExclusionForApp;
-var
-  ResultCode: Integer;
-  OpTick: Cardinal;
-begin
-  LogEntry('RemoveDefenderExclusionForApp');
-  OpTick := GetTickCount;
-  // Remove Defender exclusions for the two runtime DLLs during uninstall
-  ExecPowerShellHidden(
-    '$paths = @(''' + ExpandConstant('{app}\TermWrap.dll') + ''',''' + ExpandConstant('{app}\Zydis.dll') + '''); ' +
-    'try { foreach ($path in $paths) { Remove-MpPreference -ExclusionPath $path } } catch { }',
-    ResultCode);
-  LogDebug('RemoveDefenderExclusionForApp: exit=' + IntToStr(ResultCode) + ' [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
-  LogExit('RemoveDefenderExclusionForApp');
-end;
-
 // -----------------------------------------------------------------------------
 // WINDOWS SERVICE MANAGEMENT
 // -----------------------------------------------------------------------------
@@ -7803,8 +7770,6 @@ end;
 // Hide all step labels before laying out the ones relevant to the selected mode
 procedure HideAllStepLabels;
 begin
-  if Assigned(StepAddExcl) then StepAddExcl.Visible := False;
-  if Assigned(StepRemoveExcl) then StepRemoveExcl.Visible := False;
   if Assigned(StepStopSvc) then StepStopSvc.Visible := False;
   if Assigned(StepEnsureVC) then StepEnsureVC.Visible := False;
   if Assigned(StepInstallTermWrap) then StepInstallTermWrap.Visible := False;
@@ -10226,8 +10191,6 @@ begin
   StepTopBase := topPos;
   StepWidthVal := widthVal;
   StepStopSvc := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
-  StepAddExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);          topPos := topPos + ScaleY(16);
-  StepRemoveExcl := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);       topPos := topPos + ScaleY(16);
   StepDisableRdpWrapperTask := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal); topPos := topPos + ScaleY(16);
   StepEnsureVC := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);         topPos := topPos + ScaleY(16);
   StepInstallTermWrap := CreateStepLabel(WizardForm.InstallingPage, leftPos, topPos, widthVal);topPos := topPos + ScaleY(16);
@@ -11155,7 +11118,6 @@ begin
     begin
       StepsHeaderLabel.Caption := 'Uninstall Steps:';
       AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
-      AddStepPendingLabel(StepRemoveExcl, TXT_RemoveExcl);
       AddStepPendingLabel(StepRemoveFolder, TXT_RemoveFolder);
       AddStepPendingLabel(StepStartSvc, TXT_RestartSvc);
     end
@@ -11204,7 +11166,6 @@ begin
         AddStepPendingLabel(StepCheckMSTSC, TXT_CheckMSTSC);
         AddStepPendingLabel(StepInstallMSTSC, TXT_InstallMSTSC);
         AddStepPendingLabel(StepStopSvc, TXT_StopSvc);
-        AddStepPendingLabel(StepAddExcl, TXT_AddExcl);
         AddStepPendingLabel(StepEnsureVC, TXT_EnsureVC);
         if RdpWrapperAutoupdatePresent then
           AddStepPendingLabel(StepDisableRdpWrapperTask, TXT_DisableRdpWrapperTask);
@@ -11247,11 +11208,6 @@ begin
       StopTermService;
       SetStepDone(StepStopSvc, TXT_StopSvc);
       
-      // Remove Defender exclusion before deleting files
-      SetStepInProgress(StepRemoveExcl, TXT_RemoveExcl);
-      RemoveDefenderExclusionForApp;
-      SetStepDone(StepRemoveExcl, TXT_RemoveExcl);
-
       // Remove TermWrap.dll and Zydis.dll
       DeleteFile(AppBin(FILE_TERMWRAP));
       DeleteFile(AppBin(FILE_ZYDIS));
@@ -11306,10 +11262,6 @@ begin
       StopTermService;
       SetStepDone(StepStopSvc, TXT_StopSvc);
       
-      SetStepInProgress(StepAddExcl, TXT_AddExcl);
-      StatusOverlay.Caption := 'Adding Windows Defender exclusion...';
-      AddDefenderExclusionForApp;
-      SetStepDone(StepAddExcl, TXT_AddExcl);
       // Hide gauge before Inno Setup's internal file copy paints its own progress
       WizardForm.ProgressGauge.Visible := False;
     end;
@@ -11871,8 +11823,6 @@ begin
   // Handle removal when using the standard uninstaller
   if CurUninstallStep = usUninstall then
   begin
-    RemoveDefenderExclusionForApp;
-
     // Remove the RDP pre-trust entry written by PreTrustRDPCertCurrentUser
     ExecPowerShellHidden(
       '$ErrorActionPreference = ''Stop''; ' +

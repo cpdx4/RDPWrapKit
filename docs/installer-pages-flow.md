@@ -171,13 +171,12 @@ Options → Installing → Finish
 1. Check MSTSC version
 2. Install MSTSC (if needed)
 3. Stop RDP service
-4. Add Defender exclusion
-5. Install VC++ Redistributable (if needed)
-6. Install TermWrap components
-7. Configure RDP service
-8. Start RDP service
-9. Pre-trust RDP certificate for current user
-10. Verify RDP is listening
+4. Install VC++ Redistributable (if needed)
+5. Install TermWrap components
+6. Configure RDP service
+7. Start RDP service
+8. Pre-trust RDP certificate for current user
+9. Verify RDP is listening
 
 ---
 
@@ -198,17 +197,16 @@ Options → UserPage → ShortcutSettings → Installing → Finish
 **Installation Steps** (when `DoInstallTermWrap = True`):
 1. Check/Install MSTSC
 2. Stop RDP service
-3. Add Defender exclusion
-4. Install VC++ Redistributable (if needed)
-5. Install TermWrap components
-6. Configure RDP service
-7. Create each new user account with specified password
-8. Generate RDP shortcuts with configured settings
-9. Start RDP service
-10. Pre-trust RDP certificate for current user
-11. Verify RDP is listening
+3. Install VC++ Redistributable (if needed)
+4. Install TermWrap components
+5. Configure RDP service
+6. Create each new user account with specified password
+7. Generate RDP shortcuts with configured settings
+8. Start RDP service
+9. Pre-trust RDP certificate for current user
+10. Verify RDP is listening
 
-When `DoInstallTermWrap = False`, steps 1–6 and 9–11 are skipped; only user creation and shortcut generation occur.
+When `DoInstallTermWrap = False`, steps 1–5 and 8–10 are skipped; only user creation and shortcut generation occur.
 
 ---
 
@@ -229,16 +227,15 @@ Options → ExistingUsers → ShortcutSettings → Installing → Finish
 **Installation Steps** (when `DoInstallTermWrap = True`):
 1. Check/Install MSTSC
 2. Stop RDP service
-3. Add Defender exclusion
-4. Install VC++ Redistributable (if needed)
-5. Install TermWrap components
-6. Configure RDP service
-7. Generate RDP shortcuts for selected existing users
-8. Start RDP service
-9. Pre-trust RDP certificate for current user
-10. Verify RDP is listening
+3. Install VC++ Redistributable (if needed)
+4. Install TermWrap components
+5. Configure RDP service
+6. Generate RDP shortcuts for selected existing users
+7. Start RDP service
+8. Pre-trust RDP certificate for current user
+9. Verify RDP is listening
 
-When `DoInstallTermWrap = False`, steps 1–6 and 8–10 are skipped; only shortcut generation and pre-trust occur. This is the lightweight path for adding shortcuts to an already-configured machine.
+When `DoInstallTermWrap = False`, steps 1–5 and 7–9 are skipped; only shortcut generation and pre-trust occur. This is the lightweight path for adding shortcuts to an already-configured machine.
 
 ---
 
@@ -295,9 +292,8 @@ Options → Installing → Finish
 
 **Installation Steps**:
 1. Stop RDP service
-2. Remove Defender exclusion
-3. Remove TermWrap files and folder
-4. Start RDP service
+2. Remove TermWrap files and folder
+3. Start RDP service
 
 ---
 
