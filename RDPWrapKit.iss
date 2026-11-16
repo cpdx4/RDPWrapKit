@@ -1802,6 +1802,12 @@ begin
   LogEntry('ParseUserEntry');
   PipePos := Pos('|', Entry);
   UserName := Copy(Entry, 1, PipePos - 1);
+  // Windows stores the canonical account name without leading/trailing spaces
+  // (SAM normalises them at creation), so the in-memory copy must match or every
+  // later membership comparison fails even though the add itself succeeded
+  // (RDPWrapKit_install_20261115-161928.log, user "Roblox 9 "). The password is
+  // deliberately NOT trimmed: passwords may legitimately contain edge spaces.
+  UserName := Trim(UserName);
   Password := Copy(Entry, PipePos + 1, Length(Entry));
   LogDebug('ParseUserEntry: user=' + UserName + ' hasPassword=' + BoolToStr(Password <> ''));
   LogExit('ParseUserEntry');
@@ -2252,6 +2258,9 @@ function BuildAddGroupMemberPowerShellScript(const GroupSid, UserName, OutPath, 
 begin
   Result :=
     'param([string]$GroupSid, [string]$UserName, [string]$OutPath, [string]$SuccessTag)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it, so the WinNT
+    // member path and every comparison use the canonical name.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
     '  $computerName = $env:COMPUTERNAME' + #13#10 +
@@ -2267,7 +2276,7 @@ begin
     '  try { $group.Add($memberPath); $added = $true } catch { $addErr = $_.Exception.Message }' + #13#10 +
     '  if (-not $added) {' + #13#10 +
     '    $isMember = $false' + #13#10 +
-    '    try { foreach ($m in $group.Members()) { if ($m.Name -ieq $UserName) { $isMember = $true; break } } } catch { }' + #13#10 +
+    '    try { foreach ($m in $group.Members()) { if (("$($m.Name)").Trim() -ieq $UserName) { $isMember = $true; break } } } catch { }' + #13#10 +
     '    if (-not $isMember) { throw (''could not add the account to '' + $resolvedName + '': '' + $addErr) }' + #13#10 +
     '  }' + #13#10 +
     '  @($SuccessTag, (''Group={0}'' -f $resolvedName), (''GroupSid={0}'' -f $GroupSid), (''User={0}'' -f $UserName)) | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
@@ -2346,7 +2355,9 @@ begin
         MemberName := Copy(Line, BackslashPos + 1, MaxInt)
       else
         MemberName := Line;
-      if CompareText(MemberName, UserName) = 0 then
+      // Both sides are trimmed: MemberName comes from a trimmed output line, and
+      // UserName is trimmed here as defence in depth against untrimmed callers.
+      if CompareText(MemberName, Trim(UserName)) = 0 then
       begin
         Result := True;
         break;
@@ -5185,6 +5196,8 @@ function BuildCreateLocalUserPowerShellScript: string;
 begin
   Result :=
     'param([string]$UserName, [string]$Password, [string]$OutPath)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
     '  $computerName = $env:COMPUTERNAME' + #13#10 +
@@ -5239,6 +5252,8 @@ function BuildSetLocalUserStateScript: string;
 begin
   Result :=
     'param([string]$UserName, [int]$Enable, [string]$OutPath)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
     '  $user = [ADSI](''WinNT://'' + $env:COMPUTERNAME + ''/'' + $UserName + '',user'')' + #13#10 +
@@ -5260,6 +5275,8 @@ function BuildDeleteLocalUserPowerShellScript: string;
 begin
   Result :=
     'param([string]$UserName, [string]$OutPath)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
     '  $computerName = $env:COMPUTERNAME' + #13#10 +
@@ -5292,6 +5309,8 @@ function BuildUserExistsPowerShellScript: string;
 begin
   Result :=
     'param([string]$UserName, [string]$OutPath)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     'try {' + #13#10 +
     '  $computer = [ADSI](''WinNT://'' + $env:COMPUTERNAME + '',computer'')' + #13#10 +
     '  $found = $false' + #13#10 +
@@ -5311,6 +5330,9 @@ function BuildGroupMembershipPowerShellScript: string;
 begin
   Result :=
     'param([string]$GroupName, [string]$UserName, [string]$OutPath)' + #13#10 +
+    // Normalise the username exactly as Windows SAM stores it, so IsMember and
+    // the member enumeration compare against the canonical name.
+    '$UserName = "$UserName".Trim()' + #13#10 +
     '$ErrorActionPreference = ''Stop''' + #13#10 +
     'try {' + #13#10 +
     '  $computerName = $env:COMPUTERNAME' + #13#10 +
@@ -5319,7 +5341,7 @@ begin
     '  $found = $false' + #13#10 +
     '  try { if ($group.IsMember($memberPath)) { $found = $true } } catch { }' + #13#10 +
     '  if (-not $found) {' + #13#10 +
-    '    try { foreach ($m in $group.Members()) { if ($m.Name -ieq $UserName) { $found = $true; break } } } catch { }' + #13#10 +
+    '    try { foreach ($m in $group.Members()) { if (("$($m.Name)").Trim() -ieq $UserName) { $found = $true; break } } } catch { }' + #13#10 +
     '  }' + #13#10 +
     '  if ($found) {' + #13#10 +
     '    ''MEMBER=True'' | Out-File -FilePath $OutPath -Encoding UTF8' + #13#10 +
@@ -5626,6 +5648,17 @@ begin
     LogError('AddUserToGroupViaADSI: membership verification failed for group=' + GroupName + ' user=' + UserName);
     ErrorText := 'the account does not appear in the group after the add';
     Result := False;
+  end;
+
+  // Rescue path: the add step can report failure for a member that is actually
+  // present (ADSI/net.exe surface "already a member" as an error). Re-check
+  // once before giving up so a verifiable membership is never reported - or
+  // acted on downstream (account containment) - as a failure.
+  if (not Result) and ValidateGroupMembership(GroupName, UserName) then
+  begin
+    LogWarn('AddUserToGroupViaADSI: add reported failure for group=' + GroupName + ' user=' + UserName + ' but membership is verified; treating as success');
+    Result := True;
+    ErrorText := '';
   end;
 
   if Result then
@@ -7925,6 +7958,19 @@ var
 begin
   LogEntry('IsValidUsername');
   Result := '';  // Empty string means valid
+
+  // Windows SAM strips leading/trailing spaces when it stores an account name,
+  // so an entry relying on them can never match the stored name later (the
+  // field failure: the group add succeeded but membership verification failed
+  // for "Roblox 9 "). The wizard trims at capture; this guard catches any
+  // caller that does not.
+  if Trim(UserName) <> UserName then
+  begin
+    Result := 'Username cannot begin or end with a space.';
+    LogDebug('IsValidUsername: rejected username with leading/trailing space');
+    LogExit('IsValidUsername');
+    exit;
+  end;
   
   UserName := Trim(UserName);
   Len := Length(UserName);
@@ -8654,6 +8700,7 @@ var
   CreateErr: string;
   GroupErr: string;
   TempPw: string;
+  AccountRemoved: Boolean;
 begin
   LogEntry('CreateRDPUsers');
   // Make sure the one-shot capability probe has run (it also runs during
@@ -8717,6 +8764,7 @@ begin
     UserCreatePath := 'ADSI';
     LogPasswordPipeline('CREATE_FLOW_INPUT', UserName, Password);
     FailureReason := '';
+    AccountRemoved := False;
 
     // PRIMARY PATH: create (or reset) the account through the WinNT ADSI provider.
     // ADSI does not depend on Microsoft.PowerShell.LocalAccounts (Get-LocalUser /
@@ -8813,10 +8861,33 @@ begin
         LogError('ERROR: Could not add ' + UserName + ' to ' + GroupAdministratorsName + ': ' + GroupErr);
         if FailureReason = '' then
           FailureReason := 'the account could not be added to ' + GroupAdministratorsName + ' (' + GroupErr + ')';
+
+        // Containment: the account now holds a password the user knows but is not
+        // authorised for RDP. Remove it; if removal fails, disable it so it can
+        // never be used to log on (same policy as the credential-failure path).
+        if UserExistsLocal(UserName) then
+        begin
+          WriteInstallerLog('WARNING: Removing the unauthorised account ' + UserName + ' (known password, no RDP authorisation)');
+          if DeleteLocalUserViaADSI(UserName, CreateErr) then
+          begin
+            AccountRemoved := True;
+            FailureReason := FailureReason + ' (the unauthorised account was removed)';
+            WriteInstallerLog('WARNING: Account ' + UserName + ' was removed because RDP authorisation could not be established');
+          end
+          else
+          begin
+            WriteInstallerLog('ERROR: Could not remove account ' + UserName + ' (' + CreateErr + '); disabling it instead');
+            DisableLocalUserAccount(UserName);
+            FailureReason := FailureReason + ' (the leftover account was disabled, but it still exists)';
+          end;
+        end;
       end;
 
       // --- Remote Desktop Users (only when this edition actually has the group) --
-      if RDPGroupPresenceKnown and (not RDPGroupPresent) then
+      // Skipped when containment above already removed the unauthorised account.
+      if AccountRemoved then
+        WriteInstallerLog('INFO: Remote Desktop Users membership skipped for ' + UserName + ' (the unauthorised account was removed)')
+      else if RDPGroupPresenceKnown and (not RDPGroupPresent) then
         WriteInstallerLog('INFO: Remote Desktop Users group does not exist on this system; skipping that membership for ' + UserName)
       else
       begin
@@ -12411,7 +12482,10 @@ begin
       exit;
     end;
     
-    UserName := UserPage.Values[0];
+    // Trim once at capture so the value stored in UsersList matches the canonical
+    // name Windows will store; a trailing space made group-membership verification
+    // fail in the field (RDPWrapKit_install_20261115-161928.log).
+    UserName := Trim(UserPage.Values[0]);
     Password := UserPage.Values[1];
     
     // Check if user selected "I'm done creating users"
