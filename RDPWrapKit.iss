@@ -676,6 +676,7 @@ const
   URL_BSGH_COMMUNITY = 'https://discord.gg/bsgh';
   URL_BSS_GRINDERS = 'https://discord.gg/K5U3RdGXh6';
   URL_PROJECT_HOME = 'https://rdpwrapkit.cpdx4.space';
+  URL_BUG_REPORT = 'https://github.com/cpdx4/RDPWrapKit/issues';
 
   // -------------------------------------------------------------------------
   // INSTALL MODE CONSTANTS
@@ -701,6 +702,10 @@ const
   SIM_SCENARIO_NO_MSTSC =0;
   SIM_SCENARIO_NO_VCREDIST = 0;
   SIM_SCENARIO_NET_FAIL_POWERSHELL = 0;
+  // Forces a fake "user could not be set up" failure so the Finish-page error
+  // dialog (with its Install Log / Bug report links) can be tested without
+  // creating or breaking any real account. Set 1 to enable, 0 to disable.
+  SIM_SCENARIO_USER_CREATE_FAIL = 0;
 
   // Suppress duplicate CurPageChanged log blocks if the same page is raised
   // again within this short interval (UI refresh/re-entry noise).
@@ -3907,6 +3912,13 @@ var
   rc: Integer;
 begin
   ShellExec('', URL_PROJECT_HOME, '', '', SW_SHOWNORMAL, ewNoWait, rc);
+end;
+
+procedure OpenBugReportPage(Sender: TObject);
+var
+  rc: Integer;
+begin
+  ShellExec('', URL_BUG_REPORT, '', '', SW_SHOWNORMAL, ewNoWait, rc);
 end;
 
 // === Utility helpers ========================================================
@@ -7178,25 +7190,26 @@ begin
 end;
 
 
-// Opens Windows Explorer with the install log file selected (reveal-in-Explorer).
+// Reveals the install log in Windows Explorer with the file selected.
 // The log itself stays in its stable location (%ProgramData%\RDPWrapKit\Logs);
-// nothing is copied to the Desktop any more.
-procedure OnViewLogLinkClick(Sender: TObject);
+// nothing is copied to the Desktop any more. Shared by the footer's
+// "Show Install Log" link and the user-creation failure dialog below.
+procedure RevealInstallLog;
 var
-  ResultCode: Integer;
   LogPath: string;
+  ResultCode: Integer;
 begin
-  LogEntry('OnViewLogLinkClick');
+  LogEntry('RevealInstallLog');
   LogPath := InstallLogPath;
   if LogPath = '' then
     LogPath := ExpandConstant(INSTALL_LOG_PATH);
-  WriteInstallerLog('User clicked Show Install Log link (reveal: ' + LogPath + ')');
+  WriteInstallerLog('User requested the install log (reveal: ' + LogPath + ')');
 
   if not FileExists(LogPath) then
   begin
     MsgBox('The install log could not be found at:' + #13#10#13#10 + LogPath,
       mbError, MB_OK);
-    LogExit('OnViewLogLinkClick');
+    LogExit('RevealInstallLog');
     exit;
   end;
 
@@ -7204,14 +7217,139 @@ begin
   if not ShellExec('open', 'explorer.exe', '/select,"' + LogPath + '"', '',
     SW_SHOWNORMAL, ewNoWait, ResultCode) then
   begin
-    LogWarn('OnViewLogLinkClick: ShellExec explorer /select failed');
+    LogWarn('RevealInstallLog: ShellExec explorer /select failed');
     // Fallback: at least show the folder that holds the log.
     if not ShellExec('open', 'explorer.exe', '"' + ExtractFileDir(LogPath) + '"', '',
       SW_SHOWNORMAL, ewNoWait, ResultCode) then
       MsgBox('Failed to open Windows Explorer at:' + #13#10#13#10 + LogPath,
         mbError, MB_OK);
   end;
-  LogExit('OnViewLogLinkClick');
+  LogExit('RevealInstallLog');
+end;
+
+// Footer link handler (thin wrapper so the shared reveal logic stays reusable).
+procedure OnViewLogLinkClick(Sender: TObject);
+begin
+  RevealInstallLog;
+end;
+
+// Modal error dialog shown when one or more user accounts could not be set up.
+// A custom form is used instead of MsgBox because the closing sentence must
+// contain two clickable links: "Install Log" reveals the log in Explorer
+// (identical to the footer's Show Install Log link) and "Bug report" opens the
+// GitHub issues page so the log can be attached to a new report.
+procedure ShowUserCreateFailureDialog(const FailNames: string);
+var
+  DlgForm: TSetupForm;
+  DlgHead: TLabel;
+  DlgBody: TLabel;
+  DlgTailLead, DlgTailMid, DlgTailEnd: TLabel;
+  DlgLogLink, DlgBugLink: TLabel;
+  DlgOkButton: TButton;
+  DlgClientW: Integer;
+  DlgY: Integer;
+begin
+  LogEntry('ShowUserCreateFailureDialog');
+
+  // CreateCustomForm (not TForm.Create) so the dialog inherits the wizard's
+  // dialog font and behaves like a native Setup modal window. The two booleans
+  // disable vertical auto-sizing and keep the dialog non-resizable.
+  DlgClientW := ScaleX(440);
+  DlgForm := CreateCustomForm(DlgClientW, ScaleY(320), False, True);
+  try
+    DlgForm.Caption := 'RDPWrapKit Setup';
+
+    // Heading
+    DlgHead := TLabel.Create(DlgForm);
+    DlgHead.Parent := DlgForm;
+    DlgHead.Left := ScaleX(16);
+    DlgHead.Top := ScaleY(16);
+    DlgHead.Caption := 'Some user accounts could not be set up correctly.';
+    DlgHead.AutoSize := True;
+    DlgHead.Font.Style := [fsBold];
+    DlgY := DlgHead.Top + DlgHead.Height + ScaleY(10);
+
+    // Body: the failed accounts plus the cleanup notice. The width is fixed and
+    // AutoSize is enabled afterwards so only the height grows to fit the wrapped
+    // text (the same technique the Finish page summary label uses).
+    DlgBody := TLabel.Create(DlgForm);
+    DlgBody.Parent := DlgForm;
+    DlgBody.Left := ScaleX(16);
+    DlgBody.Top := DlgY;
+    DlgBody.AutoSize := False;
+    DlgBody.Width := DlgClientW - ScaleX(32);
+    DlgBody.WordWrap := True;
+    DlgBody.Caption := FailNames + #13#10 +
+      'No RDP shortcut was created for these accounts, and anything that could ' +
+      'not be cleaned up was disabled so it cannot be used to sign in.';
+    DlgBody.AutoSize := True;
+    DlgBody.Update;
+    DlgY := DlgBody.Top + DlgBody.Height + ScaleY(14);
+
+    // Closing sentence, assembled from separate labels so "Install Log" and
+    // "Bug report" are real clickable links (same trick as the credits row on
+    // the Setup Options page).
+    DlgTailLead := TLabel.Create(DlgForm);
+    DlgTailLead.Parent := DlgForm;
+    DlgTailLead.Left := ScaleX(16);
+    DlgTailLead.Top := DlgY;
+    DlgTailLead.Caption := 'Please attach the ';
+    DlgTailLead.AutoSize := True;
+
+    DlgLogLink := TLabel.Create(DlgForm);
+    DlgLogLink.Parent := DlgForm;
+    DlgLogLink.Left := DlgTailLead.Left + DlgTailLead.Width;
+    DlgLogLink.Top := DlgY;
+    DlgLogLink.Caption := 'Install Log';
+    DlgLogLink.AutoSize := True;
+    DlgLogLink.Font.Color := clBlue;
+    DlgLogLink.Font.Style := [fsUnderline];
+    DlgLogLink.Cursor := crHand;
+    DlgLogLink.OnClick := @OnViewLogLinkClick;
+
+    DlgTailMid := TLabel.Create(DlgForm);
+    DlgTailMid.Parent := DlgForm;
+    DlgTailMid.Left := DlgLogLink.Left + DlgLogLink.Width;
+    DlgTailMid.Top := DlgY;
+    DlgTailMid.Caption := ' and submit a ';
+    DlgTailMid.AutoSize := True;
+
+    DlgBugLink := TLabel.Create(DlgForm);
+    DlgBugLink.Parent := DlgForm;
+    DlgBugLink.Left := DlgTailMid.Left + DlgTailMid.Width;
+    DlgBugLink.Top := DlgY;
+    DlgBugLink.Caption := 'Bug report';
+    DlgBugLink.AutoSize := True;
+    DlgBugLink.Font.Color := clBlue;
+    DlgBugLink.Font.Style := [fsUnderline];
+    DlgBugLink.Cursor := crHand;
+    DlgBugLink.OnClick := @OpenBugReportPage;
+
+    DlgTailEnd := TLabel.Create(DlgForm);
+    DlgTailEnd.Parent := DlgForm;
+    DlgTailEnd.Left := DlgBugLink.Left + DlgBugLink.Width;
+    DlgTailEnd.Top := DlgY;
+    DlgTailEnd.Caption := '.';
+    DlgTailEnd.AutoSize := True;
+
+    // OK button bottom-right; Enter (Default) and Escape (Cancel) both close it.
+    DlgOkButton := TButton.Create(DlgForm);
+    DlgOkButton.Parent := DlgForm;
+    DlgOkButton.Caption := 'OK';
+    DlgOkButton.Width := ScaleX(88);
+    DlgOkButton.Height := ScaleY(26);
+    DlgOkButton.Left := DlgClientW - ScaleX(16) - DlgOkButton.Width;
+    DlgOkButton.Top := DlgY + ScaleY(24);
+    DlgOkButton.ModalResult := mrOk;
+    DlgOkButton.Default := True;
+    DlgOkButton.Cancel := True;
+
+    DlgForm.ClientHeight := DlgOkButton.Top + DlgOkButton.Height + ScaleY(14);
+    DlgForm.ShowModal;
+  finally
+    DlgForm.Free;
+  end;
+  LogExit('ShowUserCreateFailureDialog');
 end;
 
 procedure OnPasswordResetLinkClick(Sender: TObject);
@@ -8725,6 +8863,20 @@ begin
   // Start overall watchdog timer
   StartTick := GetTickCount;
   LogInfo('Starting CreateRDPUsers for ' + IntToStr(UsersList.Count) + ' users | Timeout=' + IntToStr(USERS_OVERALL_TIMEOUT) + 'ms');
+
+  // Simulation toggle: inject a fake failure so the Finish-page error dialog
+  // (with its Install Log / Bug report links) can be tested without creating
+  // or breaking any real account. No user processing happens in this mode.
+  if SIM_SCENARIO_USER_CREATE_FAIL <> 0 then
+  begin
+    LogSim('User creation fails (fake failure injected for dialog testing)');
+    UserCreateFailures.Add('SimUser|SIMULATION: the account could not be set up completely');
+    LogError('ERROR: User SimUser was NOT set up correctly (SIMULATION)');
+    LogError('CreateRDPUsers finished with ' + IntToStr(UserCreateFailures.Count) + ' failed account(s) and ' +
+      IntToStr(CreatedUsersList.Count) + ' verified account(s)');
+    LogExit('CreateRDPUsers');
+    exit;
+  end;
   
   for i := 0 to UsersList.Count - 1 do
   begin
@@ -14310,11 +14462,7 @@ begin
         ParseUserEntry(UserCreateFailures[i], UserName, Password);
         FailNames := FailNames + '- ' + UserName + ': ' + Password + #13#10;
       end;
-      MsgBox('Some user accounts could not be set up correctly.' + #13#10#13#10 +
-             FailNames + #13#10 +
-             'No RDP shortcut was created for these accounts, and anything that could not be ' + #13#10 +
-             'cleaned up was disabled so it cannot be used to sign in.' + #13#10#13#10 +
-             'Please use "Show Install Log" and re-run the installer after resolving the issue.', mbError, MB_OK);
+      ShowUserCreateFailureDialog(FailNames);
     end;
 
     WizardForm.FinishedLabel.Caption := CompletionText;
