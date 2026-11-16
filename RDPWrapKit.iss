@@ -516,6 +516,12 @@ var
   // names. Temp names used to be constants ({tmp}\psout.txt, {tmp}\psall.txt,
   // {tmp}\cmd_<tag>.log), so any overlap made two helpers fight over one file.
   TempFileSeq: Integer;
+  // True while StopTermService has forced the TermService start type to
+  // Disabled to break a third-party restart loop. Cleared by
+  // StartTermServiceEx, or by DeinitializeSetup when Setup ends before the
+  // service is started again, so a cancelled/failed install can never leave
+  // RDP permanently off.
+  TermServiceStartTypeDisabled: Boolean;
 
 const
   // -------------------------------------------------------------------------
@@ -6008,11 +6014,11 @@ begin
     LogDebug('StopTermService: Attempt ' + IntToStr(Attempt) + '/5');
     WizardForm.Update;
     
-    // The startup type is deliberately left untouched here. The old code set it
-    // to Disabled on every attempt, which left machines with RDP permanently
-    // off whenever an install failed midway - and it is exactly the T1562.001
-    // "impair defences" pattern this refactor removes. Stopping is sufficient
-    // to unload the ServiceDll; StartTermServiceEx re-asserts automatic start.
+    // A plain stop is tried first and the startup type is left untouched,
+    // because writing Disabled on every attempt left machines with RDP
+    // permanently off whenever an install failed midway - and it is exactly the
+    // T1562.001 "impair defences" pattern this refactor removes. Disabled is
+    // used only as the escalation further below, when a stop does not stick.
     SleepWithUI(SLEEP_MEDIUM);
     
     // Stop through the SCM: no process is spawned and no execution policy
@@ -6033,15 +6039,71 @@ begin
     // same check IsTermServiceInstalled and the status page already use.
     ServiceRunning := not SvcWaitForState('TermService', SVC_STATE_STOPPED, SLEEP_LONG);
     LogDebug('Service running=' + BoolToStr(ServiceRunning) + ' after attempt ' + IntToStr(Attempt));
+
+    // Escalation: a plain stop never sticks when something else keeps
+    // (re)starting the service - Razer Cortex's service booster, an antivirus
+    // "self-heal" hook, or a leftover RDP Wrapper autoupdate task. Marking the
+    // service Disabled through the SCM closes that restart path (StartService
+    // then fails with ERROR_SERVICE_DISABLED), so the stop request issued
+    // immediately afterwards takes effect. The start type is put back to
+    // Automatic by StartTermServiceEx - or by DeinitializeSetup if Setup ends
+    // before it gets that far.
+    if ServiceRunning and (not TermServiceStartTypeDisabled) then
+    begin
+      LogWarn('StopTermService: TermService is running again after the stop request - setting start type Disabled, then stopping again');
+      TermServiceStartTypeDisabled := SvcSetStartType('TermService', SERVICE_DISABLED);
+      if TermServiceStartTypeDisabled then
+      begin
+        if not SvcStop('TermService', PS_TIMEOUT_QUERY) then
+        begin
+          LogWarn('StopTermService: SCM stop after Disabled did not confirm, retrying via sc.exe');
+          ResultCode := RunHidden('sc.exe', 'stop TermService');
+          LogDebug('StopTermService: sc.exe stop exit=' + IntToStr(ResultCode));
+        end;
+        ServiceRunning := not SvcWaitForState('TermService', SVC_STATE_STOPPED, SLEEP_LONG);
+        LogDebug('Service running=' + BoolToStr(ServiceRunning) + ' after Disabled+stop');
+      end
+      else
+        LogWarn('StopTermService: could not set TermService start type to Disabled');
+    end;
   end;
   
   if ServiceRunning then
-    LogWarn('Service still running after 5 attempts, proceeding anyway')
+  begin
+    LogWarn('Service still running after 5 attempts, proceeding anyway');
+    // A Disabled start type does not help while the service image is still
+    // loaded, and leaving it behind would keep RDP off after a reboot, so the
+    // configuration is put back before Setup continues.
+    if TermServiceStartTypeDisabled then
+    begin
+      if SvcEnsureAutoStart('TermService') then
+        TermServiceStartTypeDisabled := False
+      else
+        LogWarn('StopTermService: could not restore TermService start type');
+    end;
+  end
   else
     LogInfo('Service verified stopped');
   
   LogInfo('StopTermService completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('StopTermService');
+end;
+
+// Safety net for the Disabled escalation inside StopTermService. Setup can end
+// (user cancel, fatal error, wizard closed) after the service was stopped but
+// before StartTermServiceEx re-asserted the Automatic start type; without this
+// the machine would reboot with the Remote Desktop service disabled. Rewriting
+// the startup type does not start the service.
+procedure DeinitializeSetup;
+begin
+  if TermServiceStartTypeDisabled then
+  begin
+    LogInfo('DeinitializeSetup: restoring TermService start type to Automatic');
+    if SvcEnsureAutoStart('TermService') then
+      TermServiceStartTypeDisabled := False
+    else
+      LogWarn('DeinitializeSetup: could not restore TermService start type');
+  end;
 end;
 
 // Start TermService and set it to Automatic startup, return exit code
@@ -6057,7 +6119,12 @@ begin
   
   LogDebug('Ensuring TermService startup type is Automatic');
   if SvcEnsureAutoStart('TermService') then
-    RC := 0
+  begin
+    // Undo the Disabled escalation StopTermService may have used before the
+    // service is started again.
+    TermServiceStartTypeDisabled := False;
+    RC := 0;
+  end
   else
     RC := 1;
   
