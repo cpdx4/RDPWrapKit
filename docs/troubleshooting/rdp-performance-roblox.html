@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Improving RDP Performance — Roblox Edition | Fix | RDPWrapKit</title>
+    <meta
+      name="description"
+      content="Roblox laggy or low FPS inside RDP? Follow this checklist: performance-first shortcut settings, a stripped-down session, capped FPS in Natro Macro, and the built-in FPS troubleshooter."
+    />
+    <meta name="author" content="cpdx4" />
+    <meta property="og:title" content="Improving RDP Performance — Roblox Edition | Fix | RDPWrapKit" />
+    <meta
+      property="og:description"
+      content="Roblox laggy or low FPS inside RDP? Strip the session down to the bare minimum with this step-by-step checklist."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://rdpwrapkit.cpdx4.space/troubleshooting/rdp-performance-roblox.html" />
+    <meta property="og:site_name" content="RDPWrapKit" />
+    <link rel="canonical" href="https://rdpwrapkit.cpdx4.space/troubleshooting/rdp-performance-roblox.html" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="../favicon.ico" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <nav class="site-nav" aria-label="Main">
+      <div class="container nav-bar">
+        <a class="nav-brand" href="../index.html">
+          <span class="nav-brand-main">RDP</span><span class="nav-brand-accent">WrapKit</span>
+        </a>
+        <div class="nav-links">
+          <a href="../index.html#quickstart">Quick Start</a>
+          <a href="../troubleshooting/" class="active" aria-current="page">Troubleshooting</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="container">
+        <nav class="breadcrumb" aria-label="Breadcrumb">
+          <a href="../index.html">Home</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <a href="../troubleshooting/">Troubleshooting</a>
+          <span class="sep" aria-hidden="true">/</span>
+          <span class="current" aria-current="page">Roblox performance</span>
+        </nav>
+        <h1>Improving RDP performance — Roblox Edition</h1>
+        <p class="lead">If Roblox stutters or crawls inside your RDP, the session is spending its resources on things the game never sees. This checklist strips an RDP session down to the bare minimum — lean shortcut settings, a stripped-down session, a capped FPS, and a hands-off window.</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="container narrow">
+          <h2>Why Roblox lags in RDP</h2>
+          <p class="section-subtitle">Every frame has to share the session with everything else it draws</p>
+          <div class="callout">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>Am I affected?</strong> Roblox runs inside your RDP, but it stutters, drops frames, or feels laggy.</p>
+              <p><strong>Cause:</strong> The RDP session is busy drawing visual effects, launching startup apps, feeding Widgets, and rendering frames nobody is watching.</p>
+              <p><strong>The fix:</strong> Work through the checklist below — performance-first shortcut settings, a bare-bones session, a capped FPS, and a minimized window.</p>
+            </div>
+          </div>
+          <p>Each step removes work the session no longer has to do. The first two are set once in the shortcut itself; the rest are applied inside the session. Do them in order, then play.</p>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Steps 1–2: set the shortcut up for performance</h2>
+          <p class="section-subtitle">Done once on RDPWrapKit's Shortcut Settings page</p>
+          <div class="callout callout-safe">
+            <span class="icon-dot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p><strong>These settings are written into the shortcut file itself.</strong> Set them once and every future connection uses them. Already created your shortcut? Re-run Setup and choose <strong>Edit existing shortcut settings</strong> to change them.</p>
+            </div>
+          </div>
+
+          <ol class="steps">
+            <li>
+              <span class="step-number">01</span>
+              <div class="step-content">
+                <h3>Create the RDP shortcut with the default resolution</h3>
+                <p>Create the RDP shortcut with RDPWrapKit and leave <strong>Window Size</strong> at its default, <strong>1366 x 768</strong>. A smaller window means fewer pixels to push for every frame — the single biggest FPS lever you have.</p>
+                <p class="step-note">Keep <strong>Full Screen</strong> unchecked. Full screen renders at your monitor's native resolution, which is exactly what you don't want here.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div class="step-content">
+                <h3>Set the shortcut's Quality vs Performance options to performance</h3>
+                <p>On the same Shortcut Settings page, click <strong>Quality vs Performance (click to expand)</strong> and uncheck all six checkboxes:</p>
+                <ul>
+                  <li>Desktop wallpaper</li>
+                  <li>Smooth text (ClearType)</li>
+                  <li>Transparent windows & effects</li>
+                  <li>Show window contents while dragging</li>
+                  <li>Animated menus & transitions</li>
+                  <li>Visual themes</li>
+                </ul>
+                <p class="step-note">Unchecked = better performance. Every box you uncheck is one less thing the session has to draw.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Steps 3–8: strip the session while it runs</h2>
+          <p class="section-subtitle">Apply these inside the RDP, before you start playing</p>
+
+          <ol class="steps" start="3">
+            <li>
+              <span class="step-number">03</span>
+              <div class="step-content">
+                <h3>Set Windows' visual appearance to "best performance" in the RDP</h3>
+                <p>Inside the RDP, open <strong>Start</strong> and search for <strong>"Adjust the appearance and performance of Windows"</strong>. Open it, select <strong>Adjust for best performance</strong>, and click <strong>OK</strong>.</p>
+                <p class="step-note">The window is also reachable via <strong>Settings > System > About > Advanced system settings > Performance Settings</strong>.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div class="step-content">
+                <h3>Turn off all startup apps in the RDP</h3>
+                <p>Inside the RDP, open <strong>Task Manager</strong> (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Esc</kbd>), go to <strong>Startup apps</strong>, right-click each app, and choose <strong>Disable</strong>.</p>
+                <p class="step-note"><strong>Restart the RDP session afterwards.</strong> The disable only takes effect after a restart, and that restart is what frees the resources.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">05</span>
+              <div class="step-content">
+                <h3>Turn off Widgets and unnecessary icons on the Taskbar</h3>
+                <p>Inside the RDP, right-click an empty spot on the taskbar and choose <strong>Taskbar settings</strong>. Turn off <strong>Widgets</strong>, then toggle off any taskbar items you don't need (Search, Task view, and similar).</p>
+                <p>Back on the taskbar, right-click any icon you don't use and choose <strong>Unpin from taskbar</strong>.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">06</span>
+              <div class="step-content">
+                <h3>Set Roblox graphics to Manual, 1 — then close it</h3>
+                <p>In Roblox inside the RDP, open the Roblox menu (<kbd>Esc</kbd>), go to <strong>Settings</strong>, set <strong>Graphics Mode</strong> to <strong>Manual</strong>, and drag <strong>Graphics Quality</strong> down to <strong>1</strong>. Then close Roblox completely so the setting saves and it starts clean next time.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">07</span>
+              <div class="step-content">
+                <h3>Set Natro Macro's FPS Editor to 20</h3>
+                <p>Open <strong>Natro Macro</strong> inside the RDP, open the <strong>FPS Editor</strong>, and set it to <strong>20</strong>. Capping the FPS keeps the session from burning CPU on frames you can't see anyway.</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">08</span>
+              <div class="step-content">
+                <h3>Minimize the RDP and don't look at it</h3>
+                <p>While the RDP is running, <strong>minimize the window and leave it alone</strong>. A minimized session skips most of the frame-drawing work, leaving the full budget to Roblox. Resist the urge to click in and watch — let it run in the background.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Step 9: clean up your main PC too</h2>
+          <p class="section-subtitle">The PC you watch the RDP from matters as well</p>
+
+          <ol class="steps" start="9">
+            <li>
+              <span class="step-number">09</span>
+              <div class="step-content">
+                <h3>Turn off startup apps on your main PC</h3>
+                <p>Repeat step 04 on your <strong>main PC</strong>: open <strong>Task Manager</strong>, go to <strong>Startup apps</strong>, and disable what you don't need. This time, keep <strong>Enabled</strong> anything you rely on when your PC starts up.</p>
+                <p class="step-note">Disabled apps aren't removed — anything you disable can still be opened manually whenever you need it.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section section-border">
+        <div class="container narrow">
+          <h2>Still lagging?</h2>
+          <p class="section-subtitle">Run the built-in FPS troubleshooter</p>
+          <p>If things are still lagging after the checklist, run the <strong>RDPWrapKit installer</strong> and choose <strong>Quick Fixes</strong>, then pick <strong>Low FPS and Lag Troubleshooting</strong> and click <strong>Next</strong>. It applies RDP settings that commonly fix low frame rate and lag.</p>
+          <p>When it finishes, <strong>reconnect your RDP session</strong> for the changes to take effect.</p>
+          <div class="cta-row">
+            <a class="btn btn-outline" href="https://github.com/cpdx4/RDPWrapKit/issues" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Open an issue on GitHub
+            </a>
+            <a class="btn btn-solid" href="../troubleshooting/">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              All fixes
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-content">
+        <p>RDPWrapKit ©2026 <span id="year"></span> · Maintained by <a href="https://github.com/cpdx4" target="_blank" rel="noopener noreferrer">cpdx4</a></p>
+        <nav>
+          <a href="https://github.com/cpdx4/RDPWrapKit/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/cpdx4/RDPWrapKit" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-8 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="../script.js"></script>
+  </body>
+</html>
