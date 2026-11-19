@@ -717,7 +717,7 @@ const
 
   // Password pipeline diagnostics (temporary deep debugging)
   PASSWORD_PIPELINE_DIAG = 0;
-  BUILD_FINGERPRINT = '2026-10-31-14-35-44';
+  BUILD_FINGERPRINT = '2026-11-18-17-06-00';
 
 // External Windows API declarations
 
@@ -3014,6 +3014,22 @@ begin
   begin
     LogError('WaitForChildCompletion[' + Tag + ']: the child never reported a PID within ' +
       IntToStr(GetTickCount - StartTick) + 'ms - assuming it failed to start');
+    // Start-failure diagnostics (field log 20261118-201326: every tracked
+    // PowerShell child on one machine reported no PID within 30s while cmd.exe
+    // children ran fine, and the log could not say whether the host died
+    // instantly (AV kill) or was alive but stuck (policy hang)). The process
+    // snapshot answers that question in microseconds, in-process.
+    if (KillImage = '') and (Pos('.ps1', PidPath) > 0) then
+    begin
+      if IsProcessRunningByName('powershell.exe') then
+        LogWarn('WaitForChildCompletion[' + Tag + ']: DIAGNOSTIC - a powershell.exe process IS running ' +
+          'but never reported its PID: the host is alive but stuck (policy/profile hang, ' +
+          'or it is being suspended by security software). Check Event Viewer for PowerShell/AV entries.')
+      else
+        LogWarn('WaitForChildCompletion[' + Tag + ']: DIAGNOSTIC - NO powershell.exe process exists: ' +
+          'the host died before executing any script code (killed on launch by antivirus/EDR, ' +
+          'or the host itself is broken). Check the AV quarantine and Application event log.')
+    end;
     // A host that never reported its PID can still be alive. Terminate it before
     // returning: an orphaned child keeps the helper's output file open, which used
     // to leak into the next query and end in a "file in use" runtime error.
@@ -4899,9 +4915,14 @@ end;
 // RANDOM TEMPORARY PASSWORD
 // -----------------------------------------------------------------------------
 // Replaces the old hard-coded throwaway password. The net.exe fallback needs a
-// short initial password (to dodge the >14 character LM confirmation prompt) but
-// it must never be a constant, otherwise an interrupted run leaves an account
-// with a publicly known password.
+// SHORT initial password: when the password handed to "net user X <pw> /add"
+// is longer than 14 characters, net.exe prints a legacy LM-hash confirmation
+// prompt and waits on stdin - which a hidden child never answers - so the
+// command hangs until the watchdog kills it (field log 20261118-201326:
+// create_ step TIMEOUT after 30000ms with 0 bytes of output, because the
+// prompt text was still sitting in net.exe's unflushed stdout buffer).
+// The password must never be a constant, otherwise an interrupted run leaves
+// an account with a publicly known password.
 function GenerateRandomPassword: string;
 var
   Raw: string;
@@ -4911,13 +4932,25 @@ begin
   // Generated in-process, so no child process is spawned for twelve random
   // characters. Random() is seeded per process by Setup, and the tick count and
   // PID are mixed in because Random alone is predictable across runs.
-  Raw := '';
-  for i := 1 to 8 do
+  // GetProcessIdHex already returns a string; IntToStr() on a string raises
+  // "Runtime error (at ...): Type Mismatch" (field log 20261118-161245, which
+  // died exactly here on the net.exe fallback path). Concatenate directly.
+  Raw := IntToStr(GetTickCount and $FFFF) + GetProcessIdHex;
+  // Pad with random digits up to 8 characters total. The final suffix below
+  // brings the length to 12, safely under the 14-character LM prompt limit.
+  i := 0;
+  while (Length(Raw) < 8) and (i < 16) do
+  begin
     Raw := Raw + IntToStr(Random(10));
-  Raw := Raw + IntToStr(GetTickCount and $FFFF) + IntToStr(GetProcessIdHex);
+    Inc(i);
+  end;
   if Raw = '' then
     Raw := 'Tmp' + IntToStr(GetTickCount and $FFFF);
+  // Truncate defensively: never hand net.exe a throwaway password of 14+ chars
+  if Length(Raw) > 8 then
+    Raw := Copy(Raw, 1, 8);
   // Guarantee complexity so the temporary password satisfies local policy
+  // (digits + lowercase + uppercase + symbol). Total length: 12 characters.
   Result := Raw + 'aA9#';
 end;
 
