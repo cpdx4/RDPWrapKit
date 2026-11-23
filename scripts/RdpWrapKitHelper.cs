@@ -11,6 +11,17 @@
 //   --verify <file> [publisher]  Authenticode publisher validation (WinVerifyTrust)
 //   --list-users <out-file>      enumerate enabled local accounts (NetUserEnum)
 //   --protect <in> <out>         DPAPI-protect a password (ProtectedData/CurrentUser)
+//   --protect-for <user> <in> <out>
+//                                DPAPI-protect under <user>'s own master key
+//                                (LogonUser + impersonation; a blob made by the
+//                                elevated installer's account is undecryptable
+//                                for the interactive user who launches the
+//                                shortcut)
+//   --grant-rdp-right <user>     grant SeRemoteInteractiveLogonRight and clear
+//                                SeDenyRemoteInteractiveLogonRight for <user>
+//                                (fixes "The connection was denied because the
+//                                user account is not authorized for remote
+//                                login", ERROR_LOGON_NOT_GRANTED / 1327)
 //   --help                       usage screen (also -h, -?, /?)
 //
 // The bare-path form is retained so existing callers keep working, and
@@ -23,6 +34,8 @@
 //   3  = Missing required "full address" field in RDP file
 //   4  = Signing failed (CryptSignMessage error)
 //   5  = Internal error / exception
+//   6  = Could not log on as the target user (--protect-for)
+//   7  = DPAPI protection under impersonation failed (--protect-for)
 //   99 = Invalid arguments
 //
 // Build:
@@ -332,6 +345,238 @@ namespace RdpWrapKit
             }
         }
 
+        // ---- Password protection under the target user's own DPAPI key ---------
+        // Invoked as:  RdpWrapKitHelper.exe --protect-for <user> <inPath> <outPath>
+        //
+        // The plain --protect verb runs inside the elevated installer's process
+        // token. When Setup was started with "Run as different user" (the UAC
+        // path this installer explicitly supports and detects), that token
+        // belongs to the ADMINISTRATOR account, so the DPAPI master key is the
+        // administrator's - and the interactive user who later double-clicks the
+        // .rdp shortcut cannot decrypt the "password 51:b:" blob. mstsc then
+        // falls back to a credentials prompt or fails outright.
+        //
+        // This verb logs on as the TARGET user (the password is known: the
+        // installer validated it immediately before), impersonates that logon
+        // session and calls ProtectedData with DataProtectionScope.CurrentUser
+        // inside the impersonated context. The blob is therefore bound to the
+        // target account's master key and decryptable exactly where the
+        // shortcut will be used.
+        // Exit codes: 0 = written, 2 = input missing, 6 = logon failed,
+        //             7 = DPAPI failure under impersonation, 5 = other error.
+        private static int RunProtectSecretForUser(string userName, string inPath, string outPath)
+        {
+            if (string.IsNullOrEmpty(userName))
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: --protect-for requires a user name");
+                return 99;
+            }
+            if (string.IsNullOrEmpty(inPath) || !File.Exists(inPath))
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: Password staging file not found");
+                return 2;
+            }
+            if (string.IsNullOrEmpty(outPath))
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: Missing output path");
+                return 99;
+            }
+
+            // The plaintext password is staged in a file by the installer (never
+            // on a command line), exactly like the plain --protect verb.
+            string password;
+            try
+            {
+                password = File.ReadAllText(inPath);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: could not read the staging file: " + ex.Message);
+                return 2;
+            }
+
+            IntPtr token = IntPtr.Zero;
+            try
+            {
+                // LOGON32_LOGON_INTERACTIVE matches the session type the target
+                // user will use when launching the shortcut, so the profile and
+                // master-key material mstsc relies on are the same ones.
+                if (!LogonUser(userName, null, password, LOGON32_LOGON_INTERACTIVE,
+                        LOGON32_PROVIDER_DEFAULT, out token))
+                {
+                    int logonErr = Marshal.GetLastWin32Error();
+                    Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: could not log on as '" +
+                        userName + "' (Win32 error " + logonErr + ")");
+                    return 6;
+                }
+
+                WindowsImpersonationContext impersonated = null;
+                try
+                {
+                    WindowsIdentity identity = new WindowsIdentity(token);
+                    impersonated = identity.Impersonate();
+
+                    string plaintext = File.ReadAllText(inPath);
+                    byte[] plainBytes = Encoding.Unicode.GetBytes(plaintext);
+                    byte[] protectedBytes = ProtectedData.Protect(
+                        plainBytes, null, DataProtectionScope.CurrentUser);
+
+                    StringBuilder hex = new StringBuilder(protectedBytes.Length * 2);
+                    for (int i = 0; i < protectedBytes.Length; i++)
+                    {
+                        hex.Append(protectedBytes[i].ToString("X2"));
+                    }
+
+                    File.WriteAllText(outPath, hex.ToString());
+                    Console.WriteLine("ENCRYPT|RESULT=OK|USER=" + userName + "|BYTES=" + protectedBytes.Length);
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(PROGRAM_NAME + ": DPAPI protection under '" +
+                        userName + "' failed: " + ex.Message);
+                    return 7;
+                }
+                finally
+                {
+                    if (impersonated != null)
+                        impersonated.Undo();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": password protection failed: " + ex.Message);
+                return 5;
+            }
+            finally
+            {
+                if (token != IntPtr.Zero)
+                    CloseHandle(token);
+            }
+        }
+
+        // ---- SeRemoteInteractiveLogonRight management (--grant-rdp-right) ------
+        // Invoked as:  RdpWrapKitHelper.exe --grant-rdp-right <user>
+        //
+        // Grants SeRemoteInteractiveLogonRight and removes
+        // SeDenyRemoteInteractiveLogonRight for the account. LSA right changes
+        // take effect for NEW logons without a service restart. The caller must
+        // be elevated (the installer always is).
+        // Exit codes: 0 = granted, 1 = resolution/LSA failure, 99 = bad arguments.
+        private static int RunGrantRdpRight(string userName)
+        {
+            if (string.IsNullOrEmpty(userName))
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: --grant-rdp-right requires a user name");
+                return 99;
+            }
+
+            byte[] sid = LookupSidBytes(userName);
+            if (sid == null)
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: could not resolve the SID of '" +
+                    userName + "'");
+                return 1;
+            }
+
+            IntPtr policyHandle = IntPtr.Zero;
+            IntPtr sidPtr = IntPtr.Zero;
+            GCHandle rightsHandle = GCHandle.Alloc(BuildRightArray(RIGHT_REMOTE_INTERACTIVE, null),
+                GCHandleType.Pinned);
+            GCHandle denyHandle = GCHandle.Alloc(BuildRightArray(RIGHT_DENY_REMOTE_INTERACTIVE, null),
+                GCHandleType.Pinned);
+            try
+            {
+                LSA_OBJECT_ATTRIBUTES attrs = new LSA_OBJECT_ATTRIBUTES();
+                attrs.Length = (uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+                int status = LsaOpenPolicy(IntPtr.Zero, ref attrs, LSAD_ACCESS_EXECUTE, out policyHandle);
+                if (status != 0)
+                {
+                    Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: LsaOpenPolicy failed (Win32 error " +
+                        LsaNtStatusToWinError(status) + ")");
+                    return 1;
+                }
+
+                sidPtr = Marshal.AllocHGlobal(sid.Length);
+                Marshal.Copy(sid, 0, sidPtr, sid.Length);
+
+                // 1. Remove the explicit Deny right when present. A Deny beats
+                //    every Allow, so this must happen even when the Allow add
+                //    below succeeds.
+                int removeStatus = LsaRemoveAccountRights(policyHandle, sidPtr, false,
+                    denyHandle.AddrOfPinnedObject(), 1);
+                if (removeStatus == 0)
+                {
+                    Console.WriteLine("RDP_RIGHT|DENY_REMOVED|USER=" + userName);
+                }
+                else
+                {
+                    // STATUS_OBJECT_NAME_NOT_FOUND (0xC0000034) simply means the
+                    // Deny right was never set - that is the normal case.
+                    int removeWin = LsaNtStatusToWinError(removeStatus);
+                    if (removeWin != 1168 && removeWin != 2 && removeWin != 1317)
+                        Console.Error.WriteLine(PROGRAM_NAME + ": WARN: removing the Deny right failed (Win32 error " +
+                            removeWin + "); continuing with the grant");
+                }
+
+                // 2. Grant the Allow right. LsaAddAccountRights is idempotent:
+                //    re-granting an existing right is a no-op, so this is safe on
+                //    systems where the right was already present.
+                int addStatus = LsaAddAccountRights(policyHandle, sidPtr,
+                    rightsHandle.AddrOfPinnedObject(), 1);
+                if (addStatus != 0)
+                {
+                    Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: LsaAddAccountRights failed (Win32 error " +
+                        LsaNtStatusToWinError(addStatus) + ")");
+                    return 1;
+                }
+
+                Console.WriteLine("RDP_RIGHT|GRANTED|USER=" + userName);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(PROGRAM_NAME + ": ERROR: granting the remote logon right failed: " + ex.Message);
+                return 5;
+            }
+            finally
+            {
+                if (rightsHandle.IsAllocated) rightsHandle.Free();
+                if (denyHandle.IsAllocated) denyHandle.Free();
+                if (sidPtr != IntPtr.Zero) Marshal.FreeHGlobal(sidPtr);
+                if (policyHandle != IntPtr.Zero) LsaClose(policyHandle);
+            }
+        }
+
+        // Builds an unmanaged LSA_UNICODE_STRING[] holding the given rights
+        // strings. The returned buffer stays pinned by the caller for the
+        // duration of the LSA call.
+        private static byte[] BuildRightArray(params string[] rights)
+        {
+            // LSA_UNICODE_STRING is 8 bytes (ushort, ushort, pointer - aligned
+            // to 8 on x64); the buffers are appended after the array.
+            int stringBytes = 0;
+            for (int i = 0; i < rights.Length; i++)
+                stringBytes += (rights[i].Length + 1) * 2;
+
+            int structSize = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+            byte[] buffer = new byte[structSize * rights.Length + stringBytes];
+
+            int structOffset = 0;
+            int dataOffset = structSize * rights.Length;
+            for (int i = 0; i < rights.Length; i++)
+            {
+                byte[] text = Encoding.Unicode.GetBytes(rights[i] + "\0");
+                BitConverter.GetBytes((ushort)(text.Length)).CopyTo(buffer, structOffset);
+                BitConverter.GetBytes((ushort)(text.Length)).CopyTo(buffer, structOffset + 2);
+                BitConverter.GetBytes(dataOffset).CopyTo(buffer, structOffset + 4);
+                text.CopyTo(buffer, dataOffset);
+                structOffset += structSize;
+                dataOffset += text.Length;
+            }
+            return buffer;
+        }
+
         // ---- Publisher verification (--verify) ------------------------------
         // Invoked as:  RdpWrapKitHelper.exe --verify <file> [expectedSubjectSubstring]
         // This exists so the installer can validate a downloaded binary's
@@ -544,6 +789,73 @@ namespace RdpWrapKit
         private static extern bool LookupAccountName(string systemName, string accountName,
             IntPtr sid, ref uint cbSid, StringBuilder referencedDomainName,
             ref uint cbReferencedDomainName, out uint peUse);
+
+        // Logon + impersonation primitives for --protect-for. The password is
+        // passed in memory (never on a command line) exactly as ProtectedData
+        // needs it.
+        private const int LOGON32_LOGON_INTERACTIVE = 2;
+        private const int LOGON32_PROVIDER_DEFAULT = 0;
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool LogonUser(string userName, string domain, string password,
+            int logonType, int logonProvider, out IntPtr token);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        // Well-known LSA right names (English on every locale; the LSA stores
+        // these programmatic names untranslated).
+        private const string RIGHT_REMOTE_INTERACTIVE = "SeRemoteInteractiveLogonRight";
+        private const string RIGHT_DENY_REMOTE_INTERACTIVE = "SeDenyRemoteInteractiveLogonRight";
+
+        // ---- Remote-interactive logon right management (--grant-rdp-right) ------
+        // Group membership alone does not authorise an RDP logon: the LSA also
+        // enforces SeRemoteInteractiveLogonRight (and its Deny twin). Machines
+        // hardened by policy (or by an earlier tool) can hold an explicit Deny or
+        // a restrictively small Allow list, which surfaces to the client as
+        // "The connection was denied because the user account is not authorized
+        // for remote login." (ERROR_LOGON_NOT_GRANTED, 1327) even though the
+        // account is in Administrators and its password validates.
+        private const uint LSAD_ACCESS_EXECUTE = 0x00000200;   // POLICY_EXECUTE
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES attrs,
+            uint desiredAccess, out IntPtr policyHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int LsaAddAccountRights(IntPtr policyHandle, IntPtr accountSid,
+            IntPtr userRights, uint countOfRights);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int LsaRemoveAccountRights(IntPtr policyHandle, IntPtr accountSid,
+            bool allRights, IntPtr userRights, uint countOfRights);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int LsaClose(IntPtr objectHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int LsaNtStatusToWinError(int status);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_OBJECT_ATTRIBUTES
+        {
+            public uint Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        // LsaAddAccountRights/LsaRemoveAccountRights take an LSA_UNICODE_STRING
+        // array; the strings live in unmanaged memory for the duration of the call.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct LSA_UNICODE_STRING
+        {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
 
         private static int RunListUsers(string outPath)
         {
@@ -820,11 +1132,18 @@ namespace RdpWrapKit
             writer.WriteLine("  " + PROGRAM_NAME + ".exe --protect <plain-file> <out-file>");
             writer.WriteLine("      DPAPI-protect a password for an .rdp file.");
             writer.WriteLine("      --encrypt-password is accepted as the legacy alias.");
+            writer.WriteLine("  " + PROGRAM_NAME + ".exe --protect-for <user> <plain-file> <out-file>");
+            writer.WriteLine("      DPAPI-protect under <user>'s own master key (logon + impersonation).");
+            writer.WriteLine("  " + PROGRAM_NAME + ".exe --grant-rdp-right <user>");
+            writer.WriteLine("      Grant SeRemoteInteractiveLogonRight / clear the Deny twin for <user>.");
             writer.WriteLine("  " + PROGRAM_NAME + ".exe --help");
             writer.WriteLine("      Show this screen.");
             writer.WriteLine();
             writer.WriteLine("Exit codes: 0 ok, 1 certificate/verify/resolve failure, 2 file missing,");
-            writer.WriteLine("            3 bad RDP field, 4 signing failed, 5 exception, 99 bad arguments.");
+            writer.WriteLine("            3 bad RDP field, 4 signing failed, 5 exception,");
+            writer.WriteLine("            6 target-user logon failed (--protect-for),");
+            writer.WriteLine("            7 DPAPI under impersonation failed (--protect-for),");
+            writer.WriteLine("            99 bad arguments.");
         }
 
         private static int Main(string[] args)
@@ -847,6 +1166,22 @@ namespace RdpWrapKit
                     string plainPath = args.Length >= 2 ? args[1].Trim('"') : "";
                     string encPath = args.Length >= 3 ? args[2].Trim('"') : "";
                     return RunProtectSecret(plainPath, encPath);
+                }
+
+                if (args.Length >= 1 && IsVerb(args[0], "--protect-for"))
+                {
+                    // --protect-for <user> <in> <out>
+                    string targetUser = args.Length >= 2 ? args[1].Trim('"') : "";
+                    string plainPath2 = args.Length >= 3 ? args[2].Trim('"') : "";
+                    string encPath2 = args.Length >= 4 ? args[3].Trim('"') : "";
+                    return RunProtectSecretForUser(targetUser, plainPath2, encPath2);
+                }
+
+                if (args.Length >= 1 && IsVerb(args[0], "--grant-rdp-right"))
+                {
+                    // --grant-rdp-right <user>
+                    string rightUser = args.Length >= 2 ? args[1].Trim('"') : "";
+                    return RunGrantRdpRight(rightUser);
                 }
 
                 if (args.Length >= 1 && string.Equals(args[0], "--verify", StringComparison.OrdinalIgnoreCase))

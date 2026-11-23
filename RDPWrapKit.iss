@@ -118,6 +118,7 @@ procedure UnSignRdpFile(const RdpPath: string); forward;
 procedure UpdateShortcutPageDisplay; forward;
 function IsValidPassword(const Password: string): String; forward;
 procedure OpenTermWrap(Sender: TObject); forward;
+procedure GrantRdpLogonRight(const UserName: string); forward;
 function ValidateLocalCredential(const UserName, Password: string): Boolean; forward;
 procedure OpenBSGH(Sender: TObject); forward;
 procedure OpenBSSGrinders(Sender: TObject); forward;
@@ -522,6 +523,14 @@ var
   // service is started again, so a cancelled/failed install can never leave
   // RDP permanently off.
   TermServiceStartTypeDisabled: Boolean;
+  // True when StopTermService ended with TermService STILL RUNNING (all five
+  // stop attempts failed). The field log 20261120-134424 shows why this flag
+  // matters: the ServiceDll was rewritten while the OLD wrapper DLL stayed
+  // loaded in svchost, StartTermServiceEx then saw "already running" and
+  // skipped the restart, so the freshly configured TermWrap was never
+  // activated and the machine kept running stale code. StartTermServiceEx
+  // checks this flag and forces a real stop/start cycle in that case.
+  TermServiceStopIncomplete: Boolean;
 
 const
   // -------------------------------------------------------------------------
@@ -6149,6 +6158,10 @@ begin
   if ServiceRunning then
   begin
     LogWarn('Service still running after 5 attempts, proceeding anyway');
+    // Tell StartTermServiceEx that "already running" must not be trusted: the
+    // in-memory image is the OLD ServiceDll, so a real stop/start cycle is
+    // required before the freshly written configuration takes effect.
+    TermServiceStopIncomplete := True;
     // A Disabled start type does not help while the service image is still
     // loaded, and leaving it behind would keep RDP off after a reboot, so the
     // configuration is put back before Setup continues.
@@ -6161,7 +6174,10 @@ begin
     end;
   end
   else
+  begin
     LogInfo('Service verified stopped');
+    TermServiceStopIncomplete := False;
+  end;
   
   LogInfo('StopTermService completed [DURATION:' + IntToStr(GetTickCount - OpTick) + 'ms]');
   LogExit('StopTermService');
@@ -6205,6 +6221,28 @@ begin
   end
   else
     RC := 1;
+
+  // StopTermService can end with the service still running (all five attempts
+  // blocked by a third-party restarter). The registry ServiceDll was rewritten
+  // AFTER that, so the in-memory image is stale: trusting "already running"
+  // here leaves the old wrapper active and the new configuration dormant -
+  // exactly the 20261120-134424 field log. Force a real stop/start cycle when
+  // that flag is set.
+  if TermServiceStopIncomplete and (not SvcStop('TermService', PS_TIMEOUT_QUERY)) then
+  begin
+    LogWarn('StartTermServiceEx: forced pre-start stop did not confirm, retrying via sc.exe');
+    RunHidden('sc.exe', 'stop TermService');
+  end;
+  if TermServiceStopIncomplete then
+  begin
+    // The stop is asynchronous; give the SCM time to settle before starting.
+    SleepWithUI(SLEEP_LONG);
+    if SvcWaitForState('TermService', SVC_STATE_STOPPED, SLEEP_LONG) then
+      LogInfo('StartTermServiceEx: stale service image unloaded (forced stop succeeded)')
+    else
+      LogWarn('StartTermServiceEx: forced pre-start stop did not reach STOPPED; continuing');
+    TermServiceStopIncomplete := False;
+  end;
   
   SleepWithUI(SLEEP_MEDIUM);
   LogDebug('Executing SCM start for TermService');
@@ -8372,6 +8410,7 @@ var
   PlainPath: string;
   ExePath: string;
   OpTick: Cardinal;
+  ProtectArgs: string;
 begin
   LogEntry('EncryptPasswordToFile');
   OpTick := GetTickCount;
@@ -8389,8 +8428,26 @@ begin
   else
   begin
     try
-      ResultCode := RunCmdCapture('"' + ExePath + '" --protect "' +
-        PlainPath + '" "' + EncPath + '"', 'protect_' + UserName);
+      // --protect-for impersonates the TARGET account before calling DPAPI, so
+      // the "password 51:b:" blob is bound to the target user's master key.
+      // The plain --protect verb binds the blob to whoever runs the installer
+      // (an elevated ADMINISTRATOR when Setup was launched with "Run as
+      // different user"), and the interactive user who double-clicks the
+      // shortcut then cannot decrypt it - mstsc falls back to a credentials
+      // prompt or fails the logon. The password was validated for this exact
+      // account immediately before (ValidateLocalCredential), so the LogonUser
+      // inside the helper succeeds in the normal path.
+      ProtectArgs := '--protect-for "' + UserName + '" "' + PlainPath + '" "' + EncPath + '"';
+      ResultCode := RunCmdCapture('"' + ExePath + '" ' + ProtectArgs, 'protect_' + UserName);
+      if ResultCode <> 0 then
+      begin
+        // Fallback for older helper builds without --protect-for: the legacy
+        // blob still works whenever Setup runs under the SAME account that
+        // will use the shortcut (the common single-admin case).
+        LogWarn('EncryptPasswordToFile: --protect-for failed (exit=' + IntToStr(ResultCode) + '); retrying with the legacy --protect verb');
+        ResultCode := RunCmdCapture('"' + ExePath + '" --protect "' +
+          PlainPath + '" "' + EncPath + '"', 'protect_legacy_' + UserName);
+      end;
     finally
       // The plaintext staging file must never outlive this call.
       DeleteFile(PlainPath);
@@ -8412,6 +8469,59 @@ begin
     Result := '';
   end;
   LogExit('EncryptPasswordToFile');
+end;
+
+// Grant SeRemoteInteractiveLogonRight (and clear the Deny twin) for an account
+// through the helper's --grant-rdp-right verb.
+//
+// WHY THIS EXISTS: group membership does NOT authorise a Remote Interactive
+// logon. The LSA enforces SeRemoteInteractiveLogonRight separately, and a
+// machine whose policy holds an explicit SeDenyRemoteInteractiveLogonRight or
+// a restricted Allow list rejects the session with exactly the error users
+// reported: "The connection was denied because the user account is not
+// authorized for remote login" (ERROR_LOGON_NOT_GRANTED / 1327) - while
+// net.exe membership checks and LogonUser both still pass. The field logs
+// (20261120/20261121) show precisely that combination: Administrators
+// membership verified, credential verified, then the denial at connect time.
+// The LSA right is the missing third leg, and nothing in the installer set it.
+procedure GrantRdpLogonRight(const UserName: string);
+var
+  ExePath: string;
+  ResultCode: Integer;
+begin
+  LogEntry('GrantRdpLogonRight');
+  if UserName = '' then
+  begin
+    LogExit('GrantRdpLogonRight');
+    exit;
+  end;
+
+  ExePath := ExpandConstant('{tmp}\' + HELPER_EXE);
+  if not FileExists(ExePath) then
+  begin
+    LogWarn('GrantRdpLogonRight: ' + HELPER_EXE + ' missing at ' + ExePath + '; the remote logon right was not touched');
+    LogExit('GrantRdpLogonRight');
+    exit;
+  end;
+
+  ResultCode := RunCmdCapture('"' + ExePath + '" --grant-rdp-right "' + UserName + '"',
+    'grdp_' + UserName);
+
+  if ResultCode = 0 then
+  begin
+    LogInfo('GrantRdpLogonRight: SeRemoteInteractiveLogonRight granted for ' + UserName + ' (Deny right cleared when present)');
+    LogAudit('account-change', 'grant-logon-right', UserName, 'granted', 'required-rdp-authorisation');
+  end
+  else
+  begin
+    // Non-fatal: on a default machine the right is already inherited through
+    // Administrators/Everyone, so a failure here only matters on hardened
+    // systems - but it must be visible in the log when it does.
+    LogWarn('GrantRdpLogonRight: helper exit=' + IntToStr(ResultCode) + ' for ' + UserName +
+      ' (non-fatal; the right is normally inherited through group membership)');
+    LogAudit('account-change', 'grant-logon-right', UserName, 'failed', 'required-rdp-authorisation');
+  end;
+  LogExit('GrantRdpLogonRight');
 end;
 
 // Read experience / performance checkboxes into RDP key integer values.
@@ -9084,6 +9194,16 @@ begin
             ' (Administrators membership already grants RDP access)');
       end;
 
+      // --- LSA remote-interactive logon right ---------------------------------
+      // Group membership is necessary but NOT sufficient: the LSA enforces
+      // SeRemoteInteractiveLogonRight independently, and an explicit
+      // SeDenyRemoteInteractiveLogonRight (policy-hardened machines) rejects
+      // the session with "The connection was denied because the user account
+      // is not authorized for remote login" even though every membership and
+      // credential check passed. Granting the right (and clearing the Deny
+      // twin) closes that gap for the account we just authorised.
+      GrantRdpLogonRight(UserName);
+
       // --- RDP shortcut: created only for an account that is verified usable ----
       if FailureReason = '' then
       begin
@@ -9182,6 +9302,13 @@ begin
     end
     else
     begin
+      // The LSA remote-interactive logon right is enforced independently of
+      // group membership; existing accounts on a hardened machine can hold an
+      // explicit Deny that produces "The connection was denied because the
+      // user account is not authorized for remote login". Granting here keeps
+      // the existing-users flow at parity with the create-new-user flow.
+      GrantRdpLogonRight(UserName);
+
       // Create RDP shortcut using helper function
       CreateRDPShortcut(UserName, Password, 'EXISTING_USER');
       LogDebug('Created shortcut for ' + UserName + ' [DURATION:' + IntToStr(GetTickCount - UserStartTick) + 'ms]');
